@@ -439,16 +439,26 @@ def parse_context_limit_from_error(error_msg: str) -> Optional[int]:
     return None
 
 
-def get_model_context_length(model: str, base_url: str = "", api_key: str = "") -> int:
+def get_model_context_length(
+    model: str,
+    base_url: str = "",
+    api_key: str = "",
+    config_context_length: int | None = None,
+) -> int:
     """Get the context length for a model.
 
     Resolution order:
+    0. Explicit config override (model.context_length in config.yaml)
     1. Persistent cache (previously discovered via probing)
     2. Active endpoint metadata (/models for explicit custom endpoints)
     3. OpenRouter API metadata
     4. Hardcoded DEFAULT_CONTEXT_LENGTHS (fuzzy match for hosted routes only)
     5. First probe tier (2M) — will be narrowed on first context error
     """
+    # 0. Explicit config override — user knows best
+    if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
+        return config_context_length
+
     # 1. Check persistent cache (model+provider)
     if base_url:
         cached = get_cached_context_length(model, base_url)
@@ -458,13 +468,30 @@ def get_model_context_length(model: str, base_url: str = "", api_key: str = "") 
     # 2. Active endpoint metadata for explicit custom routes
     if _is_custom_endpoint(base_url):
         endpoint_metadata = fetch_endpoint_model_metadata(base_url, api_key=api_key)
-        if model in endpoint_metadata:
-            context_length = endpoint_metadata[model].get("context_length")
+        matched = endpoint_metadata.get(model)
+        if not matched:
+            # Single-model servers: if only one model is loaded, use it
+            if len(endpoint_metadata) == 1:
+                matched = next(iter(endpoint_metadata.values()))
+            else:
+                # Fuzzy match: substring in either direction
+                for key, entry in endpoint_metadata.items():
+                    if model in key or key in model:
+                        matched = entry
+                        break
+        if matched:
+            context_length = matched.get("context_length")
             if isinstance(context_length, int):
                 return context_length
         if not _is_known_provider_base_url(base_url):
             # Explicit third-party endpoints should not borrow fuzzy global
             # defaults from unrelated providers with similarly named models.
+            logger.info(
+                "Could not detect context length for model %r at %s — "
+                "defaulting to %s tokens (probe-down). Set model.context_length "
+                "in config.yaml to override.",
+                model, base_url, f"{CONTEXT_PROBE_TIERS[0]:,}",
+            )
             return CONTEXT_PROBE_TIERS[0]
 
     # 3. OpenRouter API metadata
