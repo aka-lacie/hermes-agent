@@ -3189,6 +3189,17 @@ SETUP_SECTIONS = [
     ("agent", "Agent Settings", setup_agent_settings),
 ]
 
+# The returning-user menu intentionally omits standalone TTS because model setup
+# already includes TTS selection and tools setup covers the rest of the provider
+# configuration. Keep this list in the same order as the visible menu entries.
+RETURNING_USER_MENU_SECTION_KEYS = [
+    "model",
+    "terminal",
+    "gateway",
+    "tools",
+    "agent",
+]
+
 
 def run_setup_wizard(args):
     """Run the interactive setup wizard.
@@ -3331,8 +3342,10 @@ def run_setup_wizard(args):
             return
         elif 3 <= choice <= 7:
             # Individual section
-            section_idx = choice - 3
-            _, label, func = SETUP_SECTIONS[section_idx]
+            section_key = RETURNING_USER_MENU_SECTION_KEYS[choice - 3]
+            _, label, func = next(
+                (section for section in SETUP_SECTIONS if section[0] == section_key)
+            )
             func(config)
             save_config(config)
             _print_setup_summary(config, hermes_home)
