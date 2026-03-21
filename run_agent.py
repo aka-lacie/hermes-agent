@@ -41,7 +41,10 @@ from types import SimpleNamespace
 import uuid
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
-import fire
+try:
+    import fire
+except ImportError:  # pragma: no cover - optional for library/test imports
+    fire = None
 from datetime import datetime
 from pathlib import Path
 
@@ -76,6 +79,7 @@ from hermes_constants import OPENROUTER_BASE_URL, OPENROUTER_MODELS_URL
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    build_nous_subscription_prompt,
 )
 from agent.model_metadata import (
     fetch_model_metadata, get_model_context_length,
@@ -2234,6 +2238,10 @@ class AIAgent:
             tool_guidance.append(SKILLS_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
+
+        nous_subscription_prompt = build_nous_subscription_prompt(self.valid_tool_names)
+        if nous_subscription_prompt:
+            prompt_parts.append(nous_subscription_prompt)
 
         # Honcho CLI awareness: tell Hermes about its own management commands
         # so it can refer the user to them rather than reinventing answers.

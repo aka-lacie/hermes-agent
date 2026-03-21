@@ -15,6 +15,7 @@ from agent.prompt_builder import (
     _find_git_root,
     _strip_yaml_frontmatter,
     build_skills_system_prompt,
+    build_nous_subscription_prompt,
     build_context_files_prompt,
     CONTEXT_FILE_MAX_CHARS,
     DEFAULT_AGENT_IDENTITY,
@@ -22,6 +23,7 @@ from agent.prompt_builder import (
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
 )
+from hermes_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatures
 
 
 # =========================================================================
@@ -393,6 +395,53 @@ class TestBuildSkillsSystemPrompt:
 
         result = build_skills_system_prompt()
         assert "backend-skill" in result
+
+
+class TestBuildNousSubscriptionPrompt:
+    def test_includes_active_subscription_features(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.nous_subscription.get_nous_subscription_features",
+            lambda config=None: NousSubscriptionFeatures(
+                subscribed=True,
+                nous_auth_present=True,
+                provider_is_nous=True,
+                features={
+                    "web": NousFeatureState("web", "Web tools", True, True, True, True, False, True, "firecrawl"),
+                    "image_gen": NousFeatureState("image_gen", "Image generation", True, True, True, True, False, True, "Nous Subscription"),
+                    "tts": NousFeatureState("tts", "OpenAI TTS", True, True, True, True, False, True, "OpenAI TTS"),
+                    "browser": NousFeatureState("browser", "Browser automation", True, True, True, True, False, True, "Browserbase"),
+                    "modal": NousFeatureState("modal", "Modal execution", False, True, False, False, False, True, "local"),
+                },
+            ),
+        )
+
+        prompt = build_nous_subscription_prompt({"web_search", "browser_navigate"})
+
+        assert "Browserbase" in prompt
+        assert "Modal execution is optional" in prompt
+        assert "do not ask the user for Firecrawl, FAL, OpenAI TTS, or Browserbase API keys" in prompt
+
+    def test_non_subscriber_prompt_includes_relevant_upgrade_guidance(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.nous_subscription.get_nous_subscription_features",
+            lambda config=None: NousSubscriptionFeatures(
+                subscribed=False,
+                nous_auth_present=False,
+                provider_is_nous=False,
+                features={
+                    "web": NousFeatureState("web", "Web tools", True, False, False, False, False, True, ""),
+                    "image_gen": NousFeatureState("image_gen", "Image generation", True, False, False, False, False, True, ""),
+                    "tts": NousFeatureState("tts", "OpenAI TTS", True, False, False, False, False, True, ""),
+                    "browser": NousFeatureState("browser", "Browser automation", True, False, False, False, False, True, ""),
+                    "modal": NousFeatureState("modal", "Modal execution", False, False, False, False, False, True, ""),
+                },
+            ),
+        )
+
+        prompt = build_nous_subscription_prompt({"image_generate"})
+
+        assert "suggest Nous subscription as one option" in prompt
+        assert "Do not mention subscription unless" in prompt
 
 
 # =========================================================================

@@ -77,9 +77,10 @@ def _install_fake_openai_module(captured, transcription_response=None):
             captured["stream_to_file"] = output_path
 
     class FakeOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, **kwargs):
             captured["api_key"] = api_key
             captured["base_url"] = base_url
+            captured["client_kwargs"] = kwargs
 
             def create_speech(**kwargs):
                 captured["speech_kwargs"] = kwargs
@@ -159,6 +160,8 @@ def test_transcription_uses_model_specific_response_formats(monkeypatch, tmp_pat
     whisper_capture = {}
     _install_fake_tools_package()
     _install_fake_openai_module(whisper_capture, transcription_response="hello from whisper")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("stt:\n  provider: openai\n")
     monkeypatch.delenv("VOICE_TOOLS_OPENAI_KEY", raising=False)
     monkeypatch.setenv("TOOL_GATEWAY_DOMAIN", "nousresearch.com")
     monkeypatch.setenv("TOOL_GATEWAY_USER_TOKEN", "nous-token")
@@ -167,6 +170,7 @@ def test_transcription_uses_model_specific_response_formats(monkeypatch, tmp_pat
         "tools.transcription_tools",
         "transcription_tools.py",
     )
+    transcription_tools._load_stt_config = lambda: {"provider": "openai"}
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"RIFF0000WAVEfmt ")
 

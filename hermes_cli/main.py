@@ -997,6 +997,7 @@ def _model_flow_nous(config, current_model="", args=None):
         _login_nous, PROVIDER_REGISTRY,
     )
     from hermes_cli.config import get_env_value, save_env_value
+    from hermes_cli.nous_subscription import get_nous_subscription_explainer_lines
     import argparse
 
     state = get_provider_auth_state("nous")
@@ -1015,6 +1016,9 @@ def _model_flow_nous(config, current_model="", args=None):
                 insecure=bool(getattr(args, "insecure", False)),
             )
             _login_nous(mock_args, PROVIDER_REGISTRY["nous"])
+            print()
+            for line in get_nous_subscription_explainer_lines():
+                print(line)
         except SystemExit:
             print("Login cancelled or failed.")
             return
@@ -1066,6 +1070,9 @@ def _model_flow_nous(config, current_model="", args=None):
             save_env_value("OPENAI_BASE_URL", "")
             save_env_value("OPENAI_API_KEY", "")
         print(f"Default model set to: {selected} (via Nous Portal)")
+        print()
+        for line in get_nous_subscription_explainer_lines():
+            print(line)
     else:
         print("No change.")
 

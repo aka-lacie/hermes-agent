@@ -42,8 +42,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 import importlib.util as _ilu
-_HAS_FASTER_WHISPER = _ilu.find_spec("faster_whisper") is not None
-_HAS_OPENAI = _ilu.find_spec("openai") is not None
+
+
+def _safe_find_spec(module_name: str) -> bool:
+    try:
+        return _ilu.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return module_name in globals() or module_name in os.sys.modules
+
+
+_HAS_FASTER_WHISPER = _safe_find_spec("faster_whisper")
+_HAS_OPENAI = _safe_find_spec("openai")
 
 # ---------------------------------------------------------------------------
 # Constants

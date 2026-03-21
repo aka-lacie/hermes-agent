@@ -451,7 +451,10 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text as _RichText
 
-import fire
+try:
+    import fire
+except ImportError:  # pragma: no cover - optional for imports in tests/library mode
+    fire = None
 
 # Import the agent and tool systems
 from run_agent import AIAgent

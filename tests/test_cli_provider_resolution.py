@@ -78,6 +78,13 @@ def _install_prompt_toolkit_stubs():
 
 
 def _import_cli():
+    for name in list(sys.modules):
+        if name == "cli" or name == "run_agent" or name == "tools" or name.startswith("tools."):
+            sys.modules.pop(name, None)
+
+    if "firecrawl" not in sys.modules:
+        sys.modules["firecrawl"] = types.SimpleNamespace(Firecrawl=object)
+
     try:
         importlib.import_module("prompt_toolkit")
     except ModuleNotFoundError:
@@ -267,6 +274,44 @@ def test_codex_provider_replaces_incompatible_default_model(monkeypatch):
     assert "anthropic" not in shell.model
     assert "claude" not in shell.model
     assert shell.model == "gpt-5.2-codex"
+
+
+def test_model_flow_nous_prints_subscription_guidance_without_mutating_tools(monkeypatch, capsys):
+    config = {
+        "model": {"provider": "nous", "default": "claude-opus-4-6"},
+        "tts": {"provider": "elevenlabs"},
+        "browser": {"cloud_provider": "browser-use"},
+    }
+
+    monkeypatch.setattr(
+        "hermes_cli.auth.get_provider_auth_state",
+        lambda provider: {"access_token": "nous-token"},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_nous_runtime_credentials",
+        lambda *args, **kwargs: {
+            "base_url": "https://inference.example.com/v1",
+            "api_key": "nous-key",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.fetch_nous_models",
+        lambda *args, **kwargs: ["claude-opus-4-6"],
+    )
+    monkeypatch.setattr("hermes_cli.auth._prompt_model_selection", lambda model_ids, current_model="": "claude-opus-4-6")
+    monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda model: None)
+    monkeypatch.setattr("hermes_cli.auth._update_config_for_provider", lambda provider, url: None)
+    monkeypatch.setattr(
+        "hermes_cli.nous_subscription.get_nous_subscription_explainer_lines",
+        lambda: ["Nous subscription enables managed web tools."],
+    )
+
+    hermes_main._model_flow_nous(config, current_model="claude-opus-4-6")
+
+    out = capsys.readouterr().out
+    assert "Nous subscription enables managed web tools." in out
+    assert config["tts"]["provider"] == "elevenlabs"
+    assert config["browser"]["cloud_provider"] == "browser-use"
 
 
 def test_codex_provider_uses_config_model(monkeypatch):
