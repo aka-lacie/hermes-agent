@@ -314,11 +314,35 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
-    # --- Non-Telegram platforms ---
+    # --- Discord: special handling for media attachments ---
+    # mirrors the gateway path: send text first, then deliver each media item separately
+    # so audio can take the voice-message path with attachment fallback.
+    if platform == Platform.DISCORD:
+        last_result = None
+        for chunk in chunks:
+            if not chunk.strip():
+                continue
+            result = await _send_discord(pconfig.token, chat_id, chunk)
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        for media_item in media_files:
+            result = await _send_discord(
+                pconfig.token,
+                chat_id,
+                "",
+                media_files=[media_item],
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
+
+    # --- Non-Telegram/Discord platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram; "
+                f"send_message MEDIA delivery is currently only supported for telegram and discord; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -326,14 +350,12 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram"
+            "native send_message media delivery is currently only supported for telegram and discord"
         )
 
     last_result = None
     for chunk in chunks:
-        if platform == Platform.DISCORD:
-            result = await _send_discord(pconfig.token, chat_id, chunk)
-        elif platform == Platform.SLACK:
+        if platform == Platform.SLACK:
             result = await _send_slack(pconfig.token, chat_id, chunk)
         elif platform == Platform.WHATSAPP:
             result = await _send_whatsapp(pconfig.extra, chat_id, chunk)
@@ -478,27 +500,146 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         return {"error": f"Telegram send failed: {e}"}
 
 
-async def _send_discord(token, chat_id, message):
+async def _send_discord(token, chat_id, message, media_files=None):
     """Send a single message via Discord REST API (no websocket client needed).
 
     Chunking is handled by _send_to_platform() before this is called.
+    Supports optional media_files as (path, is_voice) tuples.
     """
     try:
         import aiohttp
     except ImportError:
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
-        url = f"https://discord.com/api/v10/channels/{chat_id}/messages"
-        headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
+        media_files = media_files or []
+        if media_files:
+            media_path, _is_voice = media_files[0]
+            ext = os.path.splitext(media_path)[1].lower()
+            if len(media_files) == 1 and ext in _AUDIO_EXTS:
+                voice_result = await _send_discord_voice_message(token, chat_id, media_path)
+                if not voice_result.get("error"):
+                    return voice_result
+                logger.debug("Discord native voice send failed, falling back to attachment: %s", voice_result["error"])
+            data = await _send_discord_attachments(
+                token,
+                chat_id,
+                message,
+                [media_path for media_path, _is_voice in media_files],
+            )
+            if data.get("error"):
+                return data
+            return data
+        else:
+            return await _send_discord_text(token, chat_id, message)
+    except Exception as e:
+        return {"error": f"Discord send failed: {e}"}
+
+
+async def _send_discord_text(token, chat_id, message):
+    """Send a plain text Discord message."""
+    import aiohttp
+
+    url = f"https://discord.com/api/v10/channels/{chat_id}/messages"
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json={"content": message}) as resp:
+            if resp.status not in (200, 201):
+                body = await resp.text()
+                return {"error": f"Discord API error ({resp.status}): {body}"}
+            data = await resp.json()
+    return {"success": True, "platform": "discord", "chat_id": chat_id, "message_id": data.get("id")}
+
+
+async def _send_discord_attachments(token, chat_id, message, media_paths):
+    """Send one or more files via Discord multipart upload."""
+    import aiohttp
+
+    url = f"https://discord.com/api/v10/channels/{chat_id}/messages"
+    headers = {"Authorization": f"Bot {token}"}
+    form = aiohttp.FormData()
+    attachments = []
+    for i, fpath in enumerate(media_paths):
+        attachments.append({"id": i, "filename": os.path.basename(fpath)})
+    payload = {"content": message or ""}
+    if attachments:
+        payload["attachments"] = attachments
+    form.add_field("payload_json", json.dumps(payload), content_type="application/json")
+    file_handles = []
+    try:
+        for i, fpath in enumerate(media_paths):
+            fh = open(fpath, "rb")
+            file_handles.append(fh)
+            form.add_field(
+                f"files[{i}]",
+                fh,
+                filename=os.path.basename(fpath),
+                content_type="application/octet-stream",
+            )
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json={"content": message}) as resp:
+            async with session.post(url, headers=headers, data=form) as resp:
                 if resp.status not in (200, 201):
                     body = await resp.text()
                     return {"error": f"Discord API error ({resp.status}): {body}"}
                 data = await resp.json()
-        return {"success": True, "platform": "discord", "chat_id": chat_id, "message_id": data.get("id")}
-    except Exception as e:
-        return {"error": f"Discord send failed: {e}"}
+    finally:
+        for fh in file_handles:
+            fh.close()
+    return {"success": True, "platform": "discord", "chat_id": chat_id, "message_id": data.get("id")}
+
+
+async def _send_discord_voice_message(token, chat_id, audio_path):
+    """Attempt Discord native voice-message delivery before attachment fallback."""
+    import aiohttp
+    import base64
+
+    url = f"https://discord.com/api/v10/channels/{chat_id}/messages"
+    headers = {"Authorization": f"Bot {token}"}
+
+    if not os.path.exists(audio_path):
+        return {"error": f"Audio file not found: {audio_path}"}
+
+    with open(audio_path, "rb") as f:
+        file_data = f.read()
+
+    duration_secs = 5.0
+    try:
+        from mutagen.oggopus import OggOpus
+        info = OggOpus(audio_path)
+        duration_secs = info.info.length
+    except Exception:
+        duration_secs = max(1.0, len(file_data) / 2000.0)
+
+    waveform_bytes = bytes([128] * 256)
+    waveform_b64 = base64.b64encode(waveform_bytes).decode()
+    payload = {
+        "flags": 8192,
+        "attachments": [{
+            "id": "0",
+            "filename": "voice-message.ogg",
+            "duration_secs": round(duration_secs, 2),
+            "waveform": waveform_b64,
+        }],
+    }
+
+    form = aiohttp.FormData()
+    form.add_field("payload_json", json.dumps(payload), content_type="application/json")
+    form.add_field(
+        "files[0]",
+        file_data,
+        filename="voice-message.ogg",
+        content_type="audio/ogg",
+    )
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, data=form) as resp:
+            if resp.status not in (200, 201):
+                body = await resp.text()
+                return {"error": f"Discord API error ({resp.status}): {body}"}
+            data = await resp.json()
+    return {"success": True, "platform": "discord", "chat_id": chat_id, "message_id": data.get("id")}
 
 
 async def _send_slack(token, chat_id, message):

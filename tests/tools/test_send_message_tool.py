@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from gateway.config import Platform
-from tools.send_message_tool import _send_telegram, _send_to_platform, send_message_tool
+from tools.send_message_tool import _send_discord, _send_telegram, _send_to_platform, send_message_tool
 
 
 def _run_async_immediately(coro):
@@ -391,6 +391,97 @@ class TestSendToPlatformChunking:
         assert len(sent_calls) >= 3
         assert all(call == [] for call in sent_calls[:-1])
         assert sent_calls[-1] == media
+
+    def test_discord_sends_text_first_then_media_individually(self):
+        """Discord standalone path mirrors gateway text-first media delivery."""
+        sent_calls = []
+
+        async def fake_send(token, chat_id, message, media_files=None):
+            sent_calls.append((message, media_files or []))
+            return {"success": True, "platform": "discord", "chat_id": chat_id, "message_id": str(len(sent_calls))}
+
+        long_msg = "word " * 1000  # forces multiple Discord chunks
+        media = [("/tmp/voice.ogg", True), ("/tmp/photo.png", False)]
+        with patch("tools.send_message_tool._send_discord", fake_send):
+            asyncio.run(
+                _send_to_platform(
+                    Platform.DISCORD,
+                    SimpleNamespace(enabled=True, token="tok", extra={}),
+                    "123",
+                    long_msg,
+                    media_files=media,
+                )
+            )
+
+        assert len(sent_calls) >= 3
+        assert all(call[1] == [] for call in sent_calls[:-2])
+        assert sent_calls[-2] == ("", [("/tmp/voice.ogg", True)])
+        assert sent_calls[-1] == ("", [("/tmp/photo.png", False)])
+
+
+class TestSendDiscordMediaDelivery:
+    def test_audio_attempts_voice_then_falls_back_to_attachment(self):
+        with patch(
+            "tools.send_message_tool._send_discord_voice_message",
+            new=AsyncMock(return_value={"error": "voice failed"}),
+        ) as voice_mock, patch(
+            "tools.send_message_tool._send_discord_attachments",
+            new=AsyncMock(return_value={"success": True, "platform": "discord", "chat_id": "123", "message_id": "9"}),
+        ) as attachment_mock:
+            result = asyncio.run(
+                _send_discord(
+                    "tok",
+                    "123",
+                    "",
+                    media_files=[("/tmp/voice.ogg", True)],
+                )
+            )
+
+        assert result["success"] is True
+        voice_mock.assert_awaited_once_with("tok", "123", "/tmp/voice.ogg")
+        attachment_mock.assert_awaited_once_with("tok", "123", "", ["/tmp/voice.ogg"])
+
+    def test_audio_voice_success_skips_attachment_fallback(self):
+        with patch(
+            "tools.send_message_tool._send_discord_voice_message",
+            new=AsyncMock(return_value={"success": True, "platform": "discord", "chat_id": "123", "message_id": "7"}),
+        ) as voice_mock, patch(
+            "tools.send_message_tool._send_discord_attachments",
+            new=AsyncMock(),
+        ) as attachment_mock:
+            result = asyncio.run(
+                _send_discord(
+                    "tok",
+                    "123",
+                    "",
+                    media_files=[("/tmp/voice.ogg", True)],
+                )
+            )
+
+        assert result["success"] is True
+        voice_mock.assert_awaited_once_with("tok", "123", "/tmp/voice.ogg")
+        attachment_mock.assert_not_awaited()
+
+    def test_non_audio_uses_attachment_helper_without_voice_attempt(self):
+        with patch(
+            "tools.send_message_tool._send_discord_voice_message",
+            new=AsyncMock(),
+        ) as voice_mock, patch(
+            "tools.send_message_tool._send_discord_attachments",
+            new=AsyncMock(return_value={"success": True, "platform": "discord", "chat_id": "123", "message_id": "5"}),
+        ) as attachment_mock:
+            result = asyncio.run(
+                _send_discord(
+                    "tok",
+                    "123",
+                    "",
+                    media_files=[("/tmp/photo.png", False)],
+                )
+            )
+
+        assert result["success"] is True
+        voice_mock.assert_not_awaited()
+        attachment_mock.assert_awaited_once_with("tok", "123", "", ["/tmp/photo.png"])
 
 
 # ---------------------------------------------------------------------------

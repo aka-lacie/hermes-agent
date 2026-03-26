@@ -164,18 +164,31 @@ def _deliver_result(job: dict, content: str) -> None:
         logger.warning("Job '%s': platform '%s' not configured/enabled", job["id"], platform_name)
         return
 
+    # Extract MEDIA:<path> tags from the response so we can send files as
+    # native platform attachments instead of raw text paths.
+    from gateway.platforms.base import BasePlatformAdapter
+
+    media_items, cleaned_content = BasePlatformAdapter.extract_media(content)
+    media_files = []
+    for path, is_voice in media_items:
+        expanded = os.path.expanduser(path)
+        if os.path.isfile(expanded):
+            media_files.append((expanded, is_voice))
+        else:
+            logger.warning("Job '%s': MEDIA path not found, skipping: %s", job["id"], path)
+
     # Wrap the content so the user knows this is a cron delivery and that
     # the interactive agent has no visibility into it.
     task_name = job.get("name", job["id"])
     wrapped = (
         f"Cronjob Response: {task_name}\n"
         f"-------------\n\n"
-        f"{content}\n\n"
+        f"{cleaned_content}\n\n"
         f"Note: The agent cannot see this message, and therefore cannot respond to it."
     )
 
     # Run the async send in a fresh event loop (safe from any thread)
-    coro = _send_to_platform(platform, pconfig, chat_id, wrapped, thread_id=thread_id)
+    coro = _send_to_platform(platform, pconfig, chat_id, wrapped, thread_id=thread_id, media_files=media_files)
     try:
         result = asyncio.run(coro)
     except RuntimeError:
@@ -186,7 +199,7 @@ def _deliver_result(job: dict, content: str) -> None:
         coro.close()
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, wrapped, thread_id=thread_id))
+            future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, wrapped, thread_id=thread_id, media_files=media_files))
             result = future.result(timeout=30)
     except Exception as e:
         logger.error("Job '%s': delivery to %s:%s failed: %s", job["id"], platform_name, chat_id, e)
@@ -261,12 +274,12 @@ def _build_job_prompt(job: dict) -> str:
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
-    
+
     Returns:
         Tuple of (success, full_output_doc, final_response, error_message)
     """
     from run_agent import AIAgent
-    
+
     # Initialize SQLite session store so cron job messages are persisted
     # and discoverable via session_search (same pattern as gateway/run.py).
     _session_db = None
@@ -275,7 +288,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         _session_db = SessionDB()
     except Exception as e:
         logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
-    
+
     job_id = job["id"]
     job_name = job["name"]
     prompt = _build_job_prompt(job)
@@ -410,14 +423,14 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             session_id=_cron_session_id,
             session_db=_session_db,
         )
-        
+
         result = agent.run_conversation(prompt)
-        
+
         final_response = result.get("final_response", "") or ""
         # Use a separate variable for log display; keep final_response clean
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
-        
+
         output = f"""# Cron Job: {job_name}
 
 **Job ID:** {job_id}
@@ -432,14 +445,14 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
 {logged_response}
 """
-        
+
         logger.info("Job '%s' completed successfully", job_name)
         return True, output, final_response, None
-        
+
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.error("Job '%s' failed: %s", job_name, error_msg)
-        
+
         output = f"""# Cron Job: {job_name} (FAILED)
 
 **Job ID:** {job_id}
@@ -485,13 +498,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 def tick(verbose: bool = True) -> int:
     """
     Check and run all due jobs.
-    
+
     Uses a file lock so only one tick runs at a time, even if the gateway's
     in-process ticker and a standalone daemon or manual tick overlap.
-    
+
     Args:
         verbose: Whether to print status messages
-    
+
     Returns:
         Number of jobs executed (0 if another tick is already running)
     """
