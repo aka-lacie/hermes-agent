@@ -283,6 +283,30 @@ class TestDeliverResultWrapping:
         send_mock.assert_called_once()
         assert send_mock.call_args.kwargs["thread_id"] == "17585"
 
+    def test_delivery_preserves_voice_media_metadata(self):
+        """Cron delivery should forward tuple-shaped media items, including is_voice."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        job = {
+            "id": "test-job",
+            "name": "voice-job",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("os.path.isfile", return_value=True), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            _deliver_result(job, "[[audio_as_voice]]\nMEDIA:/tmp/voice.ogg")
+
+        send_mock.assert_called_once()
+        assert send_mock.call_args.kwargs["media_files"] == [("/tmp/voice.ogg", True)]
+
 
 class TestRunJobSessionPersistence:
     def test_run_job_passes_session_db_and_cron_platform(self, tmp_path):
