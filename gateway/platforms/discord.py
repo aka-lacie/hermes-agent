@@ -684,17 +684,12 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Add an in-progress reaction for normal Discord message events."""
-        message = event.raw_message
-        if hasattr(message, "add_reaction"):
-            await self._add_reaction(message, "👀")
+        """Disabled — no reaction spam on Discord."""
+        pass
 
     async def on_processing_complete(self, event: MessageEvent, success: bool) -> None:
-        """Swap the in-progress reaction for a final success/failure reaction."""
-        message = event.raw_message
-        if hasattr(message, "add_reaction"):
-            await self._remove_reaction(message, "👀")
-            await self._add_reaction(message, "✅" if success else "❌")
+        """Disabled — no reaction spam on Discord."""
+        pass
     
     async def send(
         self,
@@ -719,6 +714,11 @@ class DiscordAdapter(BasePlatformAdapter):
             # Format and split message if needed
             formatted = self.format_message(content)
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            if len(chunks) > 1:
+                chunks = [
+                    re.sub(r" \((\d+)/(\d+)\)$", "", chunk)
+                    for chunk in chunks
+                ]
             
             message_ids = []
             reference = None

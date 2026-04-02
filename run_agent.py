@@ -2451,7 +2451,7 @@ class AIAgent:
 
         try:
             self._honcho.prefetch_context(self._honcho_session_key, user_message)
-            self._honcho.prefetch_dialectic(self._honcho_session_key, user_message or "What were we working on?")
+            self._honcho.prefetch_dialectic(self._honcho_session_key, "What were we working on or discussing?")
         except Exception as exc:
             logger.debug("Honcho background prefetch failed (non-fatal): %s", exc)
 
@@ -8022,7 +8022,7 @@ class AIAgent:
         # Sync conversation to Honcho for user modeling
         if final_response and not interrupted and sync_honcho:
             self._honcho_sync(original_user_message, final_response)
-            self._queue_honcho_prefetch(original_user_message)
+        #    self._queue_honcho_prefetch(original_user_message)
 
         # Plugin hook: post_llm_call
         # Fired once per turn after the tool-calling loop completes.
