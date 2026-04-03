@@ -474,8 +474,6 @@ class GatewayRunner:
         # Persistent Honcho managers keyed by gateway session key.
         # This preserves write_frequency="session" semantics across short-lived
         # per-message AIAgent instances.
-        self._honcho_managers: Dict[str, Any] = {}
-        self._honcho_configs: Dict[str, Any] = {}
 
 
 
@@ -508,61 +506,9 @@ class GatewayRunner:
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
 
-    def _get_or_create_gateway_honcho(self, session_key: str):
-        """Return a persistent Honcho manager/config pair for this gateway session."""
-        if not hasattr(self, "_honcho_managers"):
-            self._honcho_managers = {}
-        if not hasattr(self, "_honcho_configs"):
-            self._honcho_configs = {}
 
-        if session_key in self._honcho_managers:
-            return self._honcho_managers[session_key], self._honcho_configs.get(session_key)
 
-        try:
-            from honcho_integration.client import HonchoClientConfig, get_honcho_client
-            from honcho_integration.session import HonchoSessionManager
 
-            hcfg = HonchoClientConfig.from_global_config()
-            if not hcfg.enabled or not (hcfg.api_key or hcfg.base_url):
-                return None, hcfg
-
-            client = get_honcho_client(hcfg)
-            manager = HonchoSessionManager(
-                honcho=client,
-                config=hcfg,
-                context_tokens=hcfg.context_tokens,
-            )
-            self._honcho_managers[session_key] = manager
-            self._honcho_configs[session_key] = hcfg
-            return manager, hcfg
-        except Exception as e:
-            logger.debug("Gateway Honcho init failed for %s: %s", session_key, e)
-            return None, None
-
-    def _shutdown_gateway_honcho(self, session_key: str) -> None:
-        """Flush and close the persistent Honcho manager for a gateway session."""
-        managers = getattr(self, "_honcho_managers", None)
-        configs = getattr(self, "_honcho_configs", None)
-        if managers is None or configs is None:
-            return
-
-        manager = managers.pop(session_key, None)
-        configs.pop(session_key, None)
-        if not manager:
-            return
-        try:
-            manager.shutdown()
-        except Exception as e:
-            logger.debug("Gateway Honcho shutdown failed for %s: %s", session_key, e)
-
-    def _shutdown_all_gateway_honcho(self) -> None:
-        """Flush and close all persistent Honcho managers."""
-        managers = getattr(self, "_honcho_managers", None)
-        if not managers:
-            return
-        for session_key in list(managers.keys()):
-            self._shutdown_gateway_honcho(session_key)
-    
     # -- Setup skill availability ----------------------------------------
 
     def _has_setup_skill(self) -> bool:
@@ -627,7 +573,6 @@ class GatewayRunner:
     def _flush_memories_for_session(
         self,
         old_session_id: str,
-        honcho_session_key: Optional[str] = None,
     ):
         """Prompt the agent to save memories/skills before context is lost.
 
@@ -660,9 +605,9 @@ class GatewayRunner:
                 model=model,
                 max_iterations=8,
                 quiet_mode=True,
+                skip_memory=True,  # Flush agent — no memory provider
                 enabled_toolsets=["memory", "skills"],
                 session_id=old_session_id,
-                honcho_session_key=honcho_session_key,
             )
             # Fully silence the flush agent — quiet_mode only suppresses init
             # messages; tool call output still leaks to the terminal through
@@ -725,22 +670,14 @@ class GatewayRunner:
             tmp_agent.run_conversation(
                 user_message=flush_prompt,
                 conversation_history=msgs,
-                sync_honcho=False,
             )
             logger.info("Pre-reset memory flush completed for session %s", old_session_id)
-            # Flush any queued Honcho writes before the session is dropped
-            if getattr(tmp_agent, '_honcho', None):
-                try:
-                    tmp_agent._honcho.shutdown()
-                except Exception:
-                    pass
         except Exception as e:
             logger.debug("Pre-reset memory flush failed for session %s: %s", old_session_id, e)
 
     async def _async_flush_memories(
         self,
         old_session_id: str,
-        honcho_session_key: Optional[str] = None,
     ):
         """Run the sync memory flush in a thread pool so it won't block the event loop."""
         loop = asyncio.get_event_loop()
@@ -748,7 +685,6 @@ class GatewayRunner:
             None,
             self._flush_memories_for_session,
             old_session_id,
-            honcho_session_key,
         )
 
     @property
@@ -1291,7 +1227,14 @@ class GatewayRunner:
                     )
                     try:
                         await self._async_flush_memories(entry.session_id, key)
-                        self._shutdown_gateway_honcho(key)
+                        # Shut down memory provider on the cached agent
+                        cached_agent = self._running_agents.get(key)
+                        if cached_agent and cached_agent is not _AGENT_PENDING_SENTINEL:
+                            try:
+                                if hasattr(cached_agent, 'shutdown_memory_provider'):
+                                    cached_agent.shutdown_memory_provider()
+                            except Exception:
+                                pass
                         # Mark as flushed and persist to disk so the flag
                         # survives gateway restarts.
                         with self.session_store._lock:
@@ -1425,6 +1368,12 @@ class GatewayRunner:
                 logger.debug("Interrupted running agent for session %s during shutdown", session_key[:20])
             except Exception as e:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
+            # Shut down memory provider at actual session boundary
+            try:
+                if hasattr(agent, 'shutdown_memory_provider'):
+                    agent.shutdown_memory_provider()
+            except Exception:
+                pass
 
         for platform, adapter in list(self.adapters.items()):
             try:
@@ -1446,7 +1395,6 @@ class GatewayRunner:
         self._running_agents.clear()
         self._pending_messages.clear()
         self._pending_approvals.clear()
-        self._shutdown_all_gateway_honcho()
         self._shutdown_event.set()
         
         from gateway.status import remove_pid_file, write_runtime_status
@@ -2449,7 +2397,8 @@ class GatewayRunner:
             )
         
         # One-time prompt if no home channel is set for this platform
-        if not history and source.platform and source.platform != Platform.LOCAL:
+        # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
+        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
             env_key = f"{platform_name.upper()}_HOME_CHANNEL"
             if not os.getenv(env_key):
@@ -2721,27 +2670,12 @@ class GatewayRunner:
             except Exception as e:
                 logger.error("Process watcher setup error: %s", e)
 
-            # Check if the agent encountered a dangerous command needing approval
-            try:
-                from tools.approval import pop_pending
-                import time as _time
-                pending = pop_pending(session_key)
-                if pending:
-                    pending["timestamp"] = _time.time()
-                    self._pending_approvals[session_key] = pending
-                    # Append structured instructions so the user knows how to respond
-                    cmd_preview = pending.get("command", "")
-                    if len(cmd_preview) > 200:
-                        cmd_preview = cmd_preview[:200] + "..."
-                    approval_hint = (
-                        f"\n\n⚠️ **Dangerous command requires approval:**\n"
-                        f"```\n{cmd_preview}\n```\n"
-                        f"Reply `/approve` to execute, `/approve session` to approve this pattern "
-                        f"for the session, or `/deny` to cancel."
-                    )
-                    response = (response or "") + approval_hint
-            except Exception as e:
-                logger.debug("Failed to check pending approvals: %s", e)
+            # NOTE: Dangerous command approvals are now handled inline by the
+            # blocking gateway approval mechanism in tools/approval.py.  The agent
+            # thread blocks until the user responds with /approve or /deny, so by
+            # the time we reach here the approval has already been resolved.  The
+            # old post-loop pop_pending + approval_hint code was removed in favour
+            # of the blocking approach that mirrors CLI's synchronous input().
             
             # Save the full conversation to the transcript, including tool calls.
             # This preserves the complete agent loop (tool_calls, tool results,
@@ -2819,20 +2753,12 @@ class GatewayRunner:
                             skip_db=agent_persisted,
                         )
             
-            # Update session with actual prompt token count and model from the agent
+            # Token counts and model are now persisted by the agent directly.
+            # Keep only last_prompt_tokens here for context-window tracking and
+            # compression decisions.
             self.session_store.update_session(
                 session_entry.session_key,
-                input_tokens=agent_result.get("input_tokens", 0),
-                output_tokens=agent_result.get("output_tokens", 0),
-                cache_read_tokens=agent_result.get("cache_read_tokens", 0),
-                cache_write_tokens=agent_result.get("cache_write_tokens", 0),
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
-                model=agent_result.get("model"),
-                estimated_cost_usd=agent_result.get("estimated_cost_usd"),
-                cost_status=agent_result.get("cost_status"),
-                cost_source=agent_result.get("cost_source"),
-                provider=agent_result.get("provider"),
-                base_url=agent_result.get("base_url"),
             )
 
             # Auto voice reply: send TTS audio before the text response
@@ -3014,8 +2940,6 @@ class GatewayRunner:
                 _flush_task.add_done_callback(self._background_tasks.discard)
         except Exception as e:
             logger.debug("Gateway memory flush on reset failed: %s", e)
-
-        self._shutdown_gateway_honcho(session_key)
         self._evict_cached_agent(session_key)
         
         # Reset the session
@@ -4166,7 +4090,6 @@ class GatewayRunner:
                     user_message=btw_prompt,
                     conversation_history=history_snapshot,
                     task_id=task_id,
-                    sync_honcho=False,
                 )
 
             loop = asyncio.get_event_loop()
@@ -4548,8 +4471,6 @@ class GatewayRunner:
         except Exception as e:
             logger.debug("Memory flush on resume failed: %s", e)
 
-        self._shutdown_gateway_honcho(session_key)
-
         # Clear any running agent for this session key
         if session_key in self._running_agents:
             del self._running_agents[session_key]
@@ -4730,123 +4651,93 @@ class GatewayRunner:
     _APPROVAL_TIMEOUT_SECONDS = 300  # 5 minutes
 
     async def _handle_approve_command(self, event: MessageEvent) -> Optional[str]:
-        """Handle /approve command — execute a pending dangerous command.
+        """Handle /approve command — unblock waiting agent thread(s).
 
-        After execution, re-invokes the agent with the command result so it
-        can continue its multi-step task (fixes the "dead agent" bug where
-        the agent loop exited on approval_required and never resumed).
+        The agent thread(s) are blocked inside tools/approval.py waiting for
+        the user to respond.  This handler signals the event so the agent
+        resumes and the terminal_tool executes the command inline — the same
+        flow as the CLI's synchronous input() approval.
+
+        Supports multiple concurrent approvals (parallel subagents,
+        execute_code).  ``/approve`` resolves the oldest pending command;
+        ``/approve all`` resolves every pending command at once.
 
         Usage:
-            /approve          — approve and execute the pending command
-            /approve session  — approve and remember for this session
-            /approve always   — approve this pattern permanently
+            /approve              — approve oldest pending command once
+            /approve all          — approve ALL pending commands at once
+            /approve session      — approve oldest + remember for session
+            /approve all session  — approve all + remember for session
+            /approve always       — approve oldest + remember permanently
+            /approve all always   — approve all + remember permanently
         """
         source = event.source
         session_key = self._session_key_for_source(source)
 
-        if session_key not in self._pending_approvals:
+        from tools.approval import (
+            resolve_gateway_approval, has_blocking_approval,
+            pending_approval_count,
+        )
+
+        if not has_blocking_approval(session_key):
+            if session_key in self._pending_approvals:
+                self._pending_approvals.pop(session_key)
+                return "⚠️ Approval expired (agent is no longer waiting). Ask the agent to try again."
             return "No pending command to approve."
 
-        import time as _time
-        approval = self._pending_approvals[session_key]
+        # Parse args: support "all", "all session", "all always", "session", "always"
+        args = event.get_command_args().strip().lower().split()
+        resolve_all = "all" in args
+        remaining = [a for a in args if a != "all"]
 
-        # Check for timeout
-        ts = approval.get("timestamp", 0)
-        if _time.time() - ts > self._APPROVAL_TIMEOUT_SECONDS:
-            self._pending_approvals.pop(session_key, None)
-            return "⚠️ Approval expired (timed out after 5 minutes). Ask the agent to try again."
-
-        self._pending_approvals.pop(session_key)
-        cmd = approval["command"]
-        pattern_keys = approval.get("pattern_keys", [])
-        if not pattern_keys:
-            pk = approval.get("pattern_key", "")
-            pattern_keys = [pk] if pk else []
-
-        # Determine approval scope from args
-        args = event.get_command_args().strip().lower()
-        from tools.approval import approve_session, approve_permanent
-
-        if args in ("always", "permanent", "permanently"):
-            for pk in pattern_keys:
-                approve_permanent(pk)
+        if any(a in ("always", "permanent", "permanently") for a in remaining):
+            choice = "always"
             scope_msg = " (pattern approved permanently)"
-        elif args in ("session", "ses"):
-            for pk in pattern_keys:
-                approve_session(session_key, pk)
+        elif any(a in ("session", "ses") for a in remaining):
+            choice = "session"
             scope_msg = " (pattern approved for this session)"
         else:
-            # One-time approval — just approve for session so the immediate
-            # replay works, but don't advertise it as session-wide
-            for pk in pattern_keys:
-                approve_session(session_key, pk)
+            choice = "once"
             scope_msg = ""
 
-        logger.info("User approved dangerous command via /approve: %s...%s", cmd[:60], scope_msg)
-        from tools.terminal_tool import terminal_tool
-        result = await asyncio.to_thread(terminal_tool, command=cmd, force=True)
+        count = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
+        if not count:
+            return "No pending command to approve."
 
-        # Send immediate feedback so the user sees the command output right away
-        immediate_msg = f"✅ Command approved and executed{scope_msg}.\n\n```\n{result[:3500]}\n```"
-        adapter = self.adapters.get(source.platform)
-        if adapter:
-            try:
-                await adapter.send(source.chat_id, immediate_msg)
-            except Exception as e:
-                logger.warning("Failed to send approval feedback: %s", e)
-
-        # Re-invoke the agent with the command result so it can continue its task.
-        # The agent's conversation history (persisted in SQLite) already contains
-        # the tool call that returned approval_required — the continuation message
-        # provides the actual execution output so the agent can pick up where it
-        # left off.
-        continuation_text = (
-            f"[System: The user approved the previously blocked command and it has been executed.\n"
-            f"Command: {cmd}\n"
-            f"<command_output>\n{result[:3500]}\n</command_output>\n\n"
-            f"Continue with the task you were working on.]"
-        )
-
-        synthetic_event = MessageEvent(
-            text=continuation_text,
-            source=source,
-            message_id=f"approve-continuation-{uuid.uuid4().hex}",
-        )
-
-        async def _continue_agent():
-            try:
-                response = await self._handle_message(synthetic_event)
-                if response and adapter:
-                    await adapter.send(source.chat_id, response)
-            except Exception as e:
-                logger.error("Failed to continue agent after /approve: %s", e)
-                if adapter:
-                    try:
-                        await adapter.send(
-                            source.chat_id,
-                            f"⚠️ Failed to resume agent after approval: {e}"
-                        )
-                    except Exception:
-                        pass
-
-        _task = asyncio.create_task(_continue_agent())
-        self._background_tasks.add(_task)
-        _task.add_done_callback(self._background_tasks.discard)
-        # Return None — we already sent the immediate feedback and the agent
-        # continuation is running in the background.
-        return None
+        count_msg = f" ({count} commands)" if count > 1 else ""
+        logger.info("User approved %d dangerous command(s) via /approve%s", count, scope_msg)
+        return f"✅ Command{'s' if count > 1 else ''} approved{scope_msg}{count_msg}. The agent is resuming..."
 
     async def _handle_deny_command(self, event: MessageEvent) -> str:
-        """Handle /deny command — reject a pending dangerous command."""
+        """Handle /deny command — reject pending dangerous command(s).
+
+        Signals blocked agent thread(s) with a 'deny' result so they receive
+        a definitive BLOCKED message, same as the CLI deny flow.
+
+        ``/deny`` denies the oldest; ``/deny all`` denies everything.
+        """
         source = event.source
         session_key = self._session_key_for_source(source)
 
-        if session_key not in self._pending_approvals:
+        from tools.approval import (
+            resolve_gateway_approval, has_blocking_approval,
+        )
+
+        if not has_blocking_approval(session_key):
+            if session_key in self._pending_approvals:
+                self._pending_approvals.pop(session_key)
+                return "❌ Command denied (approval was stale)."
             return "No pending command to deny."
 
-        self._pending_approvals.pop(session_key)
-        logger.info("User denied dangerous command via /deny")
-        return "❌ Command denied."
+        args = event.get_command_args().strip().lower()
+        resolve_all = "all" in args
+
+        count = resolve_gateway_approval(session_key, "deny", resolve_all=resolve_all)
+        if not count:
+            return "No pending command to deny."
+
+        count_msg = f" ({count} commands)" if count > 1 else ""
+        logger.info("User denied %d dangerous command(s) via /deny", count)
+        return f"❌ Command{'s' if count > 1 else ''} denied{count_msg}."
 
     async def _handle_update_command(self, event: MessageEvent) -> str:
         """Handle /update command — update Hermes Agent to the latest version.
@@ -5409,7 +5300,10 @@ class GatewayRunner:
             or os.getenv("HERMES_TOOL_PROGRESS_MODE")
             or "all"
         )
-        tool_progress_enabled = progress_mode != "off"
+        # Disable tool progress for webhooks - they don't support message editing,
+        # so each progress line would be sent as a separate message.
+        from gateway.config import Platform
+        tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
         
         # Queue for progress messages (thread-safe)
         progress_queue = queue.Queue() if tool_progress_enabled else None
@@ -5574,15 +5468,25 @@ class GatewayRunner:
         _loop_for_step = asyncio.get_event_loop()
         _hooks_ref = self.hooks
 
-        def _step_callback_sync(iteration: int, tool_names: list) -> None:
+        def _step_callback_sync(iteration: int, prev_tools: list) -> None:
             try:
+                # prev_tools may be list[str] or list[dict] with "name"/"result"
+                # keys.  Normalise to keep "tool_names" backward-compatible for
+                # user-authored hooks that do ', '.join(tool_names)'.
+                _names: list[str] = []
+                for _t in (prev_tools or []):
+                    if isinstance(_t, dict):
+                        _names.append(_t.get("name") or "")
+                    else:
+                        _names.append(str(_t))
                 asyncio.run_coroutine_threadsafe(
                     _hooks_ref.emit("agent:step", {
                         "platform": source.platform.value if source.platform else "",
                         "user_id": source.user_id,
                         "session_id": session_id,
                         "iteration": iteration,
-                        "tool_names": tool_names,
+                        "tool_names": _names,
+                        "tools": prev_tools,
                     }),
                     _loop_for_step,
                 )
@@ -5648,7 +5552,6 @@ class GatewayRunner:
                 }
 
             pr = self._provider_routing
-            honcho_manager, honcho_config = self._get_or_create_gateway_honcho(session_key)
             reasoning_config = self._load_reasoning_config()
             self._reasoning_config = reasoning_config
             # Set up streaming consumer if enabled
@@ -5721,9 +5624,6 @@ class GatewayRunner:
                     provider_data_collection=pr.get("data_collection"),
                     session_id=session_id,
                     platform=platform_key,
-                    honcho_session_key=session_key,
-                    honcho_manager=honcho_manager,
-                    honcho_config=honcho_config,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -5829,7 +5729,42 @@ class GatewayRunner:
                             if _p:
                                 _history_media_paths.add(_p)
             
-            result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+            # Register per-session gateway approval callback so dangerous
+            # command approval blocks the agent thread (mirrors CLI input()).
+            # The callback bridges sync→async to send the approval request
+            # to the user immediately.
+            from tools.approval import register_gateway_notify, unregister_gateway_notify
+
+            def _approval_notify_sync(approval_data: dict) -> None:
+                """Send the approval request to the user from the agent thread."""
+                cmd = approval_data.get("command", "")
+                cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
+                desc = approval_data.get("description", "dangerous command")
+                msg = (
+                    f"⚠️ **Dangerous command requires approval:**\n"
+                    f"```\n{cmd_preview}\n```\n"
+                    f"Reason: {desc}\n\n"
+                    f"Reply `/approve` to execute, `/approve session` to approve this pattern "
+                    f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+                )
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        _status_adapter.send(
+                            _status_chat_id,
+                            msg,
+                            metadata=_status_thread_metadata,
+                        ),
+                        _loop_for_step,
+                    ).result(timeout=15)
+                except Exception as _e:
+                    logger.error("Failed to send approval request: %s", _e)
+
+            _approval_session_key = session_key or ""
+            register_gateway_notify(_approval_session_key, _approval_notify_sync)
+            try:
+                result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+            finally:
+                unregister_gateway_notify(_approval_session_key)
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done

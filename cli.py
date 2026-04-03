@@ -508,6 +508,8 @@ from tools.browser_tool import _emergency_cleanup_all_sessions as _cleanup_all_b
 
 # Guard to prevent cleanup from running multiple times on exit
 _cleanup_done = False
+# Weak reference to the active AIAgent for memory provider shutdown at exit
+_active_agent_ref = None
 
 def _run_cleanup():
     """Run resource cleanup exactly once."""
@@ -534,6 +536,15 @@ def _run_cleanup():
     try:
         from agent.auxiliary_client import shutdown_cached_clients
         shutdown_cached_clients()
+    except Exception:
+        pass
+    # Shut down memory provider (on_session_end + shutdown_all) at actual
+    # session boundary — NOT per-turn inside run_conversation().
+    try:
+        if _active_agent_ref and hasattr(_active_agent_ref, 'shutdown_memory_provider'):
+            _active_agent_ref.shutdown_memory_provider(
+                getattr(_active_agent_ref, 'conversation_history', None) or []
+            )
     except Exception:
         pass
 
@@ -828,6 +839,63 @@ def _cprint(text: str):
     prompt_toolkit parse the escapes and render real colors.
     """
     _pt_print(_PT_ANSI(text))
+
+
+# ---------------------------------------------------------------------------
+# File-drop detection — extracted as a pure function for testability.
+# ---------------------------------------------------------------------------
+
+_IMAGE_EXTENSIONS = frozenset({
+    '.png', '.jpg', '.jpeg', '.gif', '.webp',
+    '.bmp', '.tiff', '.tif', '.svg', '.ico',
+})
+
+
+def _detect_file_drop(user_input: str) -> "dict | None":
+    """Detect if *user_input* is a dragged/pasted file path, not a slash command.
+
+    When a user drags a file into the terminal, macOS pastes the absolute path
+    (e.g. ``/Users/roland/Desktop/file.png``) which starts with ``/`` and would
+    otherwise be mistaken for a slash command.
+
+    Returns a dict on match::
+
+        {
+            "path": Path,          # resolved file path
+            "is_image": bool,      # True when suffix is a known image type
+            "remainder": str,      # any text after the path
+        }
+
+    Returns ``None`` when the input is not a real file path.
+    """
+    if not isinstance(user_input, str) or not user_input.startswith("/"):
+        return None
+
+    # Walk the string absorbing backslash-escaped spaces ("\ ").
+    raw = user_input
+    pos = 0
+    while pos < len(raw):
+        ch = raw[pos]
+        if ch == '\\' and pos + 1 < len(raw) and raw[pos + 1] == ' ':
+            pos += 2  # skip escaped space
+        elif ch == ' ':
+            break
+        else:
+            pos += 1
+
+    first_token_raw = raw[:pos]
+    first_token = first_token_raw.replace('\\ ', ' ')
+    drop_path = Path(first_token)
+
+    if not drop_path.exists() or not drop_path.is_file():
+        return None
+
+    remainder = raw[pos:].strip()
+    return {
+        "path": drop_path,
+        "is_image": drop_path.suffix.lower() in _IMAGE_EXTENSIONS,
+        "remainder": remainder,
+    }
 
 
 class ChatConsole:
@@ -1545,6 +1613,28 @@ class HermesCLI:
                 pass
             return changed
 
+        if resolved_provider in {"opencode-zen", "opencode-go"}:
+            try:
+                from hermes_cli.models import normalize_opencode_model_id, opencode_model_api_mode
+
+                canonical = normalize_opencode_model_id(resolved_provider, current_model)
+                if canonical and canonical != current_model:
+                    if not self._model_is_default:
+                        self.console.print(
+                            f"[yellow]⚠️  Stripped provider prefix from '{current_model}'; using '{canonical}' for {resolved_provider}.[/]"
+                        )
+                    self.model = canonical
+                    current_model = canonical
+                    changed = True
+
+                resolved_mode = opencode_model_api_mode(resolved_provider, current_model)
+                if resolved_mode != self.api_mode:
+                    self.api_mode = resolved_mode
+                    changed = True
+            except Exception:
+                pass
+            return changed
+
         if resolved_provider != "openai-codex":
             return False
 
@@ -2139,7 +2229,7 @@ class HermesCLI:
                 session_db=self._session_db,
                 clarify_callback=self._clarify_callback,
                 reasoning_callback=self._current_reasoning_callback(),
-                honcho_session_key=None,  # resolved by run_agent via config sessions map / title
+
                 fallback_model=self._fallback_model,
                 thinking_callback=self._on_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,
@@ -2151,6 +2241,9 @@ class HermesCLI:
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
             )
+            # Store reference for atexit memory provider shutdown
+            global _active_agent_ref
+            _active_agent_ref = self.agent
             # Route agent status output through prompt_toolkit so ANSI escape
             # sequences aren't garbled by patch_stdout's StdoutProxy (#2262).
             self.agent._print_fn = _cprint
@@ -3158,6 +3251,9 @@ class HermesCLI:
 
     def reset_conversation(self):
         """Reset the conversation by starting a new session."""
+        # Shut down memory provider before resetting — actual session boundary
+        if hasattr(self, 'agent') and self.agent:
+            self.agent.shutdown_memory_provider(self.conversation_history)
         self.new_session()
     
     def save_conversation(self):
@@ -3822,28 +3918,6 @@ class HermesCLI:
                             try:
                                 if self._session_db.set_session_title(self.session_id, new_title):
                                     _cprint(f"  Session title set: {new_title}")
-                                    # Re-map Honcho session key to new title
-                                    if self.agent and getattr(self.agent, '_honcho', None):
-                                        try:
-                                            hcfg = self.agent._honcho_config
-                                            new_key = (
-                                                hcfg.resolve_session_name(
-                                                    session_title=new_title,
-                                                    session_id=self.agent.session_id,
-                                                )
-                                                if hcfg else new_title
-                                            )
-                                            if new_key and new_key != self.agent._honcho_session_key:
-                                                old_key = self.agent._honcho_session_key
-                                                self.agent._honcho.get_or_create(new_key)
-                                                self.agent._honcho_session_key = new_key
-                                                from tools.honcho_tools import set_session_context
-                                                set_session_context(self.agent._honcho, new_key)
-                                                from agent.display import honcho_session_line, write_tty
-                                                write_tty(honcho_session_line(hcfg.workspace_id, new_key) + "\n")
-                                                _cprint(f"  Honcho session: {old_key} → {new_key}")
-                                        except Exception:
-                                            pass
                                 else:
                                     _cprint("  Session not found in database.")
                             except ValueError as e:
@@ -4308,7 +4382,6 @@ class HermesCLI:
                     user_message=btw_prompt,
                     conversation_history=history_snapshot,
                     task_id=task_id,
-                    sync_honcho=False,
                 )
 
                 response = (result.get("final_response") or "") if result else ""
@@ -4738,12 +4811,7 @@ class HermesCLI:
                 f"  ✅ Compressed: {original_count} → {new_count} messages "
                 f"(~{approx_tokens:,} → ~{new_tokens:,} tokens)"
             )
-            # Flush Honcho async queue so queued messages land before context resets
-            if self.agent and getattr(self.agent, '_honcho', None):
-                try:
-                    self.agent._honcho.flush_all()
-                except Exception:
-                    pass
+
         except Exception as e:
             print(f"  ❌ Compression failed: {e}")
 
@@ -6404,17 +6472,6 @@ class HermesCLI:
         # One-line Honcho session indicator (TTY-only, not captured by agent).
         # Only show when the user explicitly configured Honcho for Hermes
         # (not auto-enabled from a stray HONCHO_API_KEY env var).
-        try:
-            from honcho_integration.client import HonchoClientConfig
-            from agent.display import honcho_session_line, write_tty
-            hcfg = HonchoClientConfig.from_global_config()
-            if hcfg.enabled and (hcfg.api_key or hcfg.base_url) and hcfg.explicitly_configured:
-                sname = hcfg.resolve_session_name(session_id=self.session_id)
-                if sname:
-                    write_tty(honcho_session_line(hcfg.workspace_id, sname) + "\n")
-        except Exception:
-            pass
-
         # If resuming a session, load history and display it immediately
         # so the user has context before typing their first message.
         if self._resumed:
@@ -7555,8 +7612,24 @@ class HermesCLI:
                     if isinstance(user_input, tuple):
                         user_input, submit_images = user_input
                     
-                    # Check for commands
-                    if isinstance(user_input, str) and user_input.startswith("/"):
+                    # Check for commands — but detect dragged/pasted file paths first.
+                    # See _detect_file_drop() for details.
+                    _file_drop = _detect_file_drop(user_input) if isinstance(user_input, str) else None
+                    if _file_drop:
+                        _drop_path = _file_drop["path"]
+                        _remainder = _file_drop["remainder"]
+                        if _file_drop["is_image"]:
+                            submit_images.append(_drop_path)
+                            user_input = _remainder or f"[User attached image: {_drop_path.name}]"
+                            _cprint(f"  📎 Auto-attached image: {_drop_path.name}")
+                        else:
+                            _cprint(f"  📄 Detected file: {_drop_path.name}")
+                            user_input = (
+                                f"[User attached file: {_drop_path}]"
+                                + (f"\n{_remainder}" if _remainder else "")
+                            )
+
+                    if not _file_drop and isinstance(user_input, str) and user_input.startswith("/"):
                         _cprint(f"\n⚙️  {user_input}")
                         if not self.process_command(user_input):
                             self._should_exit = True
@@ -7717,12 +7790,6 @@ class HermesCLI:
             set_sudo_password_callback(None)
             set_approval_callback(None)
             set_secret_capture_callback(None)
-            # Flush + shut down Honcho async writer (drains queue before exit)
-            if self.agent and getattr(self.agent, '_honcho', None):
-                try:
-                    self.agent._honcho.shutdown()
-                except (Exception, KeyboardInterrupt):
-                    pass
             # Close session in SQLite
             if hasattr(self, '_session_db') and self._session_db and self.agent:
                 try:
@@ -7947,6 +8014,12 @@ def main(
                     if response:
                         print(response)
                     print(f"\nsession_id: {cli.session_id}")
+                    
+                    # Ensure proper exit code for automation wrappers
+                    sys.exit(1 if isinstance(result, dict) and result.get("failed") else 0)
+            
+            # Exit with error code if credentials or agent init fails
+            sys.exit(1)
         else:
             cli.show_banner()
             cli.console.print(f"[bold blue]Query:[/] {query}")
