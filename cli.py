@@ -2166,6 +2166,7 @@ class HermesCLI:
                 return False
             restored = self._session_db.get_messages_as_conversation(self.session_id)
             if restored:
+                restored = [m for m in restored if m.get("role") != "session_meta"]
                 self.conversation_history = restored
                 msg_count = len([m for m in restored if m.get("role") == "user"])
                 title_part = ""
@@ -2361,6 +2362,7 @@ class HermesCLI:
 
         restored = self._session_db.get_messages_as_conversation(self.session_id)
         if restored:
+            restored = [m for m in restored if m.get("role") != "session_meta"]
             self.conversation_history = restored
             msg_count = len([m for m in restored if m.get("role") == "user"])
             title_part = ""
@@ -3259,9 +3261,10 @@ class HermesCLI:
         self._resumed = True
         self._pending_title = None
 
-        # Load conversation history
+        # Load conversation history (strip transcript-only metadata entries)
         restored = self._session_db.get_messages_as_conversation(target_id)
-        self.conversation_history = restored or []
+        restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
+        self.conversation_history = restored
 
         # Re-open the target session so it's not marked as ended
         try:
@@ -6263,8 +6266,11 @@ class HermesCLI:
                 ).start()
 
 
-            # Combine all interrupt messages (user may have typed multiple while waiting)
-            # and re-queue as one prompt for process_loop
+            # Re-queue the interrupt message (and any that arrived while we were
+            # processing the first) as the next prompt for process_loop.
+            # Only reached when busy_input_mode == "interrupt" (the default).
+            # In "queue" mode Enter routes directly to _pending_input so this
+            # block is never hit.
             if pending_message and hasattr(self, '_pending_input'):
                 all_parts = [pending_message]
                 while not self._interrupt_queue.empty():
@@ -6275,7 +6281,12 @@ class HermesCLI:
                     except queue.Empty:
                         break
                 combined = "\n".join(all_parts)
-                print(f"\n📨 Queued: '{combined[:50]}{'...' if len(combined) > 50 else ''}'")
+                n = len(all_parts)
+                preview = combined[:50] + ("..." if len(combined) > 50 else "")
+                if n > 1:
+                    print(f"\n⚡ Sending {n} messages after interrupt: '{preview}'")
+                else:
+                    print(f"\n⚡ Sending after interrupt: '{preview}'")
                 self._pending_input.put(combined)
             
             return response
