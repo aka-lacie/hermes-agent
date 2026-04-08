@@ -428,6 +428,9 @@ class HonchoMemoryProvider(MemoryProvider):
         B5: Respects injection_frequency — "first-turn" returns cached/empty after turn 0.
         Port #3265: Truncates to context_tokens budget.
         """
+        # Local runtime override: disable per-turn Honcho synthesis injection
+        # while preserving first-turn system_prompt_block() context baking.
+        return ""
         if self._cron_skipped:
             return ""
 
@@ -471,6 +474,9 @@ class HonchoMemoryProvider(MemoryProvider):
 
         B5: Checks cadence before firing background threads.
         """
+        # Local runtime override: disable background per-turn Honcho prefetch
+        # so later turns do not issue dialectic/context calls.
+        return
         if self._cron_skipped:
             return
         if not self._manager or not self._session_key or not query:
