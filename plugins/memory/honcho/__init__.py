@@ -137,7 +137,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         # B5: Cost-awareness turn counting and cadence
         self._turn_count = 0
-        self._injection_frequency = "every-turn"  # or "first-turn"
+        self._injection_frequency = "first-turn"  # or "every-turn"
         self._context_cadence = 1   # minimum turns between context API calls
         self._dialectic_cadence = 1  # minimum turns between dialectic API calls
         self._reasoning_level_cap: Optional[str] = None  # "minimal", "low", "mid", "high"
