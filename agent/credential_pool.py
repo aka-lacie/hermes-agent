@@ -8,22 +8,23 @@ import threading
 import time
 import uuid
 import os
+import re
 from dataclasses import dataclass, fields, replace
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import OPENROUTER_BASE_URL
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import (
-    ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     DEFAULT_AGENT_KEY_MIN_TTL_SECONDS,
     PROVIDER_REGISTRY,
-    _agent_key_is_usable,
     _codex_access_token_is_expiring,
     _decode_jwt_claims,
-    _is_expiring,
+    _import_codex_cli_tokens,
     _load_auth_store,
     _load_provider_state,
+    _resolve_zai_base_url,
     read_credential_pool,
     write_credential_pool,
 )
@@ -95,6 +96,9 @@ class PooledCredential:
     last_status: Optional[str] = None
     last_status_at: Optional[float] = None
     last_error_code: Optional[int] = None
+    last_error_reason: Optional[str] = None
+    last_error_message: Optional[str] = None
+    last_error_reset_at: Optional[float] = None
     base_url: Optional[str] = None
     expires_at: Optional[str] = None
     expires_at_ms: Optional[int] = None
@@ -129,7 +133,14 @@ class PooledCredential:
         return cls(provider=provider, **data)
 
     def to_dict(self) -> Dict[str, Any]:
-        _ALWAYS_EMIT = {"last_status", "last_status_at", "last_error_code"}
+        _ALWAYS_EMIT = {
+            "last_status",
+            "last_status_at",
+            "last_error_code",
+            "last_error_reason",
+            "last_error_message",
+            "last_error_reset_at",
+        }
         result: Dict[str, Any] = {}
         for field_def in fields(self):
             if field_def.name in ("provider", "extra"):
@@ -178,6 +189,85 @@ def _exhausted_ttl(error_code: Optional[int]) -> int:
     if error_code == 429:
         return EXHAUSTED_TTL_429_SECONDS
     return EXHAUSTED_TTL_DEFAULT_SECONDS
+
+
+def _parse_absolute_timestamp(value: Any) -> Optional[float]:
+    """Best-effort parse for provider reset timestamps.
+
+    Accepts epoch seconds, epoch milliseconds, and ISO-8601 strings.
+    Returns seconds since epoch.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric <= 0:
+            return None
+        return numeric / 1000.0 if numeric > 1_000_000_000_000 else numeric
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            numeric = float(raw)
+        except ValueError:
+            numeric = None
+        if numeric is not None:
+            return numeric / 1000.0 if numeric > 1_000_000_000_000 else numeric
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_retry_delay_seconds(message: str) -> Optional[float]:
+    if not message:
+        return None
+    delay_match = re.search(r"quotaResetDelay[:\s\"]+(\d+(?:\.\d+)?)(ms|s)", message, re.IGNORECASE)
+    if delay_match:
+        value = float(delay_match.group(1))
+        return value / 1000.0 if delay_match.group(2).lower() == "ms" else value
+    sec_match = re.search(r"retry\s+(?:after\s+)?(\d+(?:\.\d+)?)\s*(?:sec|secs|seconds|s\b)", message, re.IGNORECASE)
+    if sec_match:
+        return float(sec_match.group(1))
+    return None
+
+
+def _normalize_error_context(error_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(error_context, dict):
+        return {}
+    normalized: Dict[str, Any] = {}
+    reason = error_context.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        normalized["reason"] = reason.strip()
+    message = error_context.get("message")
+    if isinstance(message, str) and message.strip():
+        normalized["message"] = message.strip()
+    reset_at = (
+        error_context.get("reset_at")
+        or error_context.get("resets_at")
+        or error_context.get("retry_until")
+    )
+    parsed_reset_at = _parse_absolute_timestamp(reset_at)
+    if parsed_reset_at is None and isinstance(message, str):
+        retry_delay_seconds = _extract_retry_delay_seconds(message)
+        if retry_delay_seconds is not None:
+            parsed_reset_at = time.time() + retry_delay_seconds
+    if parsed_reset_at is not None:
+        normalized["reset_at"] = parsed_reset_at
+    return normalized
+
+
+def _exhausted_until(entry: PooledCredential) -> Optional[float]:
+    if entry.last_status != STATUS_EXHAUSTED:
+        return None
+    reset_at = _parse_absolute_timestamp(getattr(entry, "last_error_reset_at", None))
+    if reset_at is not None:
+        return reset_at
+    if entry.last_status_at:
+        return entry.last_status_at + _exhausted_ttl(entry.last_error_code)
+    return None
 
 
 def _normalize_custom_pool_name(name: str) -> str:
@@ -256,6 +346,9 @@ def get_pool_strategy(provider: str) -> str:
     return STRATEGY_FILL_FIRST
 
 
+DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL = 1
+
+
 class CredentialPool:
     def __init__(self, provider: str, entries: List[PooledCredential]):
         self.provider = provider
@@ -263,6 +356,8 @@ class CredentialPool:
         self._current_id: Optional[str] = None
         self._strategy = get_pool_strategy(provider)
         self._lock = threading.Lock()
+        self._active_leases: Dict[str, int] = {}
+        self._max_concurrent = DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL
 
     def has_credentials(self) -> bool:
         return bool(self._entries)
@@ -292,12 +387,21 @@ class CredentialPool:
             [entry.to_dict() for entry in self._entries],
         )
 
-    def _mark_exhausted(self, entry: PooledCredential, status_code: Optional[int]) -> PooledCredential:
+    def _mark_exhausted(
+        self,
+        entry: PooledCredential,
+        status_code: Optional[int],
+        error_context: Optional[Dict[str, Any]] = None,
+    ) -> PooledCredential:
+        normalized_error = _normalize_error_context(error_context)
         updated = replace(
             entry,
             last_status=STATUS_EXHAUSTED,
             last_status_at=time.time(),
             last_error_code=status_code,
+            last_error_reason=normalized_error.get("reason"),
+            last_error_message=normalized_error.get("message"),
+            last_error_reset_at=normalized_error.get("reset_at"),
         )
         self._replace_entry(entry, updated)
         self._persist()
@@ -338,6 +442,39 @@ class CredentialPool:
                 return updated
         except Exception as exc:
             logger.debug("Failed to sync from credentials file: %s", exc)
+        return entry
+
+    def _sync_codex_entry_from_cli(self, entry: PooledCredential) -> PooledCredential:
+        """Sync an openai-codex pool entry from ~/.codex/auth.json if tokens differ.
+
+        OpenAI OAuth refresh tokens are single-use and rotate on every refresh.
+        When the Codex CLI (or another Hermes profile) refreshes its token,
+        the pool entry's refresh_token becomes stale.  This method detects that
+        by comparing against ~/.codex/auth.json and syncing the fresh pair.
+        """
+        if self.provider != "openai-codex":
+            return entry
+        try:
+            cli_tokens = _import_codex_cli_tokens()
+            if not cli_tokens:
+                return entry
+            cli_refresh = cli_tokens.get("refresh_token", "")
+            cli_access = cli_tokens.get("access_token", "")
+            if cli_refresh and cli_refresh != entry.refresh_token:
+                logger.debug("Pool entry %s: syncing tokens from ~/.codex/auth.json (refresh token changed)", entry.id)
+                updated = replace(
+                    entry,
+                    access_token=cli_access,
+                    refresh_token=cli_refresh,
+                    last_status=None,
+                    last_status_at=None,
+                    last_error_code=None,
+                )
+                self._replace_entry(entry, updated)
+                self._persist()
+                return updated
+        except Exception as exc:
+            logger.debug("Failed to sync from ~/.codex/auth.json: %s", exc)
         return entry
 
     def _refresh_entry(self, entry: PooledCredential, *, force: bool) -> Optional[PooledCredential]:
@@ -462,7 +599,15 @@ class CredentialPool:
             self._mark_exhausted(entry, None)
             return None
 
-        updated = replace(updated, last_status=STATUS_OK, last_status_at=None, last_error_code=None)
+        updated = replace(
+            updated,
+            last_status=STATUS_OK,
+            last_status_at=None,
+            last_error_code=None,
+            last_error_reason=None,
+            last_error_message=None,
+            last_error_reset_at=None,
+        )
         self._replace_entry(entry, updated)
         self._persist()
         return updated
@@ -521,12 +666,30 @@ class CredentialPool:
                 if synced is not entry:
                     entry = synced
                     cleared_any = True
+            # For openai-codex entries, sync from ~/.codex/auth.json before
+            # any status/refresh checks.  This picks up tokens refreshed by
+            # the Codex CLI or another Hermes profile.
+            if (self.provider == "openai-codex"
+                    and entry.last_status == STATUS_EXHAUSTED
+                    and entry.refresh_token):
+                synced = self._sync_codex_entry_from_cli(entry)
+                if synced is not entry:
+                    entry = synced
+                    cleared_any = True
             if entry.last_status == STATUS_EXHAUSTED:
-                ttl = _exhausted_ttl(entry.last_error_code)
-                if entry.last_status_at and now - entry.last_status_at < ttl:
+                exhausted_until = _exhausted_until(entry)
+                if exhausted_until is not None and now < exhausted_until:
                     continue
                 if clear_expired:
-                    cleared = replace(entry, last_status=STATUS_OK, last_status_at=None, last_error_code=None)
+                    cleared = replace(
+                        entry,
+                        last_status=STATUS_OK,
+                        last_status_at=None,
+                        last_error_code=None,
+                        last_error_reason=None,
+                        last_error_message=None,
+                        last_error_reset_at=None,
+                    )
                     self._replace_entry(entry, cleared)
                     entry = cleared
                     cleared_any = True
@@ -544,6 +707,7 @@ class CredentialPool:
         available = self._available_entries(clear_expired=True, refresh=True)
         if not available:
             self._current_id = None
+            logger.info("credential pool: no available entries (all exhausted or empty)")
             return None
 
         if self._strategy == STRATEGY_RANDOM:
@@ -576,14 +740,73 @@ class CredentialPool:
         available = self._available_entries()
         return available[0] if available else None
 
-    def mark_exhausted_and_rotate(self, *, status_code: Optional[int]) -> Optional[PooledCredential]:
+    def mark_exhausted_and_rotate(
+        self,
+        *,
+        status_code: Optional[int],
+        error_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[PooledCredential]:
         with self._lock:
             entry = self.current() or self._select_unlocked()
             if entry is None:
                 return None
-            self._mark_exhausted(entry, status_code)
+            _label = entry.label or entry.id[:8]
+            logger.info(
+                "credential pool: marking %s exhausted (status=%s), rotating",
+                _label, status_code,
+            )
+            self._mark_exhausted(entry, status_code, error_context)
             self._current_id = None
-            return self._select_unlocked()
+            next_entry = self._select_unlocked()
+            if next_entry:
+                _next_label = next_entry.label or next_entry.id[:8]
+                logger.info("credential pool: rotated to %s", _next_label)
+            return next_entry
+
+    def acquire_lease(self, credential_id: Optional[str] = None) -> Optional[str]:
+        """Acquire a soft lease on a credential.
+
+        If a specific credential_id is provided, lease that entry directly.
+        Otherwise prefer the least-leased available credential, using priority as
+        a stable tie-breaker. When every credential is already at the soft cap,
+        still return the least-leased one instead of blocking.
+        """
+        with self._lock:
+            if credential_id:
+                self._active_leases[credential_id] = self._active_leases.get(credential_id, 0) + 1
+                self._current_id = credential_id
+                return credential_id
+
+            available = self._available_entries(clear_expired=True, refresh=True)
+            if not available:
+                return None
+
+            below_cap = [
+                entry for entry in available
+                if self._active_leases.get(entry.id, 0) < self._max_concurrent
+            ]
+            candidates = below_cap if below_cap else available
+            chosen = min(
+                candidates,
+                key=lambda entry: (self._active_leases.get(entry.id, 0), entry.priority),
+            )
+            self._active_leases[chosen.id] = self._active_leases.get(chosen.id, 0) + 1
+            self._current_id = chosen.id
+            return chosen.id
+
+    def release_lease(self, credential_id: str) -> None:
+        """Release a previously acquired credential lease."""
+        with self._lock:
+            count = self._active_leases.get(credential_id, 0)
+            if count <= 1:
+                self._active_leases.pop(credential_id, None)
+            else:
+                self._active_leases[credential_id] = count - 1
+
+    def active_lease_count(self, credential_id: str) -> int:
+        """Return the number of active leases for a credential."""
+        with self._lock:
+            return self._active_leases.get(credential_id, 0)
 
     def try_refresh_current(self) -> Optional[PooledCredential]:
         with self._lock:
@@ -603,7 +826,17 @@ class CredentialPool:
         new_entries = []
         for entry in self._entries:
             if entry.last_status or entry.last_status_at or entry.last_error_code:
-                new_entries.append(replace(entry, last_status=None, last_status_at=None, last_error_code=None))
+                new_entries.append(
+                    replace(
+                        entry,
+                        last_status=None,
+                        last_status_at=None,
+                        last_error_code=None,
+                        last_error_reason=None,
+                        last_error_message=None,
+                        last_error_reset_at=None,
+                    )
+                )
                 count += 1
             else:
                 new_entries.append(entry)
@@ -624,6 +857,31 @@ class CredentialPool:
         if self._current_id == removed.id:
             self._current_id = None
         return removed
+
+    def resolve_target(self, target: Any) -> Tuple[Optional[int], Optional[PooledCredential], Optional[str]]:
+        raw = str(target or "").strip()
+        if not raw:
+            return None, None, "No credential target provided."
+
+        for idx, entry in enumerate(self._entries, start=1):
+            if entry.id == raw:
+                return idx, entry, None
+
+        label_matches = [
+            (idx, entry)
+            for idx, entry in enumerate(self._entries, start=1)
+            if entry.label.strip().lower() == raw.lower()
+        ]
+        if len(label_matches) == 1:
+            return label_matches[0][0], label_matches[0][1], None
+        if len(label_matches) > 1:
+            return None, None, f'Ambiguous credential label "{raw}". Use the numeric index or entry id instead.'
+        if raw.isdigit():
+            index = int(raw)
+            if 1 <= index <= len(self._entries):
+                return index, self._entries[index - 1], None
+            return None, None, f"No credential #{index}."
+        return None, None, f'No credential matching "{raw}".'
 
     def add_entry(self, entry: PooledCredential) -> PooledCredential:
         entry = replace(entry, priority=_next_priority(self._entries))
@@ -826,6 +1084,8 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
         active_sources.add(source)
         auth_type = AUTH_TYPE_OAUTH if provider == "anthropic" and not token.startswith("sk-ant-api") else AUTH_TYPE_API_KEY
         base_url = env_url or pconfig.inference_base_url
+        if provider == "zai":
+            base_url = _resolve_zai_base_url(token, pconfig.inference_base_url, env_url)
         changed |= _upsert_entry(
             entries,
             provider,

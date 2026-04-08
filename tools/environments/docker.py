@@ -8,6 +8,7 @@ persistence via bind mounts.
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import uuid
 from typing import Optional
 
 from tools.environments.base import BaseEnvironment
+from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
 from tools.interrupt import is_interrupted
 
 logger = logging.getLogger(__name__)
@@ -484,9 +486,13 @@ class DockerEnvironment(BaseEnvironment):
         else:
             effective_stdin = stdin_data
 
-        # docker exec -w doesn't expand ~, so prepend a cd into the command
-        if work_dir == "~" or work_dir.startswith("~/"):
-            exec_command = f"cd {work_dir} && {exec_command}"
+        # docker exec -w doesn't expand ~, so prepend a cd into the command.
+        # Keep ~ unquoted (for shell expansion) and quote only the subpath.
+        if work_dir == "~":
+            exec_command = f"cd ~ && {exec_command}"
+            work_dir = "/"
+        elif work_dir.startswith("~/"):
+            exec_command = f"cd ~/{shlex.quote(work_dir[2:])} && {exec_command}"
             work_dir = "/"
 
         assert self._container_id, "Container not started"
@@ -505,6 +511,8 @@ class DockerEnvironment(BaseEnvironment):
             forward_keys |= get_all_passthrough()
         except Exception:
             pass
+        # Strip Hermes-managed secrets so they never leak into the container.
+        forward_keys -= _HERMES_PROVIDER_ENV_BLOCKLIST
         hermes_env = _load_hermes_env_vars() if forward_keys else {}
         for key in sorted(forward_keys):
             value = os.getenv(key)
