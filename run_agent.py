@@ -2476,18 +2476,43 @@ class AIAgent:
 
             ctx = self._honcho.pop_context_result(self._honcho_session_key)
             if ctx:
-                rep = ctx.get("representation", "")
-                card = ctx.get("card", "")
-                if rep:
-                    parts.append(f"## User representation\n{rep}")
-                if card:
-                    parts.append(card)
-                ai_rep = ctx.get("ai_representation", "")
-                ai_card = ctx.get("ai_card", "")
-                if ai_rep:
-                    parts.append(f"## AI peer representation\n{ai_rep}")
-                if ai_card:
-                    parts.append(ai_card)
+                user_name = (
+                    (self._honcho_config.peer_name or "User")
+                    if self._honcho_config
+                    else "User"
+                )
+                ai_name = (
+                    (self._honcho_config.ai_peer or "Agent")
+                    if self._honcho_config
+                    else "Agent"
+                )
+                sections = [
+                    (
+                        f"## {user_name} self-representation",
+                        ctx.get("user_self_representation", ""),
+                        ctx.get("user_self_card", ""),
+                    ),
+                    (
+                        f"## {ai_name}'s model of {user_name}",
+                        ctx.get("ai_user_model_representation", ""),
+                        ctx.get("ai_user_model_card", ""),
+                    ),
+                    (
+                        f"## {ai_name} self-representation",
+                        ctx.get("ai_self_representation", ""),
+                        ctx.get("ai_self_card", ""),
+                    ),
+                    (
+                        f"## {user_name}'s model of {ai_name}",
+                        ctx.get("user_ai_model_representation", ""),
+                        ctx.get("user_ai_model_card", ""),
+                    ),
+                ]
+                for heading, rep, card in sections:
+                    if rep:
+                        parts.append(f"{heading}\n{rep}")
+                    if card:
+                        parts.append(card)
 
             dialectic = self._honcho.pop_dialectic_result(self._honcho_session_key)
             if dialectic:

@@ -29,6 +29,7 @@ class TestHonchoClientConfigDefaults:
         assert config.save_messages is True
         assert config.session_strategy == "per-directory"
         assert config.recall_mode == "hybrid"
+        assert config.observation_mode == "unified"
         assert config.session_peer_prefix is False
         assert config.linked_hosts == []
         assert config.sessions == {}
@@ -188,6 +189,22 @@ class TestFromGlobalConfig:
         config_file.write_text(json.dumps({"apiKey": "key"}))
         config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.recall_mode == "hybrid"
+
+    def test_observation_mode_from_config(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "apiKey": "key",
+            "observationMode": "directional",
+            "hosts": {"hermes": {"observationMode": "bidirectional"}},
+        }))
+        config = HonchoClientConfig.from_global_config(config_path=config_file)
+        assert config.observation_mode == "bidirectional"
+
+    def test_observation_mode_aliases_normalize(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"apiKey": "key", "observationMode": "all"}))
+        config = HonchoClientConfig.from_global_config(config_path=config_file)
+        assert config.observation_mode == "bidirectional"
 
     def test_corrupt_config_falls_back_to_env(self, tmp_path):
         config_file = tmp_path / "config.json"

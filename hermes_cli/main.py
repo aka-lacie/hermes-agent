@@ -4713,6 +4713,15 @@ For more help on a command:
         help="Memory mode to set (hybrid/honcho/local). Omit to show current.",
     )
 
+    honcho_observation = honcho_subparsers.add_parser(
+        "observation", help="Show or set Honcho peer observation mode"
+    )
+    honcho_observation.add_argument(
+        "mode", nargs="?", metavar="MODE",
+        choices=("unified", "directional", "bidirectional"),
+        help="Observation mode to set. Omit to show current.",
+    )
+
     honcho_tokens = honcho_subparsers.add_parser(
         "tokens", help="Show or set token budget for context and dialectic"
     )

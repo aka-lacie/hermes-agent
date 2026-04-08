@@ -1,6 +1,6 @@
 """CLI commands for Honcho integration management.
 
-Handles: hermes honcho setup | status | sessions | map | peer
+Handles: hermes honcho setup | status | sessions | map | peer | observation
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
 
     # Clone settings from default block, override identity fields
     new_block = {}
-    for key in ("memoryMode", "recallMode", "writeFrequency", "sessionStrategy",
+    for key in ("memoryMode", "recallMode", "observationMode", "writeFrequency", "sessionStrategy",
                 "sessionPeerPrefix", "contextTokens", "dialecticReasoningLevel",
                 "dialecticMaxChars", "saveMessages"):
         val = default_block.get(key)
@@ -106,7 +106,7 @@ def cmd_enable(args) -> None:
     # If this is a new profile host block with no settings, clone from default
     if not block.get("aiPeer"):
         default_block = cfg.get("hosts", {}).get(HOST, {})
-        for key in ("memoryMode", "recallMode", "writeFrequency", "sessionStrategy",
+        for key in ("memoryMode", "recallMode", "observationMode", "writeFrequency", "sessionStrategy",
                     "contextTokens", "dialecticReasoningLevel", "dialecticMaxChars"):
             val = default_block.get(key)
             if val is not None and key not in block:
@@ -404,6 +404,16 @@ def cmd_setup(args) -> None:
     if new_recall in ("hybrid", "context", "tools"):
         hermes_host["recallMode"] = new_recall
 
+    # Observation mode
+    current_obs = hermes_host.get("observationMode") or cfg.get("observationMode", "unified")
+    print("\n  Observation mode options:")
+    print("    unified       — user observes self; AI peer is passive")
+    print("    directional   — user observes self; AI peer observes user")
+    print("    bidirectional — both peers observe self and each other")
+    new_obs = _prompt("Observation mode", default=current_obs)
+    if new_obs in ("unified", "directional", "bidirectional"):
+        hermes_host["observationMode"] = new_obs
+
     # Session strategy
     current_strat = hermes_host.get("sessionStrategy") or cfg.get("sessionStrategy", "per-directory")
     print("\n  Session strategy options:")
@@ -546,6 +556,7 @@ def cmd_status(args) -> None:
     print(f"  User peer:      {hcfg.peer_name or 'not set'}")
     print(f"  Session key:    {hcfg.resolve_session_name()}")
     print(f"  Recall mode:    {hcfg.recall_mode}")
+    print(f"  Observe mode:   {hcfg.observation_mode}")
     print(f"  Memory mode:    {hcfg.memory_mode}")
     if hcfg.peer_memory_modes:
         print("  Per-peer modes:")
@@ -612,8 +623,8 @@ def _cmd_status_all() -> None:
     active = _active_profile_name()
 
     print(f"\nHoncho profiles ({len(rows)})\n" + "─" * 60)
-    print(f"  {'Profile':<14} {'Host':<22} {'Enabled':<9} {'Mode':<9} {'Recall':<9} {'Write'}")
-    print(f"  {'─' * 14} {'─' * 22} {'─' * 9} {'─' * 9} {'─' * 9} {'─' * 9}")
+    print(f"  {'Profile':<14} {'Host':<22} {'Enabled':<9} {'Mode':<9} {'Recall':<9} {'Observe':<13} {'Write'}")
+    print(f"  {'─' * 14} {'─' * 22} {'─' * 9} {'─' * 9} {'─' * 9} {'─' * 13} {'─' * 9}")
 
     for name, host, block in rows:
         enabled = block.get("enabled", cfg.get("enabled"))
@@ -625,10 +636,11 @@ def _cmd_status_all() -> None:
 
         mode = block.get("memoryMode") or cfg.get("memoryMode", "hybrid")
         recall = block.get("recallMode") or cfg.get("recallMode", "hybrid")
+        observe = block.get("observationMode") or cfg.get("observationMode", "unified")
         write = block.get("writeFrequency") or cfg.get("writeFrequency", "async")
 
         marker = " *" if name == active else ""
-        print(f"  {name + marker:<14} {host:<22} {enabled_str:<9} {mode:<9} {recall:<9} {write}")
+        print(f"  {name + marker:<14} {host:<22} {enabled_str:<9} {mode:<9} {recall:<9} {observe:<13} {write}")
 
     print(f"\n  * active profile\n")
 
@@ -781,6 +793,40 @@ def cmd_mode(args) -> None:
     cfg.setdefault("hosts", {}).setdefault(host, {})["memoryMode"] = mode_arg
     _write_config(cfg)
     print(f"  {label}Memory mode -> {mode_arg}  ({MODES[mode_arg]})\n")
+
+
+def cmd_observation(args) -> None:
+    """Show or set the Honcho observation mode."""
+    modes = {
+        "unified": "user observes self; AI peer is passive",
+        "directional": "user observes self; AI peer observes user",
+        "bidirectional": "both peers observe self and each other",
+    }
+    cfg = _read_config()
+    mode_arg = getattr(args, "mode", None)
+
+    if mode_arg is None:
+        current = (
+            (cfg.get("hosts") or {}).get(_host_key(), {}).get("observationMode")
+            or cfg.get("observationMode")
+            or "unified"
+        )
+        print("\nHoncho observation mode\n" + "─" * 40)
+        for name, desc in modes.items():
+            marker = " ←" if name == current else ""
+            print(f"  {name:<13} {desc}{marker}")
+        print("\n  Set with: hermes honcho observation [unified|directional|bidirectional]\n")
+        return
+
+    if mode_arg not in modes:
+        print(f"  Invalid mode '{mode_arg}'. Options: {', '.join(modes)}\n")
+        return
+
+    host = _host_key()
+    label = f"[{host}] " if host != "hermes" else ""
+    cfg.setdefault("hosts", {}).setdefault(host, {})["observationMode"] = mode_arg
+    _write_config(cfg)
+    print(f"  {label}Observation mode -> {mode_arg}  ({modes[mode_arg]})\n")
 
 
 def cmd_tokens(args) -> None:
@@ -1149,6 +1195,8 @@ def honcho_command(args) -> None:
         cmd_peer(args)
     elif sub == "mode":
         cmd_mode(args)
+    elif sub == "observation":
+        cmd_observation(args)
     elif sub == "tokens":
         cmd_tokens(args)
     elif sub == "identity":
@@ -1163,4 +1211,4 @@ def honcho_command(args) -> None:
         cmd_sync(args)
     else:
         print(f"  Unknown honcho command: {sub}")
-        print("  Available: setup, status, sessions, map, peer, mode, tokens, identity, migrate, enable, disable, sync\n")
+        print("  Available: setup, status, sessions, map, peer, mode, observation, tokens, identity, migrate, enable, disable, sync\n")

@@ -1,8 +1,10 @@
 """Tests for plugins/memory/honcho/session.py — HonchoSession and helpers."""
 
+import sys
 from datetime import datetime
 from unittest.mock import MagicMock
 
+from plugins.memory.honcho.client import HonchoClientConfig
 from plugins.memory.honcho.session import (
     HonchoSession,
     HonchoSessionManager,
@@ -187,3 +189,100 @@ class TestManagerCacheOps:
         assert keys == {"k1", "k2"}
         s1_info = next(s for s in sessions if s["key"] == "k1")
         assert s1_info["message_count"] == 1
+
+
+class _FakeSessionPeerConfig:
+    def __init__(self, *, observe_me, observe_others):
+        self.observe_me = observe_me
+        self.observe_others = observe_others
+
+
+class TestObservationModes:
+    def _make_manager(self, observation_mode: str) -> HonchoSessionManager:
+        cfg = HonchoClientConfig(
+            api_key="test-key",
+            enabled=True,
+            write_frequency="turn",
+            observation_mode=observation_mode,
+        )
+        mgr = HonchoSessionManager(config=cfg)
+        mgr._honcho = MagicMock()
+        return mgr
+
+    def test_session_peer_configs_respect_unified_directional_and_bidirectional(self):
+        fake_module = type("FakeHonchoSessionModule", (), {"SessionPeerConfig": _FakeSessionPeerConfig})
+        user_peer = object()
+        ai_peer = object()
+
+        expected = {
+            "unified": ((True, False), (False, False)),
+            "directional": ((True, False), (False, True)),
+            "bidirectional": ((True, True), (True, True)),
+        }
+
+        for mode, ((user_me, user_others), (ai_me, ai_others)) in expected.items():
+            mgr = self._make_manager(mode)
+            fake_session = MagicMock()
+            fake_session.context.return_value = MagicMock(messages=[])
+            mgr._honcho.session.return_value = fake_session
+
+            old_module = sys.modules.get("honcho.session")
+            sys.modules["honcho.session"] = fake_module
+            try:
+                mgr._get_or_create_honcho_session("sess", user_peer, ai_peer)
+            finally:
+                if old_module is not None:
+                    sys.modules["honcho.session"] = old_module
+                else:
+                    del sys.modules["honcho.session"]
+
+            add_peers_arg = fake_session.add_peers.call_args.args[0]
+            _, user_cfg = add_peers_arg[0]
+            _, ai_cfg = add_peers_arg[1]
+            assert (user_cfg.observe_me, user_cfg.observe_others) == (user_me, user_others)
+            assert (ai_cfg.observe_me, ai_cfg.observe_others) == (ai_me, ai_others)
+
+    def test_dialectic_query_uses_cross_observation_for_directional_and_bidirectional(self):
+        for mode in ("directional", "bidirectional"):
+            mgr = self._make_manager(mode)
+            session = HonchoSession(
+                key="k",
+                user_peer_id="user",
+                assistant_peer_id="ai",
+                honcho_session_id="sess",
+            )
+            mgr._cache[session.key] = session
+
+            ai_peer = MagicMock()
+            ai_peer.chat.return_value = "answer"
+            mgr._peers_cache["ai"] = ai_peer
+
+            result = mgr.dialectic_query("k", "what does the user prefer?", peer="user")
+
+            assert result == "answer"
+            ai_peer.chat.assert_called_once_with(
+                "what does the user prefer?",
+                target="user",
+                reasoning_level="low",
+            )
+
+    def test_create_conclusion_uses_cross_scope_for_bidirectional(self):
+        mgr = self._make_manager("bidirectional")
+        session = HonchoSession(
+            key="k",
+            user_peer_id="user",
+            assistant_peer_id="ai",
+            honcho_session_id="sess",
+        )
+        mgr._cache[session.key] = session
+
+        assistant_peer = MagicMock()
+        conclusions = MagicMock()
+        assistant_peer.conclusions_of.return_value = conclusions
+        mgr._peers_cache["ai"] = assistant_peer
+
+        ok = mgr.create_conclusion("k", "User prefers terse responses")
+
+        assert ok is True
+        assistant_peer.conclusions_of.assert_called_once_with("user")
+        conclusions.create.assert_called_once()

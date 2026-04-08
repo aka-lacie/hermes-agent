@@ -147,6 +147,10 @@ class HonchoSessionManager:
         self._peers_cache[peer_id] = peer
         return peer
 
+    def _uses_cross_observation(self) -> bool:
+        """Return True when AI->user observations are enabled."""
+        return self._observation_mode in {"directional", "bidirectional"}
+
     def _get_or_create_honcho_session(
         self, session_id: str, user_peer: Any, assistant_peer: Any
     ) -> tuple[Any, list]:
@@ -163,12 +167,15 @@ class HonchoSessionManager:
         session = self.honcho.session(session_id)
 
         # Configure peer observation settings based on observation_mode.
-        # Unified: user peer observes self, AI peer passive — all agents share
-        #          one observation pool via user self-observations.
-        # Directional: AI peer observes user — each agent keeps its own view.
+        # Unified: user peer observes self, AI peer passive.
+        # Directional: user peer observes self, AI peer observes user.
+        # Bidirectional: both peers observe self and each other.
         try:
             from honcho.session import SessionPeerConfig
-            if self._observation_mode == "directional":
+            if self._observation_mode == "bidirectional":
+                user_config = SessionPeerConfig(observe_me=True, observe_others=True)
+                ai_config = SessionPeerConfig(observe_me=True, observe_others=True)
+            elif self._observation_mode == "directional":
                 user_config = SessionPeerConfig(observe_me=True, observe_others=False)
                 ai_config = SessionPeerConfig(observe_me=False, observe_others=True)
             else:  # unified (default)
@@ -504,7 +511,7 @@ class HonchoSessionManager:
         level = reasoning_level or self._dynamic_reasoning_level(query)
 
         try:
-            if self._observation_mode == "directional":
+            if self._uses_cross_observation():
                 # AI peer queries about the user (cross-observation)
                 if peer == "ai":
                     ai_peer_obj = self._get_or_create_peer(session.assistant_peer_id)
@@ -623,32 +630,26 @@ class HonchoSessionManager:
             return {}
 
         result: dict[str, str] = {}
-        try:
-            ctx = honcho_session.context(
-                summary=False,
-                tokens=self._context_tokens,
-                peer_target=session.user_peer_id,
-                peer_perspective=session.assistant_peer_id,
-            )
-            card = ctx.peer_card or []
-            result["representation"] = ctx.peer_representation or ""
-            result["card"] = "\n".join(card) if isinstance(card, list) else str(card)
-        except Exception as e:
-            logger.warning("Failed to fetch user context from Honcho: %s", e)
 
-        # Also fetch AI peer's own representation so Hermes knows itself.
-        try:
-            ai_ctx = honcho_session.context(
-                summary=False,
-                tokens=self._context_tokens,
-                peer_target=session.assistant_peer_id,
-                peer_perspective=session.user_peer_id,
-            )
-            ai_card = ai_ctx.peer_card or []
-            result["ai_representation"] = ai_ctx.peer_representation or ""
-            result["ai_card"] = "\n".join(ai_card) if isinstance(ai_card, list) else str(ai_card)
-        except Exception as e:
-            logger.debug("Failed to fetch AI peer context from Honcho: %s", e)
+        def _store_context(prefix: str, *, perspective: str, target: str, log_level: str = "warning") -> None:
+            try:
+                ctx = honcho_session.context(
+                    summary=False,
+                    tokens=self._context_tokens,
+                    peer_target=target,
+                    peer_perspective=perspective,
+                )
+                card = ctx.peer_card or []
+                result[f"{prefix}_representation"] = ctx.peer_representation or ""
+                result[f"{prefix}_card"] = "\n".join(card) if isinstance(card, list) else str(card)
+            except Exception as e:
+                message = f"Failed to fetch {prefix.replace('_', ' ')} context from Honcho: {e}"
+                getattr(logger, log_level)(message)
+
+        _store_context("user_self", perspective=session.user_peer_id, target=session.user_peer_id)
+        _store_context("ai_user_model", perspective=session.assistant_peer_id, target=session.user_peer_id)
+        _store_context("ai_self", perspective=session.assistant_peer_id, target=session.assistant_peer_id, log_level="debug")
+        _store_context("user_ai_model", perspective=session.user_peer_id, target=session.assistant_peer_id, log_level="debug")
 
         return result
 
@@ -919,7 +920,7 @@ class HonchoSessionManager:
             return False
 
         try:
-            if self._observation_mode == "directional":
+            if self._uses_cross_observation():
                 # AI peer creates conclusion about user (cross-observation)
                 assistant_peer = self._get_or_create_peer(session.assistant_peer_id)
                 conclusions_scope = assistant_peer.conclusions_of(session.user_peer_id)

@@ -85,8 +85,15 @@ def _normalize_recall_mode(val: str) -> str:
     return val if val in _VALID_RECALL_MODES else "hybrid"
 
 
-_VALID_OBSERVATION_MODES = {"unified", "directional"}
-_OBSERVATION_MODE_ALIASES = {"shared": "unified", "separate": "directional", "cross": "directional"}
+_VALID_OBSERVATION_MODES = {"unified", "directional", "bidirectional"}
+_OBSERVATION_MODE_ALIASES = {
+    "shared": "unified",
+    "separate": "directional",
+    "cross": "directional",
+    "both": "bidirectional",
+    "all": "bidirectional",
+    "full": "bidirectional",
+}
 
 
 def _normalize_observation_mode(val: str) -> str:
@@ -165,8 +172,9 @@ class HonchoClientConfig:
     # "tools"   — Honcho tools only, no auto-injected context
     recall_mode: str = "hybrid"
     # Observation mode: how Honcho peers observe each other.
-    # "unified"      — user peer observes self; all agents share one observation pool
-    # "directional"  — AI peer observes user; each agent keeps its own view
+    # "unified"       — user peer observes self; AI peer is passive
+    # "directional"   — user peer observes self; AI peer observes user
+    # "bidirectional" — both peers observe self and each other
     observation_mode: str = "unified"
     # Session resolution
     session_strategy: str = "per-directory"
