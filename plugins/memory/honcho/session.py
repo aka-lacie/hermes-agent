@@ -643,6 +643,29 @@ class HonchoSessionManager:
         with self._prefetch_cache_lock:
             return self._context_cache.pop(session_key, {})
 
+    def _context_from_session_perspective(
+        self, honcho_session: Any, *, target: str, perspective: str
+    ) -> dict[str, Any]:
+        """Fetch representation + peer card for one target/perspective pair."""
+        try:
+            ctx = honcho_session.context(
+                summary=False,
+                tokens=self._context_tokens,
+                peer_target=target,
+                peer_perspective=perspective,
+            )
+            representation = (
+                getattr(ctx, "representation", None)
+                or getattr(ctx, "peer_representation", None)
+                or ""
+            )
+            card = self._normalize_card(getattr(ctx, "peer_card", None))
+            return {"representation": representation, "card": card}
+        except Exception:
+            # Fall back to the direct peer API when perspective-scoped context
+            # isn't available.
+            return self._fetch_peer_context(target)
+
     def get_prefetch_context(self, session_key: str, user_message: str | None = None) -> dict[str, str]:
         """
         Pre-fetch user and AI peer context from Honcho.
@@ -657,28 +680,51 @@ class HonchoSessionManager:
             user_message: Unused; kept for call-site compatibility.
 
         Returns:
-            Dictionary with 'representation', 'card', 'ai_representation',
-            and 'ai_card' keys.
+            Dictionary with four perspective-specific representation/card pairs.
         """
         session = self._cache.get(session_key)
         if not session:
             return {}
 
-        result: dict[str, str] = {}
-        try:
-            user_ctx = self._fetch_peer_context(session.user_peer_id)
-            result["representation"] = user_ctx["representation"]
-            result["card"] = "\n".join(user_ctx["card"])
-        except Exception as e:
-            logger.warning("Failed to fetch user context from Honcho: %s", e)
+        honcho_session = self._sessions_cache.get(session.honcho_session_id)
+        if not honcho_session:
+            return {}
 
-        # Also fetch AI peer's own representation so Hermes knows itself.
-        try:
-            ai_ctx = self._fetch_peer_context(session.assistant_peer_id)
-            result["ai_representation"] = ai_ctx["representation"]
-            result["ai_card"] = "\n".join(ai_ctx["card"])
-        except Exception as e:
-            logger.debug("Failed to fetch AI peer context from Honcho: %s", e)
+        result: dict[str, str] = {}
+
+        def _store_context(prefix: str, *, target: str, perspective: str, log_level: str = "warning") -> None:
+            try:
+                ctx = self._context_from_session_perspective(
+                    honcho_session, target=target, perspective=perspective
+                )
+                result[f"{prefix}_representation"] = ctx["representation"]
+                result[f"{prefix}_card"] = "\n".join(ctx["card"])
+            except Exception as e:
+                message = f"Failed to fetch {prefix.replace('_', ' ')} context from Honcho: {e}"
+                getattr(logger, log_level)(message)
+
+        _store_context(
+            "user_self",
+            target=session.user_peer_id,
+            perspective=session.user_peer_id,
+        )
+        _store_context(
+            "ai_user_model",
+            target=session.user_peer_id,
+            perspective=session.assistant_peer_id,
+        )
+        _store_context(
+            "ai_self",
+            target=session.assistant_peer_id,
+            perspective=session.assistant_peer_id,
+            log_level="debug",
+        )
+        _store_context(
+            "user_ai_model",
+            target=session.assistant_peer_id,
+            perspective=session.user_peer_id,
+            log_level="debug",
+        )
 
         return result
 

@@ -20,7 +20,6 @@ Usage:
     response = agent.run_conversation("Tell me about the latest Python updates")
 """
 
-import atexit
 import asyncio
 import base64
 import concurrent.futures
@@ -36,7 +35,6 @@ import sys
 import tempfile
 import time
 import threading
-import weakref
 from types import SimpleNamespace
 import uuid
 from typing import List, Dict, Any, Optional
@@ -528,6 +526,7 @@ class AIAgent:
         reasoning_config: Dict[str, Any] = None,
         prefill_messages: List[Dict[str, Any]] = None,
         platform: str = None,
+        user_id: str = None,
         skip_context_files: bool = False,
         skip_memory: bool = False,
         session_db=None,
@@ -592,6 +591,7 @@ class AIAgent:
         self.quiet_mode = quiet_mode
         self.ephemeral_system_prompt = ephemeral_system_prompt
         self.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
+        self._user_id = user_id  # Platform user identifier (gateway sessions)
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -654,7 +654,7 @@ class AIAgent:
         self.stream_delta_callback = stream_delta_callback
         self.status_callback = status_callback
         self.tool_gen_callback = tool_gen_callback
-        self._last_reported_tool = None  # Track for "new tool" mode
+
         
         # Tool execution state — allows _vprint during tool execution
         # even when stream consumers are registered (no tokens streaming then)
@@ -1094,6 +1094,9 @@ class AIAgent:
                             "hermes_home": str(_ghh()),
                             "agent_context": "primary",
                         }
+                        # Thread gateway user identity for per-user memory scoping
+                        if self._user_id:
+                            _init_kwargs["user_id"] = self._user_id
                         # Profile identity for per-profile provider scoping
                         try:
                             from hermes_cli.profiles import get_active_profile_name
@@ -1502,10 +1505,6 @@ class AIAgent:
         """Return True when the base URL targets OpenRouter."""
         return "openrouter" in self._base_url_lower
 
-    def _is_anthropic_url(self) -> bool:
-        """Return True when the base URL targets Anthropic (native or /anthropic proxy path)."""
-        return "api.anthropic.com" in self._base_url_lower or self._base_url_lower.rstrip("/").endswith("/anthropic")
-
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
         
@@ -1691,74 +1690,6 @@ class AIAgent:
         
         return None
 
-    def _classify_empty_content_response(
-        self,
-        assistant_message,
-        *,
-        finish_reason: Optional[str],
-        approx_tokens: int,
-        api_messages: List[Dict[str, Any]],
-        conversation_history: Optional[List[Dict[str, Any]]],
-    ) -> Dict[str, Any]:
-        """Classify think-only/empty responses so we can retry, compress, or salvage.
-
-        We intentionally do NOT short-circuit all structured-reasoning responses.
-        Prior discussion/PR history shows some models recover on retry. Instead we:
-        - compress immediately when the pattern looks like implicit context pressure
-        - salvage reasoning early when the same reasoning-only payload repeats
-        - otherwise preserve the normal retry path
-        """
-        reasoning_text = self._extract_reasoning(assistant_message)
-        has_structured_reasoning = bool(
-            getattr(assistant_message, "reasoning", None)
-            or getattr(assistant_message, "reasoning_content", None)
-            or getattr(assistant_message, "reasoning_details", None)
-        )
-        content = getattr(assistant_message, "content", None) or ""
-        stripped_content = self._strip_think_blocks(content).strip()
-        signature = (
-            content,
-            reasoning_text or "",
-            bool(has_structured_reasoning),
-            finish_reason or "",
-        )
-        repeated_signature = signature == getattr(self, "_last_empty_content_signature", None)
-
-        compressor = getattr(self, "context_compressor", None)
-        ctx_len = getattr(compressor, "context_length", 0) or 0
-        threshold_tokens = getattr(compressor, "threshold_tokens", 0) or 0
-        is_large_session = bool(
-            (ctx_len and approx_tokens >= max(int(ctx_len * 0.4), threshold_tokens))
-            or len(api_messages) > 80
-        )
-        is_local_custom = is_local_endpoint(getattr(self, "base_url", "") or "")
-        is_resumed = bool(conversation_history)
-        context_pressure_signals = any(
-            [
-                finish_reason == "length",
-                getattr(compressor, "_context_probed", False),
-                is_large_session,
-                is_resumed,
-            ]
-        )
-        should_compress = bool(
-            self.compression_enabled
-            and is_local_custom
-            and context_pressure_signals
-            and not stripped_content
-        )
-
-        self._last_empty_content_signature = signature
-        return {
-            "reasoning_text": reasoning_text,
-            "has_structured_reasoning": has_structured_reasoning,
-            "repeated_signature": repeated_signature,
-            "should_compress": should_compress,
-            "is_local_custom": is_local_custom,
-            "is_large_session": is_large_session,
-            "is_resumed": is_resumed,
-        }
-    
     def _cleanup_task_resources(self, task_id: str) -> None:
         """Clean up VM and browser resources for a given task."""
         try:
@@ -2747,18 +2678,43 @@ class AIAgent:
 
             ctx = self._honcho.pop_context_result(self._honcho_session_key)
             if ctx:
-                rep = ctx.get("representation", "")
-                card = ctx.get("card", "")
-                if rep:
-                    parts.append(f"## User representation\n{rep}")
-                if card:
-                    parts.append(card)
-                ai_rep = ctx.get("ai_representation", "")
-                ai_card = ctx.get("ai_card", "")
-                if ai_rep:
-                    parts.append(f"## AI peer representation\n{ai_rep}")
-                if ai_card:
-                    parts.append(ai_card)
+                user_name = (
+                    (self._honcho_config.peer_name or "User")
+                    if self._honcho_config
+                    else "User"
+                )
+                ai_name = (
+                    (self._honcho_config.ai_peer or "Agent")
+                    if self._honcho_config
+                    else "Agent"
+                )
+                sections = [
+                    (
+                        f"## {user_name} self-representation",
+                        ctx.get("user_self_representation", ""),
+                        ctx.get("user_self_card", ""),
+                    ),
+                    (
+                        f"## {ai_name}'s model of {user_name}",
+                        ctx.get("ai_user_model_representation", ""),
+                        ctx.get("ai_user_model_card", ""),
+                    ),
+                    (
+                        f"## {ai_name} self-representation",
+                        ctx.get("ai_self_representation", ""),
+                        ctx.get("ai_self_card", ""),
+                    ),
+                    (
+                        f"## {user_name}'s model of {ai_name}",
+                        ctx.get("user_ai_model_representation", ""),
+                        ctx.get("user_ai_model_card", ""),
+                    ),
+                ]
+                for heading, rep, card in sections:
+                    if rep:
+                        parts.append(f"{heading}\n{rep}")
+                    if card:
+                        parts.append(card)
 
             dialectic = self._honcho.pop_dialectic_result(self._honcho_session_key)
             if dialectic:
@@ -2841,20 +2797,7 @@ class AIAgent:
 
         if not _soul_loaded:
             # Fallback to hardcoded identity
-            _ai_peer_name = (
-                None
-                if False
-                else None
-            )
-            if _ai_peer_name:
-                _identity = DEFAULT_AGENT_IDENTITY.replace(
-                    "You are Hermes Agent",
-                    f"You are {_ai_peer_name}",
-                    1,
-                )
-            else:
-                _identity = DEFAULT_AGENT_IDENTITY
-            prompt_parts = [_identity]
+            prompt_parts = [DEFAULT_AGENT_IDENTITY]
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
@@ -3539,7 +3482,7 @@ class AIAgent:
         elif "stream" in api_kwargs:
             raise ValueError("Codex Responses stream flag is only allowed in fallback streaming requests.")
 
-        unexpected = sorted(key for key in api_kwargs.keys() if key not in allowed_keys)
+        unexpected = sorted(key for key in api_kwargs if key not in allowed_keys)
         if unexpected:
             raise ValueError(
                 f"Codex Responses request has unsupported field(s): {', '.join(unexpected)}."
@@ -3583,7 +3526,22 @@ class AIAgent:
         """Normalize a Responses API object to an assistant_message-like object."""
         output = getattr(response, "output", None)
         if not isinstance(output, list) or not output:
-            raise RuntimeError("Responses API returned no output items")
+            # The Codex backend can return empty output when the answer was
+            # delivered entirely via stream events. Check output_text as a
+            # last-resort fallback before raising.
+            out_text = getattr(response, "output_text", None)
+            if isinstance(out_text, str) and out_text.strip():
+                logger.debug(
+                    "Codex response has empty output but output_text is present (%d chars); "
+                    "synthesizing output item.", len(out_text.strip()),
+                )
+                output = [SimpleNamespace(
+                    type="message", role="assistant", status="completed",
+                    content=[SimpleNamespace(type="output_text", text=out_text.strip())],
+                )]
+                response.output = output
+            else:
+                raise RuntimeError("Responses API returned no output items")
 
         response_status = getattr(response, "status", None)
         if isinstance(response_status, str):
@@ -4007,7 +3965,12 @@ class AIAgent:
         has_tool_calls = False
         first_delta_fired = False
         self._reasoning_deltas_fired = False
+        # Accumulate streamed text so we can recover if get_final_response()
+        # returns empty output (e.g. chatgpt.com backend-api sends
+        # response.incomplete instead of response.completed).
+        self._codex_streamed_text_parts: list = []
         for attempt in range(max_stream_retries + 1):
+            collected_output_items: list = []
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
                     for event in stream:
@@ -4017,6 +3980,8 @@ class AIAgent:
                         # Fire callbacks on text content deltas (suppress during tool calls)
                         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
                             delta_text = getattr(event, "delta", "")
+                            if delta_text:
+                                self._codex_streamed_text_parts.append(delta_text)
                             if delta_text and not has_tool_calls:
                                 if not first_delta_fired:
                                     first_delta_fired = True
@@ -4034,7 +3999,51 @@ class AIAgent:
                             reasoning_text = getattr(event, "delta", "")
                             if reasoning_text:
                                 self._fire_reasoning_delta(reasoning_text)
-                    return stream.get_final_response()
+                        # Collect completed output items — some backends
+                        # (chatgpt.com/backend-api/codex) stream valid items
+                        # via response.output_item.done but the SDK's
+                        # get_final_response() returns an empty output list.
+                        elif event_type == "response.output_item.done":
+                            done_item = getattr(event, "item", None)
+                            if done_item is not None:
+                                collected_output_items.append(done_item)
+                        # Log non-completed terminal events for diagnostics
+                        elif event_type in ("response.incomplete", "response.failed"):
+                            resp_obj = getattr(event, "response", None)
+                            status = getattr(resp_obj, "status", None) if resp_obj else None
+                            incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
+                            logger.warning(
+                                "Codex Responses stream received terminal event %s "
+                                "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
+                                event_type, status, incomplete_details,
+                                sum(len(p) for p in self._codex_streamed_text_parts),
+                                self._client_log_context(),
+                            )
+                    final_response = stream.get_final_response()
+                    # PATCH: ChatGPT Codex backend streams valid output items
+                    # but get_final_response() can return an empty output list.
+                    # Backfill from collected items or synthesize from deltas.
+                    _out = getattr(final_response, "output", None)
+                    if isinstance(_out, list) and not _out:
+                        if collected_output_items:
+                            final_response.output = list(collected_output_items)
+                            logger.debug(
+                                "Codex stream: backfilled %d output items from stream events",
+                                len(collected_output_items),
+                            )
+                        elif self._codex_streamed_text_parts and not has_tool_calls:
+                            assembled = "".join(self._codex_streamed_text_parts)
+                            final_response.output = [SimpleNamespace(
+                                type="message",
+                                role="assistant",
+                                status="completed",
+                                content=[SimpleNamespace(type="output_text", text=assembled)],
+                            )]
+                            logger.debug(
+                                "Codex stream: synthesized output from %d text deltas (%d chars)",
+                                len(self._codex_streamed_text_parts), len(assembled),
+                            )
+                    return final_response
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
                 if attempt < max_stream_retries:
                     logger.debug(
@@ -4085,11 +4094,28 @@ class AIAgent:
             return stream_or_response
 
         terminal_response = None
+        collected_output_items: list = []
+        collected_text_deltas: list = []
         try:
             for event in stream_or_response:
                 event_type = getattr(event, "type", None)
                 if not event_type and isinstance(event, dict):
                     event_type = event.get("type")
+
+                # Collect output items and text deltas for backfill
+                if event_type == "response.output_item.done":
+                    done_item = getattr(event, "item", None)
+                    if done_item is None and isinstance(event, dict):
+                        done_item = event.get("item")
+                    if done_item is not None:
+                        collected_output_items.append(done_item)
+                elif event_type in ("response.output_text.delta",):
+                    delta = getattr(event, "delta", "")
+                    if not delta and isinstance(event, dict):
+                        delta = event.get("delta", "")
+                    if delta:
+                        collected_text_deltas.append(delta)
+
                 if event_type not in {"response.completed", "response.incomplete", "response.failed"}:
                     continue
 
@@ -4097,6 +4123,26 @@ class AIAgent:
                 if terminal_response is None and isinstance(event, dict):
                     terminal_response = event.get("response")
                 if terminal_response is not None:
+                    # Backfill empty output from collected stream events
+                    _out = getattr(terminal_response, "output", None)
+                    if isinstance(_out, list) and not _out:
+                        if collected_output_items:
+                            terminal_response.output = list(collected_output_items)
+                            logger.debug(
+                                "Codex fallback stream: backfilled %d output items",
+                                len(collected_output_items),
+                            )
+                        elif collected_text_deltas:
+                            assembled = "".join(collected_text_deltas)
+                            terminal_response.output = [SimpleNamespace(
+                                type="message", role="assistant",
+                                status="completed",
+                                content=[SimpleNamespace(type="output_text", text=assembled)],
+                            )]
+                            logger.debug(
+                                "Codex fallback stream: synthesized from %d deltas (%d chars)",
+                                len(collected_text_deltas), len(assembled),
+                            )
                     return terminal_response
         finally:
             close_fn = getattr(stream_or_response, "close", None)
@@ -5859,6 +5905,7 @@ class AIAgent:
                 api_msg.pop("reasoning", None)
                 api_msg.pop("finish_reason", None)
                 api_msg.pop("_flush_sentinel", None)
+                api_msg.pop("_thinking_prefill", None)
                 if _needs_sanitize:
                     self._sanitize_tool_calls_for_strict_api(api_msg)
                 api_messages.append(api_msg)
@@ -5944,7 +5991,7 @@ class AIAgent:
                         args = json.loads(tc.function.arguments)
                         flush_target = args.get("target", "memory")
                         from tools.memory_tool import memory_tool as _memory_tool
-                        result = _memory_tool(
+                        _memory_tool(
                             action=args.get("action"),
                             target=flush_target,
                             content=args.get("content"),
@@ -6782,7 +6829,7 @@ class AIAgent:
             api_messages = []
             for msg in messages:
                 api_msg = msg.copy()
-                for internal_field in ("reasoning", "finish_reason"):
+                for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
                     api_msg.pop(internal_field, None)
                 if _needs_sanitize:
                     self._sanitize_tool_calls_for_strict_api(api_msg)
@@ -6974,6 +7021,7 @@ class AIAgent:
         self._empty_content_retries = 0
         self._incomplete_scratchpad_retries = 0
         self._codex_incomplete_retries = 0
+        self._thinking_prefill_retries = 0
         self._last_content_with_tools = None
         self._mute_post_response = False
         self._surrogate_sanitized = False
@@ -7319,6 +7367,8 @@ class AIAgent:
                 # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
                 if "finish_reason" in api_msg:
                     api_msg.pop("finish_reason")
+                # Strip internal thinking-prefill marker
+                api_msg.pop("_thinking_prefill", None)
                 # Strip Codex Responses API fields (call_id, response_item_id) for
                 # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
                 # Uses new dicts so the internal messages list retains the fields
@@ -7504,9 +7554,31 @@ class AIAgent:
                         elif not isinstance(output_items, list):
                             response_invalid = True
                             error_details.append("response.output is not a list")
-                        elif len(output_items) == 0:
-                            response_invalid = True
-                            error_details.append("response.output is empty")
+                        elif not output_items:
+                            # Stream backfill may have failed, but
+                            # _normalize_codex_response can still recover
+                            # from response.output_text. Only mark invalid
+                            # when that fallback is also absent.
+                            _out_text = getattr(response, "output_text", None)
+                            _out_text_stripped = _out_text.strip() if isinstance(_out_text, str) else ""
+                            if _out_text_stripped:
+                                logger.debug(
+                                    "Codex response.output is empty but output_text is present "
+                                    "(%d chars); deferring to normalization.",
+                                    len(_out_text_stripped),
+                                )
+                            else:
+                                _resp_status = getattr(response, "status", None)
+                                _resp_incomplete = getattr(response, "incomplete_details", None)
+                                logger.warning(
+                                    "Codex response.output is empty after stream backfill "
+                                    "(status=%s, incomplete_details=%s, model=%s). %s",
+                                    _resp_status, _resp_incomplete,
+                                    getattr(response, "model", None),
+                                    f"api_mode={self.api_mode} provider={self.provider}",
+                                )
+                                response_invalid = True
+                                error_details.append("response.output is empty")
                     elif self.api_mode == "anthropic_messages":
                         content_blocks = getattr(response, "content", None) if response is not None else None
                         if response is None:
@@ -7515,11 +7587,11 @@ class AIAgent:
                         elif not isinstance(content_blocks, list):
                             response_invalid = True
                             error_details.append("response.content is not a list")
-                        elif len(content_blocks) == 0:
+                        elif not content_blocks:
                             response_invalid = True
                             error_details.append("response.content is empty")
                     else:
-                        if response is None or not hasattr(response, 'choices') or response.choices is None or len(response.choices) == 0:
+                        if response is None or not hasattr(response, 'choices') or response.choices is None or not response.choices:
                             response_invalid = True
                             if response is None:
                                 error_details.append("response is None")
@@ -8326,11 +8398,17 @@ class AIAgent:
                         self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
                         # Actionable guidance for common auth errors
                         if status_code in (401, 403) or "unauthorized" in error_msg or "forbidden" in error_msg or "permission" in error_msg:
-                            self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
-                            self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
-                            self._vprint(f"{self.log_prefix}      • Does your account have access to {_model}?", force=True)
-                            if "openrouter" in str(_base).lower():
-                                self._vprint(f"{self.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
+                            if _provider == "openai-codex" and status_code == 401:
+                                self._vprint(f"{self.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
+                                self._vprint(f"{self.log_prefix}      refreshed by another client (Codex CLI, VS Code). To fix:", force=True)
+                                self._vprint(f"{self.log_prefix}      1. Run `codex` in your terminal to generate fresh tokens.", force=True)
+                                self._vprint(f"{self.log_prefix}      2. Then run `hermes auth` to re-authenticate.", force=True)
+                            else:
+                                self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
+                                self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
+                                self._vprint(f"{self.log_prefix}      • Does your account have access to {_model}?", force=True)
+                                if "openrouter" in str(_base).lower():
+                                    self._vprint(f"{self.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
                         else:
                             self._vprint(f"{self.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
                         logging.error(f"{self.log_prefix}Non-retryable client error: {api_error}")
@@ -8835,6 +8913,15 @@ class AIAgent:
                             if clean:
                                 self._vprint(f"  ┊ 💬 {clean}")
                     
+                    # Pop thinking-only prefill message(s) before appending
+                    # (tool-call path — same rationale as the final-response path).
+                    while (
+                        messages
+                        and isinstance(messages[-1], dict)
+                        and messages[-1].get("_thinking_prefill")
+                    ):
+                        messages.pop()
+
                     messages.append(assistant_msg)
 
                     # Close any open streaming display (response box, reasoning
@@ -8948,11 +9035,36 @@ class AIAgent:
                             self._response_was_previewed = True
                             break
 
-                        # Reasoning-only response: the model produced thinking
-                        # but no visible content.  This is a valid response —
-                        # keep reasoning in its own field and set content to
-                        # "(empty)" so every provider accepts the message.
-                        # No retries needed.
+                        # ── Thinking-only prefill continuation ──────────
+                        # The model produced structured reasoning (via API
+                        # fields) but no visible text content.  Rather than
+                        # giving up, append the assistant message as-is and
+                        # continue — the model will see its own reasoning
+                        # on the next turn and produce the text portion.
+                        # Inspired by clawdbot's "incomplete-text" recovery.
+                        _has_structured = bool(
+                            getattr(assistant_message, "reasoning", None)
+                            or getattr(assistant_message, "reasoning_content", None)
+                            or getattr(assistant_message, "reasoning_details", None)
+                        )
+                        if _has_structured and self._thinking_prefill_retries < 2:
+                            self._thinking_prefill_retries += 1
+                            self._vprint(
+                                f"{self.log_prefix}↻ Thinking-only response — "
+                                f"prefilling to continue "
+                                f"({self._thinking_prefill_retries}/2)"
+                            )
+                            interim_msg = self._build_assistant_message(
+                                assistant_message, "incomplete"
+                            )
+                            interim_msg["_thinking_prefill"] = True
+                            messages.append(interim_msg)
+                            self._session_messages = messages
+                            self._save_session_log(messages)
+                            continue
+
+                        # Exhausted prefill attempts or no structured
+                        # reasoning — fall through to "(empty)" terminal.
                         reasoning_text = self._extract_reasoning(assistant_message)
                         assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                         assistant_msg["content"] = "(empty)"
@@ -8971,6 +9083,7 @@ class AIAgent:
                     if hasattr(self, '_empty_content_retries'):
                         self._empty_content_retries = 0
                     self._last_empty_content_signature = None
+                    self._thinking_prefill_retries = 0
 
                     if (
                         self.api_mode == "codex_responses"
@@ -9009,7 +9122,18 @@ class AIAgent:
                     final_response = self._strip_think_blocks(final_response).strip()
                     
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
-                    
+
+                    # Pop thinking-only prefill message(s) before appending
+                    # the final response.  This avoids consecutive assistant
+                    # messages which break strict-alternation providers
+                    # (Anthropic Messages API) and keeps history clean.
+                    while (
+                        messages
+                        and isinstance(messages[-1], dict)
+                        and messages[-1].get("_thinking_prefill")
+                    ):
+                        messages.pop()
+
                     messages.append(final_msg)
                     
                     if not self.quiet_mode:
@@ -9051,7 +9175,6 @@ class AIAgent:
                                     "content": f"Error executing tool: {error_msg}",
                                 }
                                 messages.append(err_msg)
-                        pending_handled = True
                     break
                 
                 # Non-tool errors don't need a synthetic message injected.

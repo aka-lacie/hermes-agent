@@ -94,8 +94,15 @@ def _resolve_bool(host_val, root_val, *, default: bool) -> bool:
     return default
 
 
-_VALID_OBSERVATION_MODES = {"unified", "directional"}
-_OBSERVATION_MODE_ALIASES = {"shared": "unified", "separate": "directional", "cross": "directional"}
+_VALID_OBSERVATION_MODES = {"unified", "directional", "bidirectional"}
+_OBSERVATION_MODE_ALIASES = {
+    "shared": "unified",
+    "separate": "directional",
+    "cross": "directional",
+    "both": "bidirectional",
+    "all": "bidirectional",
+    "full": "bidirectional",
+}
 
 
 def _normalize_observation_mode(val: str) -> str:
@@ -108,12 +115,16 @@ def _normalize_observation_mode(val: str) -> str:
 # Explicit per-peer config always wins over presets.
 _OBSERVATION_PRESETS = {
     "directional": {
-        "user_observe_me": True, "user_observe_others": True,
-        "ai_observe_me": True, "ai_observe_others": True,
+        "user_observe_me": True, "user_observe_others": False,
+        "ai_observe_me": False, "ai_observe_others": True,
     },
     "unified": {
         "user_observe_me": True, "user_observe_others": False,
-        "ai_observe_me": False, "ai_observe_others": True,
+        "ai_observe_me": False, "ai_observe_others": False,
+    },
+    "bidirectional": {
+        "user_observe_me": True, "user_observe_others": True,
+        "ai_observe_me": True, "ai_observe_others": True,
     },
 }
 
@@ -189,9 +200,10 @@ class HonchoClientConfig:
     # "context" — auto-injected context only, Honcho tools removed
     # "tools"   — Honcho tools only, no auto-injected context
     recall_mode: str = "hybrid"
-    # Observation mode: legacy string shorthand ("directional" or "unified").
+    # Observation mode: legacy string shorthand ("unified", "directional",
+    # or "bidirectional").
     # Kept for backward compat; granular per-peer booleans below are preferred.
-    observation_mode: str = "directional"
+    observation_mode: str = "unified"
     # Per-peer observation booleans — maps 1:1 to Honcho's SessionPeerConfig.
     # Resolved from "observation" object in config, falling back to observation_mode preset.
     user_observe_me: bool = True

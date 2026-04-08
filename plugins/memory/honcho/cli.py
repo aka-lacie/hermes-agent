@@ -1,6 +1,6 @@
 """CLI commands for Honcho integration management.
 
-Handles: hermes honcho setup | status | sessions | map | peer
+Handles: hermes honcho setup | status | sessions | map | peer | observation
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
-from plugins.memory.honcho.client import resolve_active_host, resolve_config_path, GLOBAL_CONFIG_PATH, HOST
+from plugins.memory.honcho.client import resolve_active_host, resolve_config_path, HOST
 
 
 def clone_honcho_for_profile(profile_name: str) -> bool:
@@ -41,7 +41,7 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
 
     # Clone settings from default block, override identity fields
     new_block = {}
-    for key in ("recallMode", "writeFrequency", "sessionStrategy",
+    for key in ("recallMode", "observationMode", "writeFrequency", "sessionStrategy",
                 "sessionPeerPrefix", "contextTokens", "dialecticReasoningLevel",
                 "dialecticDynamic", "dialecticMaxChars", "messageMaxChars",
                 "dialecticMaxInputChars", "saveMessages", "observation"):
@@ -107,7 +107,7 @@ def cmd_enable(args) -> None:
     # If this is a new profile host block with no settings, clone from default
     if not block.get("aiPeer"):
         default_block = cfg.get("hosts", {}).get(HOST, {})
-        for key in ("recallMode", "writeFrequency", "sessionStrategy",
+        for key in ("recallMode", "observationMode", "writeFrequency", "sessionStrategy",
                     "contextTokens", "dialecticReasoningLevel", "dialecticDynamic",
                     "dialecticMaxChars", "messageMaxChars", "dialecticMaxInputChars",
                     "saveMessages", "observation"):
@@ -408,10 +408,11 @@ def cmd_setup(args) -> None:
     # --- 4. Observation mode ---
     current_obs = hermes_host.get("observationMode") or cfg.get("observationMode", "directional")
     print("\n  Observation mode:")
-    print("    directional  -- all observations on, each AI peer builds its own view (default)")
-    print("    unified      -- shared pool, user observes self, AI observes others only")
+    print("    unified       -- user observes self; AI peer is passive")
+    print("    directional   -- user observes self; AI peer observes user (default)")
+    print("    bidirectional -- both peers observe self and each other")
     new_obs = _prompt("Observation mode", default=current_obs)
-    if new_obs in ("unified", "directional"):
+    if new_obs in ("unified", "directional", "bidirectional"):
         hermes_host["observationMode"] = new_obs
     else:
         hermes_host["observationMode"] = "directional"
@@ -496,7 +497,8 @@ def cmd_setup(args) -> None:
     print("    honcho_conclude  -- persist a user fact to memory (no LLM)")
     print("\n  Other commands:")
     print("    hermes honcho status     -- show full config")
-    print("    hermes honcho mode       -- change recall/observation mode")
+    print("    hermes honcho mode       -- change recall mode")
+    print("    hermes honcho observation -- change observation mode")
     print("    hermes honcho tokens     -- tune context and dialectic budgets")
     print("    hermes honcho peer       -- update peer names")
     print("    hermes honcho map <name> -- map this directory to a session name\n")
@@ -592,6 +594,7 @@ def cmd_status(args) -> None:
     print(f"  User peer:      {hcfg.peer_name or 'not set'}")
     print(f"  Session key:    {hcfg.resolve_session_name()}")
     print(f"  Recall mode:    {hcfg.recall_mode}")
+    print(f"  Observe mode:   {hcfg.observation_mode}")
     print(f"  Observation:    user(me={hcfg.user_observe_me},others={hcfg.user_observe_others}) ai(me={hcfg.ai_observe_me},others={hcfg.ai_observe_others})")
     print(f"  Write freq:     {hcfg.write_frequency}")
 
@@ -653,9 +656,9 @@ def _cmd_status_all() -> None:
     cfg = _read_config()
     active = _active_profile_name()
 
-    print(f"\nHoncho profiles ({len(rows)})\n" + "─" * 55)
-    print(f"  {'Profile':<14} {'Host':<22} {'Enabled':<9} {'Recall':<9} {'Write'}")
-    print(f"  {'─' * 14} {'─' * 22} {'─' * 9} {'─' * 9} {'─' * 9}")
+    print(f"\nHoncho profiles ({len(rows)})\n" + "─" * 70)
+    print(f"  {'Profile':<14} {'Host':<22} {'Enabled':<9} {'Recall':<9} {'Observe':<13} {'Write'}")
+    print(f"  {'─' * 14} {'─' * 22} {'─' * 9} {'─' * 9} {'─' * 13} {'─' * 9}")
 
     for name, host, block in rows:
         enabled = block.get("enabled", cfg.get("enabled"))
@@ -665,10 +668,11 @@ def _cmd_status_all() -> None:
         enabled_str = "yes" if enabled else "no"
 
         recall = block.get("recallMode") or cfg.get("recallMode", "hybrid")
+        observe = block.get("observationMode") or cfg.get("observationMode", "directional")
         write = block.get("writeFrequency") or cfg.get("writeFrequency", "async")
 
         marker = " *" if name == active else ""
-        print(f"  {name + marker:<14} {host:<22} {enabled_str:<9} {recall:<9} {write}")
+        print(f"  {name + marker:<14} {host:<22} {enabled_str:<9} {recall:<9} {observe:<13} {write}")
 
     print(f"\n  * active profile\n")
 
@@ -822,6 +826,40 @@ def cmd_mode(args) -> None:
     cfg.setdefault("hosts", {}).setdefault(host, {})["recallMode"] = mode_arg
     _write_config(cfg)
     print(f"  {label}Recall mode -> {mode_arg}  ({MODES[mode_arg]})\n")
+
+
+def cmd_observation(args) -> None:
+    """Show or set the Honcho observation mode."""
+    modes = {
+        "unified": "user observes self; AI peer is passive",
+        "directional": "user observes self; AI peer observes user",
+        "bidirectional": "both peers observe self and each other",
+    }
+    cfg = _read_config()
+    mode_arg = getattr(args, "mode", None)
+
+    if mode_arg is None:
+        current = (
+            (cfg.get("hosts") or {}).get(_host_key(), {}).get("observationMode")
+            or cfg.get("observationMode")
+            or "directional"
+        )
+        print("\nHoncho observation mode\n" + "─" * 40)
+        for name, desc in modes.items():
+            marker = " <-" if name == current else ""
+            print(f"  {name:<13} {desc}{marker}")
+        print("\n  Set with: hermes honcho observation [unified|directional|bidirectional]\n")
+        return
+
+    if mode_arg not in modes:
+        print(f"  Invalid mode '{mode_arg}'. Options: {', '.join(modes)}\n")
+        return
+
+    host = _host_key()
+    label = f"[{host}] " if host != "hermes" else ""
+    cfg.setdefault("hosts", {}).setdefault(host, {})["observationMode"] = mode_arg
+    _write_config(cfg)
+    print(f"  {label}Observation mode -> {mode_arg}  ({modes[mode_arg]})\n")
 
 
 def cmd_tokens(args) -> None:
@@ -1197,6 +1235,8 @@ def honcho_command(args) -> None:
         cmd_peer(args)
     elif sub == "mode":
         cmd_mode(args)
+    elif sub == "observation":
+        cmd_observation(args)
     elif sub == "tokens":
         cmd_tokens(args)
     elif sub == "identity":
@@ -1211,7 +1251,7 @@ def honcho_command(args) -> None:
         cmd_sync(args)
     else:
         print(f"  Unknown honcho command: {sub}")
-        print("  Available: status, sessions, map, peer, mode, tokens, identity, migrate, enable, disable, sync\n")
+        print("  Available: status, sessions, map, peer, mode, observation, tokens, identity, migrate, enable, disable, sync\n")
 
 
 def register_cli(subparser) -> None:
@@ -1220,7 +1260,6 @@ def register_cli(subparser) -> None:
     Called by the plugin CLI registration system during argparse setup.
     The *subparser* is the parser for ``hermes honcho``.
     """
-    import argparse
 
     subparser.add_argument(
         "--target-profile", metavar="NAME", dest="target_profile",
@@ -1269,6 +1308,15 @@ def register_cli(subparser) -> None:
         "mode", nargs="?", metavar="MODE",
         choices=("hybrid", "context", "tools"),
         help="Recall mode to set (hybrid/context/tools). Omit to show current.",
+    )
+
+    observation_parser = subs.add_parser(
+        "observation", help="Show or set observation mode (unified/directional/bidirectional)",
+    )
+    observation_parser.add_argument(
+        "mode", nargs="?", metavar="MODE",
+        choices=("unified", "directional", "bidirectional"),
+        help="Observation mode to set. Omit to show current.",
     )
 
     tokens_parser = subs.add_parser(
