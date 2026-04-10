@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import SimpleNamespace
@@ -1497,6 +1498,34 @@ class TestRunConversation:
         assert result["api_calls"] == 2
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
+
+    def test_current_time_tag_injected_only_into_api_payload(self, agent):
+        self._setup_agent(agent)
+        agent._inject_current_time_in_user_turn = True
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Final answer", finish_reason="stop"
+        )
+        fake_now = datetime(2026, 4, 9, 1, 39, tzinfo=timezone(timedelta(hours=-7), "PDT"))
+
+        with (
+            patch("hermes_time.now", return_value=fake_now),
+            patch.object(agent, "_persist_session") as mock_persist,
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        call_args = agent.client.chat.completions.create.call_args
+        assert call_args is not None
+        api_messages = call_args.kwargs["messages"]
+        api_user = next(msg for msg in api_messages if msg.get("role") == "user")
+        assert api_user["content"] == (
+            "hello\n\n<time-now>2026-04-09 Thu 01:39 AM PDT</time-now>"
+        )
+
+        persisted_messages = mock_persist.call_args.args[0]
+        assert persisted_messages[0]["content"] == "hello"
+        assert result["messages"][0]["content"] == "hello"
 
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)

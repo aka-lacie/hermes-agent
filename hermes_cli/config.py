@@ -217,6 +217,11 @@ DEFAULT_CONFIG = {
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Inject the current local datetime into the current user turn at
+        # API-call time only. This helps the model reason about "now" in
+        # long-lived sessions without persisting synthetic time markers to
+        # transcripts or SQLite session history.
+        "inject_current_time_in_user_turn": False,
     },
     
     "terminal": {

@@ -1106,6 +1106,9 @@ class AIAgent:
         if not isinstance(_agent_section, dict):
             _agent_section = {}
         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
+        self._inject_current_time_in_user_turn = str(
+            _agent_section.get("inject_current_time_in_user_turn", False)
+        ).lower() in ("true", "1", "yes")
 
         # Initialize context compressor for automatic context management
         # Compresses conversation when approaching model's context limit
@@ -1861,6 +1864,20 @@ class AIAgent:
             msg = messages[idx]
             if isinstance(msg, dict) and msg.get("role") == "user":
                 msg["content"] = override
+
+    def _build_current_time_user_context(self) -> str:
+        """Return an ephemeral current-time tag for the active user turn."""
+        if not getattr(self, "_inject_current_time_in_user_turn", False):
+            return ""
+        try:
+            from hermes_time import now as _hermes_now
+
+            stamp = _hermes_now().strftime("%Y-%m-%d %a %I:%M %p %Z").strip()
+            if stamp:
+                return f"<time-now>{stamp}</time-now>"
+        except Exception:
+            logger.debug("Current-time user context injection failed", exc_info=True)
+        return ""
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
@@ -7455,6 +7472,8 @@ class AIAgent:
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
 
+        _current_time_user_context = self._build_current_time_user_context()
+
         # Main conversation loop
         api_call_count = 0
         final_response = None
@@ -7561,6 +7580,8 @@ class AIAgent:
                 # never mutated, so nothing leaks into session persistence.
                 if idx == current_turn_user_idx and msg.get("role") == "user":
                     _injections = []
+                    if _current_time_user_context:
+                        _injections.append(_current_time_user_context)
                     if _ext_prefetch_cache:
                         _fenced = build_memory_context_block(_ext_prefetch_cache)
                         if _fenced:

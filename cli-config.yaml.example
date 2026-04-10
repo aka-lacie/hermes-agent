@@ -445,6 +445,12 @@ agent:
   # Higher = more room for complex tasks, but costs more tokens
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration
   max_turns: 60
+
+  # Inject the current local datetime into the current user turn at API-call
+  # time only, using a compact tag like:
+  #   <time-now>2026-04-09 Thu 01:39 AM PDT</time-now>
+  # This is NOT persisted to transcripts or session storage.
+  inject_current_time_in_user_turn: false
   
   # Enable verbose logging
   verbose: false
