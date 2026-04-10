@@ -5,8 +5,17 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 ## Development Environment
 
 ```bash
-source venv/bin/activate  # ALWAYS activate before running Python
+source .venv/bin/activate  # ALWAYS activate before running Python
+# Shared local workstation env (CLI + tests + gateway services):
+uv sync --extra local
 ```
+
+`local` is the canonical workstation bundle in `pyproject.toml` and currently
+expands to `dev`, `cli`, `messaging`, `cron`, `honcho`, and `pty`.
+If a new runtime-facing optional dependency is introduced (for example via a new
+configured plugin, gateway platform, cron path, or terminal/runtime feature),
+add its extra to `local` so future `uv sync --extra local` runs do not silently
+strip required packages from the shared `.venv`.
 
 ## Project Structure
 
@@ -458,7 +467,7 @@ def profile_env(tmp_path, monkeypatch):
 ## Testing
 
 ```bash
-source venv/bin/activate
+source .venv/bin/activate
 python -m pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
 python -m pytest tests/test_model_tools.py -q   # Toolset resolution
 python -m pytest tests/test_cli_init.py -q       # CLI config loading

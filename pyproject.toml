@@ -65,6 +65,16 @@ acp = ["agent-client-protocol>=0.9.0,<1.0"]
 mistral = ["mistralai>=2.3.0,<3"]
 dingtalk = ["dingtalk-stream>=0.1.0,<1"]
 feishu = ["lark-oapi>=1.5.3,<2"]
+local = [
+  # Single source of truth for the shared local workstation environment used
+  # by Codex, the CLI, and user-systemd gateway services.
+  "hermes-agent[dev]",
+  "hermes-agent[cli]",
+  "hermes-agent[messaging]",
+  "hermes-agent[cron]",
+  "hermes-agent[honcho]",
+  "hermes-agent[pty]",
+]
 rl = [
   "atroposlib @ git+https://github.com/NousResearch/atropos.git",
   "tinker @ git+https://github.com/thinking-machines-lab/tinker.git",
