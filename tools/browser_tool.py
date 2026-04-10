@@ -528,6 +528,21 @@ BROWSER_TOOL_SCHEMAS = [
         }
     },
     {
+        "name": "browser_screenshot",
+        "description": "Capture a screenshot of the current page without auxiliary vision analysis. Use this when the active model can inspect images natively, or when you want to send the screenshot to the user via MEDIA:<screenshot_path>. Requires browser_navigate first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "annotate": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, request backend-specific annotations for interactive elements when available. Some backends may ignore this and return a raw screenshot."
+                }
+            },
+            "required": []
+        }
+    },
+    {
         "name": "browser_click",
         "description": "Click on an element identified by its ref ID from the snapshot (e.g., '@e5'). The ref IDs are shown in square brackets in the snapshot output. Requires browser_navigate and browser_snapshot to be called first.",
         "parameters": {
@@ -617,7 +632,7 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_vision",
-        "description": "Take a screenshot of the current page and analyze it with vision AI. Use this when you need to visually understand what's on the page - especially useful for CAPTCHAs, visual verification challenges, complex layouts, or when the text snapshot doesn't capture important visual information. Returns both the AI analysis and a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
+        "description": "Take a screenshot of the current page and analyze it with auxiliary vision AI. Use this when you need explicit VLM analysis - especially useful on text-only models, or for CAPTCHAs, visual verification challenges, and complex layouts the text snapshot doesn't capture. If the active model can inspect images natively, prefer browser_screenshot to avoid an extra auxiliary LLM call. Returns both the AI analysis and a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1298,6 +1313,87 @@ def browser_snapshot(
         }, ensure_ascii=False)
 
 
+def _capture_browser_screenshot(
+    annotate: bool = False,
+    task_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Capture a screenshot and return metadata without vision analysis."""
+    import uuid as uuid_mod
+
+    effective_task_id = task_id or "default"
+
+    from hermes_constants import get_hermes_dir
+
+    screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
+    screenshot_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
+
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    _cleanup_old_screenshots(screenshots_dir, max_age_hours=24)
+
+    screenshot_args = []
+    if annotate:
+        screenshot_args.append("--annotate")
+    screenshot_args.append("--full")
+    screenshot_args.append(str(screenshot_path))
+
+    result = _run_browser_command(
+        effective_task_id,
+        "screenshot",
+        screenshot_args,
+    )
+
+    if not result.get("success"):
+        error_detail = result.get("error", "Unknown error")
+        _cp = _get_cloud_provider()
+        mode = "local" if _cp is None else f"cloud ({_cp.provider_name()})"
+        return {
+            "success": False,
+            "error": f"Failed to take screenshot ({mode} mode): {error_detail}",
+        }
+
+    actual_screenshot_path = result.get("data", {}).get("path")
+    if actual_screenshot_path:
+        screenshot_path = Path(actual_screenshot_path)
+
+    if not screenshot_path.exists():
+        _cp = _get_cloud_provider()
+        mode = "local" if _cp is None else f"cloud ({_cp.provider_name()})"
+        return {
+            "success": False,
+            "error": (
+                f"Screenshot file was not created at {screenshot_path} ({mode} mode). "
+                f"This may indicate a socket path issue (macOS /var/folders/), "
+                f"a missing Chromium install ('agent-browser install'), "
+                f"or a stale daemon process."
+            ),
+        }
+
+    payload = {
+        "success": True,
+        "screenshot_path": str(screenshot_path),
+        "mime_type": "image/png",
+        "note": (
+            f"Screenshot captured. Include MEDIA:{screenshot_path} in your response "
+            "to send it to the user."
+        ),
+    }
+    if annotate and result.get("data", {}).get("annotations"):
+        payload["annotations"] = result["data"]["annotations"]
+    return payload
+
+
+def browser_screenshot(annotate: bool = False, task_id: Optional[str] = None) -> str:
+    """Capture a screenshot without paying for auxiliary vision analysis."""
+    if _is_camofox_mode():
+        from tools.browser_camofox import camofox_screenshot
+        return camofox_screenshot(annotate=annotate, task_id=task_id)
+
+    return json.dumps(
+        _capture_browser_screenshot(annotate=annotate, task_id=task_id),
+        ensure_ascii=False,
+    )
+
+
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     """
     Click on an element.
@@ -1742,61 +1838,20 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         return camofox_vision(question, annotate, task_id)
 
     import base64
-    import uuid as uuid_mod
-    from pathlib import Path
     
     effective_task_id = task_id or "default"
-    
-    # Save screenshot to persistent location so it can be shared with users
-    from hermes_constants import get_hermes_dir
-    screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
-    screenshot_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
-    
+    screenshot_path = Path()
+
     try:
-        screenshots_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Prune old screenshots (older than 24 hours) to prevent unbounded disk growth
-        _cleanup_old_screenshots(screenshots_dir, max_age_hours=24)
-        
-        # Take screenshot using agent-browser
-        screenshot_args = []
-        if annotate:
-            screenshot_args.append("--annotate")
-        screenshot_args.append("--full")
-        screenshot_args.append(str(screenshot_path))
-        result = _run_browser_command(
-            effective_task_id, 
-            "screenshot", 
-            screenshot_args,
+        capture = _capture_browser_screenshot(
+            annotate=annotate,
+            task_id=effective_task_id,
         )
-        
-        if not result.get("success"):
-            error_detail = result.get("error", "Unknown error")
-            _cp = _get_cloud_provider()
-            mode = "local" if _cp is None else f"cloud ({_cp.provider_name()})"
-            return json.dumps({
-                "success": False,
-                "error": f"Failed to take screenshot ({mode} mode): {error_detail}"
-            }, ensure_ascii=False)
+        if not capture.get("success"):
+            return json.dumps(capture, ensure_ascii=False)
 
-        actual_screenshot_path = result.get("data", {}).get("path")
-        if actual_screenshot_path:
-            screenshot_path = Path(actual_screenshot_path)
+        screenshot_path = Path(str(capture["screenshot_path"]))
 
-        # Check if screenshot file was created
-        if not screenshot_path.exists():
-            _cp = _get_cloud_provider()
-            mode = "local" if _cp is None else f"cloud ({_cp.provider_name()})"
-            return json.dumps({
-                "success": False,
-                "error": (
-                    f"Screenshot file was not created at {screenshot_path} ({mode} mode). "
-                    f"This may indicate a socket path issue (macOS /var/folders/), "
-                    f"a missing Chromium install ('agent-browser install'), "
-                    f"or a stale daemon process."
-                ),
-            }, ensure_ascii=False)
-        
         # Read and convert to base64
         image_data = screenshot_path.read_bytes()
         image_base64 = base64.b64encode(image_data).decode("ascii")
@@ -1858,8 +1913,8 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
             "screenshot_path": str(screenshot_path),
         }
         # Include annotation data if annotated screenshot was taken
-        if annotate and result.get("data", {}).get("annotations"):
-            response_data["annotations"] = result["data"]["annotations"]
+        if annotate and capture.get("annotations"):
+            response_data["annotations"] = capture["annotations"]
         return json.dumps(response_data, ensure_ascii=False)
     
     except Exception as e:
@@ -2114,6 +2169,15 @@ registry.register(
         full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
     check_fn=check_browser_requirements,
     emoji="📸",
+)
+registry.register(
+    name="browser_screenshot",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_screenshot"],
+    handler=lambda args, **kw: browser_screenshot(
+        annotate=args.get("annotate", False), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🖼️",
 )
 registry.register(
     name="browser_click",

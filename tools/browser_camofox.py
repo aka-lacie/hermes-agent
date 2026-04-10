@@ -482,31 +482,71 @@ def camofox_get_images(task_id: Optional[str] = None) -> str:
         return tool_error(str(e), success=False)
 
 
+def _capture_camofox_screenshot(
+    annotate: bool = False,
+    task_id: Optional[str] = None,
+) -> dict:
+    """Capture a screenshot and return metadata without vision analysis."""
+    session = _get_session(task_id)
+    if not session["tab_id"]:
+        return {"success": False, "error": "No browser session. Call browser_navigate first."}
+
+    resp = _get_raw(
+        f"/tabs/{session['tab_id']}/screenshot",
+        params={"userId": session["user_id"]},
+    )
+
+    from hermes_constants import get_hermes_home
+
+    screenshots_dir = get_hermes_home() / "browser_screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = str(screenshots_dir / f"browser_screenshot_{uuid.uuid4().hex[:8]}.png")
+
+    with open(screenshot_path, "wb") as f:
+        f.write(resp.content)
+
+    payload = {
+        "success": True,
+        "screenshot_path": screenshot_path,
+        "mime_type": "image/png",
+        "note": (
+            f"Screenshot captured. Include MEDIA:{screenshot_path} in your response "
+            "to send it to the user."
+        ),
+    }
+    if annotate:
+        payload["annotation_note"] = (
+            "Camofox does not provide annotated screenshot overlays in the screenshot endpoint. "
+            "Use browser_snapshot for element refs."
+        )
+    return payload
+
+
+def camofox_screenshot(annotate: bool = False, task_id: Optional[str] = None) -> str:
+    """Capture a screenshot without vision analysis via Camofox."""
+    try:
+        return json.dumps(
+            _capture_camofox_screenshot(annotate=annotate, task_id=task_id)
+        )
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
 def camofox_vision(question: str, annotate: bool = False,
                    task_id: Optional[str] = None) -> str:
     """Take a screenshot and analyze it with vision AI via Camofox."""
     try:
+        capture = _capture_camofox_screenshot(annotate=annotate, task_id=task_id)
+        if not capture.get("success"):
+            return json.dumps(capture)
+
         session = _get_session(task_id)
-        if not session["tab_id"]:
-            return tool_error("No browser session. Call browser_navigate first.", success=False)
-
-        # Get screenshot as binary PNG
-        resp = _get_raw(
-            f"/tabs/{session['tab_id']}/screenshot",
-            params={"userId": session["user_id"]},
-        )
-
-        # Save screenshot to cache
-        from hermes_constants import get_hermes_home
-        screenshots_dir = get_hermes_home() / "browser_screenshots"
-        screenshots_dir.mkdir(parents=True, exist_ok=True)
-        screenshot_path = str(screenshots_dir / f"browser_screenshot_{uuid.uuid4().hex[:8]}.png")
-
-        with open(screenshot_path, "wb") as f:
-            f.write(resp.content)
+        screenshot_path = str(capture["screenshot_path"])
+        with open(screenshot_path, "rb") as f:
+            image_bytes = f.read()
 
         # Encode for vision LLM
-        img_b64 = base64.b64encode(resp.content).decode("utf-8")
+        img_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
         # Also get annotated snapshot if requested
         annotation_context = ""

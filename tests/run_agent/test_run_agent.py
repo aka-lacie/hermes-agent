@@ -1531,6 +1531,63 @@ class TestRunConversation:
         assert all("message_count" in c and "messages" not in c for c in pre_request_calls)
         assert all("usage" in c and "response" not in c for c in post_request_calls)
 
+    def test_browser_screenshot_injected_as_ephemeral_user_image_for_native_vision(self, agent, tmp_path):
+        self._setup_agent(agent)
+        agent.valid_tool_names = set(agent.valid_tool_names or set())
+        agent.valid_tool_names.add("browser_screenshot")
+        shot = tmp_path / "browser.png"
+        shot.write_bytes(b"png")
+
+        tc = _mock_tool_call(name="browser_screenshot", arguments="{}", call_id="shot1")
+        resp1 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+        resp2 = _mock_response(content="done", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [resp1, resp2]
+
+        tool_result = json.dumps({
+            "success": True,
+            "screenshot_path": str(shot),
+            "mime_type": "image/png",
+        })
+
+        with (
+            patch("run_agent.handle_function_call", return_value=tool_result),
+            patch.object(agent, "_active_model_supports_vision", return_value=True),
+            patch("tools.vision_tools._image_to_base64_data_url", return_value="data:image/png;base64,AAAA"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("inspect the page")
+
+        assert result["final_response"] == "done"
+        second_call_messages = agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        screenshot_msgs = [
+            msg for msg in second_call_messages
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list)
+        ]
+        assert screenshot_msgs, "expected an ephemeral screenshot image message in the second API call"
+        image_parts = [
+            part for msg in screenshot_msgs for part in msg["content"]
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ]
+        assert image_parts
+        assert image_parts[0]["image_url"]["url"] == "data:image/png;base64,AAAA"
+
+    def test_prepare_anthropic_messages_preserves_native_image_blocks_when_model_supports_vision(self, agent):
+        self._setup_agent(agent)
+        api_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "inspect this"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        }]
+
+        with patch.object(agent, "_active_model_supports_vision", return_value=True):
+            prepared = agent._prepare_anthropic_messages_for_api(api_messages)
+
+        assert prepared == api_messages
+
     def test_interrupt_breaks_loop(self, agent):
         self._setup_agent(agent)
 

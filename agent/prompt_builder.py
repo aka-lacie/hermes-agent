@@ -764,6 +764,7 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
         "web_extract",
         "browser_navigate",
         "browser_snapshot",
+        "browser_screenshot",
         "browser_click",
         "browser_type",
         "browser_scroll",

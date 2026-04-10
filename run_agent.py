@@ -5264,6 +5264,60 @@ class AIAgent:
 
     # ── End provider fallback ──────────────────────────────────────────────
 
+    def _active_model_supports_vision(self) -> bool:
+        """Return True when the active chat model can inspect images natively."""
+        cache_key = (
+            str(getattr(self, "provider", "") or "").strip().lower(),
+            str(getattr(self, "model", "") or "").strip().lower(),
+            str(getattr(self, "base_url", "") or "").strip().lower(),
+        )
+        cached = getattr(self, "_supports_vision_cache", None)
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == cache_key:
+            return bool(cached[1])
+
+        provider = cache_key[0]
+        model = cache_key[1]
+        supports = False
+
+        try:
+            from agent.models_dev import get_model_info, get_model_info_any_provider
+
+            info = None
+            if provider and model:
+                info = get_model_info(provider, model)
+            if info is None and model:
+                info = get_model_info_any_provider(model)
+            if info is None and "/" in model:
+                info = get_model_info_any_provider(model.split("/", 1)[1])
+            if info is not None:
+                supports = bool(info.supports_vision())
+        except Exception:
+            logger.debug("Model vision capability lookup failed", exc_info=True)
+
+        if not supports:
+            heuristic_tokens = (
+                "gemini",
+                "gpt-4o",
+                "gpt-4.1",
+                "gpt-5",
+                "claude-3",
+                "claude-sonnet-4",
+                "claude-opus-4",
+                "claude-4",
+                "qwen2-vl",
+                "qwen2.5-vl",
+                "qwen-vl",
+                "qvq",
+                "llava",
+                "minicpm-v",
+                "pixtral",
+                "glm-4v",
+            )
+            supports = provider in {"google", "gemini"} or any(token in model for token in heuristic_tokens)
+
+        self._supports_vision_cache = (cache_key, supports)
+        return supports
+
     @staticmethod
     def _content_has_image_parts(content: Any) -> bool:
         if not isinstance(content, list):
@@ -5345,6 +5399,47 @@ class AIAgent:
         self._anthropic_image_fallback_cache[cache_key] = note
         return note
 
+    def _build_browser_screenshot_api_followup(self, tool_content: Any) -> Optional[Dict[str, Any]]:
+        """Build an ephemeral user image message from a browser_screenshot result."""
+        if not self._active_model_supports_vision():
+            return None
+
+        try:
+            parsed = json.loads(tool_content) if isinstance(tool_content, str) else tool_content
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+        if not isinstance(parsed, dict) or not parsed.get("success"):
+            return None
+
+        screenshot_path = parsed.get("screenshot_path")
+        if not screenshot_path:
+            return None
+
+        path = Path(str(screenshot_path)).expanduser()
+        if not path.exists():
+            return None
+
+        try:
+            from tools.vision_tools import _image_to_base64_data_url
+
+            data_url = _image_to_base64_data_url(path, mime_type=parsed.get("mime_type"))
+        except Exception:
+            logger.debug("Failed to convert browser screenshot to data URL", exc_info=True)
+            return None
+
+        guidance = (
+            "Internal browser screenshot from the previous tool call. "
+            "Inspect this image directly and continue the task without asking the user to re-upload it."
+        )
+        return {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": guidance},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }
+
     def _preprocess_anthropic_content(self, content: Any, role: str) -> Any:
         if not self._content_has_image_parts(content):
             return content
@@ -5394,6 +5489,9 @@ class AIAgent:
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
             for msg in api_messages
         ):
+            return api_messages
+
+        if self._active_model_supports_vision():
             return api_messages
 
         transformed = copy.deepcopy(api_messages)
@@ -7440,6 +7538,19 @@ class AIAgent:
             # However, providers like Moonshot AI require a separate 'reasoning_content' field
             # on assistant messages with tool_calls. We handle both cases here.
             api_messages = []
+            tool_name_by_id = {}
+            for _msg in messages:
+                if _msg.get("role") != "assistant":
+                    continue
+                for _tc in _msg.get("tool_calls") or []:
+                    _name = ""
+                    if isinstance(_tc, dict):
+                        _name = ((_tc.get("function") or {}).get("name") or "").strip()
+                    else:
+                        _name = str(getattr(getattr(_tc, "function", None), "name", "") or "").strip()
+                    _cid = AIAgent._get_tool_call_id_static(_tc)
+                    if _cid and _name:
+                        tool_name_by_id[_cid] = _name
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
@@ -7487,6 +7598,12 @@ class AIAgent:
                 # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
                 # The signature field helps maintain reasoning continuity
                 api_messages.append(api_msg)
+                if msg.get("role") == "tool":
+                    _tool_name = tool_name_by_id.get(str(msg.get("tool_call_id") or ""))
+                    if _tool_name == "browser_screenshot":
+                        _followup = self._build_browser_screenshot_api_followup(msg.get("content"))
+                        if _followup:
+                            api_messages.append(_followup)
 
             # Build the final system message: cached prompt + ephemeral system prompt.
             # Ephemeral additions are API-call-time only (not persisted to session DB).

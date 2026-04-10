@@ -138,6 +138,77 @@ class TestBrowserConsoleToolsetWiring:
         assert "browser_console" in registry._tools
 
 
+class TestBrowserScreenshot:
+    """browser_screenshot captures a screenshot without auxiliary vision."""
+
+    def test_schema_in_browser_schemas(self):
+        from tools.browser_tool import BROWSER_TOOL_SCHEMAS
+
+        names = [s["name"] for s in BROWSER_TOOL_SCHEMAS]
+        assert "browser_screenshot" in names
+
+    def test_schema_has_annotate_param(self):
+        from tools.browser_tool import BROWSER_TOOL_SCHEMAS
+
+        schema = next(s for s in BROWSER_TOOL_SCHEMAS if s["name"] == "browser_screenshot")
+        props = schema["parameters"]["properties"]
+        assert "annotate" in props
+        assert props["annotate"]["type"] == "boolean"
+
+    def test_returns_screenshot_path_without_calling_llm(self, tmp_path):
+        from tools.browser_tool import browser_screenshot
+
+        shot = tmp_path / "browser.png"
+        shot.write_bytes(b"png")
+        with (
+            patch("tools.browser_tool._run_browser_command", return_value={"success": True, "data": {"path": str(shot)}}) as mock_cmd,
+            patch("tools.browser_tool.call_llm") as mock_llm,
+        ):
+            result = json.loads(browser_screenshot(task_id="test"))
+
+        assert result["success"] is True
+        assert result["screenshot_path"] == str(shot)
+        mock_cmd.assert_called_once()
+        mock_llm.assert_not_called()
+
+    def test_annotate_true_adds_flag(self, tmp_path):
+        from tools.browser_tool import browser_screenshot
+
+        shot = tmp_path / "browser.png"
+        shot.write_bytes(b"png")
+        with patch("tools.browser_tool._run_browser_command", return_value={"success": True, "data": {"path": str(shot)}}) as mock_cmd:
+            browser_screenshot(annotate=True, task_id="test")
+
+        args = mock_cmd.call_args[0]
+        cmd_args = args[2] if len(args) > 2 else []
+        assert "--annotate" in cmd_args
+
+
+class TestBrowserScreenshotToolsetWiring:
+    """browser_screenshot must be reachable via toolset resolution."""
+
+    def test_in_browser_toolset(self):
+        from toolsets import TOOLSETS
+
+        assert "browser_screenshot" in TOOLSETS["browser"]["tools"]
+
+    def test_in_hermes_core_tools(self):
+        from toolsets import _HERMES_CORE_TOOLS
+
+        assert "browser_screenshot" in _HERMES_CORE_TOOLS
+
+    def test_in_legacy_toolset_map(self):
+        from model_tools import _LEGACY_TOOLSET_MAP
+
+        assert "browser_screenshot" in _LEGACY_TOOLSET_MAP["browser_tools"]
+
+    def test_in_registry(self):
+        from tools.registry import registry
+        from tools import browser_tool  # noqa: F401
+
+        assert "browser_screenshot" in registry._tools
+
+
 # ── browser_vision annotate ──────────────────────────────────────────
 
 
