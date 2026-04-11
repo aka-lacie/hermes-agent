@@ -64,7 +64,7 @@ Tool availability depends on `recallMode`: hidden in `context` mode, always pres
 | Key | Type | Default | Scope | Description |
 |-----|------|---------|-------|-------------|
 | `recallMode` | string | `"hybrid"` | root / host | `"hybrid"` (auto-inject + tools), `"context"` (auto-inject only, tools hidden), `"tools"` (tools only, no injection). Legacy `"auto"` normalizes to `"hybrid"` |
-| `observationMode` | string | `"directional"` | root / host | Shorthand preset: `"directional"` (all on) or `"unified"` (shared pool). Use `observation` object for granular control |
+| `observationMode` | string | `"directional"` | root / host | Shorthand preset: `"directional"` (all observations on) or `"unified"` (shared pool). Use `observation` object for granular control |
 | `observation` | object | -- | root / host | Per-peer observation config (see below) |
 
 #### Observation (granular)

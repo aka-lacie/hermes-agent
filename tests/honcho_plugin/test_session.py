@@ -1,9 +1,10 @@
 """Tests for plugins/memory/honcho/session.py — HonchoSession and helpers."""
 
+import json
 import sys
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from plugins.memory.honcho.client import HonchoClientConfig
 from plugins.memory.honcho.session import (
@@ -231,28 +232,23 @@ class TestPeerLookupHelpers:
 
     def test_get_prefetch_context_fetches_user_and_ai_from_peer_api(self):
         mgr, session = self._make_cached_manager()
-        honcho_session = MagicMock()
-        honcho_session.context.side_effect = [
-            SimpleNamespace(peer_representation="User self", peer_card=["Name: Robert"]),
-            SimpleNamespace(peer_representation="AI model of user", peer_card=["Prefers directness"]),
-            SimpleNamespace(peer_representation="AI self", peer_card=["Owner: Robert"]),
-            SimpleNamespace(peer_representation="User model of AI", peer_card=["Helpful"]),
-        ]
-        mgr._sessions_cache[session.honcho_session_id] = honcho_session
+        mgr._fetch_peer_context = MagicMock(
+            side_effect=[
+                {"representation": "User self", "card": ["Name: Robert"]},
+                {"representation": "AI self", "card": ["Owner: Robert"]},
+            ]
+        )
 
-        result = mgr.get_prefetch_context(session.key)
+        with patch.object(mgr, "get_queue_health_warning", return_value=""):
+            result = mgr.get_prefetch_context(session.key)
 
         assert result == {
-            "user_self_representation": "User self",
-            "user_self_card": "Name: Robert",
-            "ai_user_model_representation": "AI model of user",
-            "ai_user_model_card": "Prefers directness",
-            "ai_self_representation": "AI self",
-            "ai_self_card": "Owner: Robert",
-            "user_ai_model_representation": "User model of AI",
-            "user_ai_model_card": "Helpful",
+            "representation": "User self",
+            "card": "Name: Robert",
+            "ai_representation": "AI self",
+            "ai_card": "Owner: Robert",
         }
-        assert honcho_session.context.call_count == 4
+        assert mgr._fetch_peer_context.call_count == 2
 
     def test_get_ai_representation_uses_peer_api(self):
         mgr, session = self._make_cached_manager()
@@ -270,6 +266,57 @@ class TestPeerLookupHelpers:
             "card": "Owner: Robert",
         }
         ai_peer.context.assert_called_once_with()
+
+
+class TestQueueHealthWarnings:
+    def _make_manager(self):
+        cfg = HonchoClientConfig(api_key="test-key", enabled=True, write_frequency="turn")
+        mgr = HonchoSessionManager(config=cfg)
+        mgr._honcho = MagicMock()
+        session = HonchoSession(
+            key="cli:test",
+            user_peer_id="user",
+            assistant_peer_id="ai",
+            honcho_session_id="cli-test",
+        )
+        mgr._cache[session.key] = session
+        return mgr, session
+
+    def test_queue_warning_after_grace_period(self):
+        mgr, session = self._make_manager()
+        mgr._queue_health_ttl_seconds = 0.0
+        mgr._queue_stall_grace_seconds = 10.0
+        mgr._honcho.queue_status.return_value = SimpleNamespace(
+            pending_work_units=1,
+            in_progress_work_units=0,
+            completed_work_units=0,
+            sessions={"cli-test": SimpleNamespace(pending_work_units=1)},
+        )
+
+        with patch("plugins.memory.honcho.session.monotonic", side_effect=[0.0, 11.0]):
+            assert mgr.get_queue_health_warning(session.key) == ""
+            warning = mgr.get_queue_health_warning(session.key)
+
+        assert "derivation queue appears stalled" in warning
+        assert "session pending=1" in warning
+
+    def test_get_prefetch_context_includes_warning(self):
+        mgr, session = self._make_manager()
+        mgr._fetch_peer_context = MagicMock(
+            side_effect=[
+                {"representation": "User self", "card": ["Name: Robert"]},
+                {"representation": "AI self", "card": ["Owner: Robert"]},
+            ]
+        )
+
+        with patch.object(
+            mgr,
+            "get_queue_health_warning",
+            return_value="Honcho warning: derivation queue appears stalled.",
+        ):
+            result = mgr.get_prefetch_context(session.key)
+
+        assert result["warning"] == "Honcho warning: derivation queue appears stalled."
 
 
 # ---------------------------------------------------------------------------
@@ -470,23 +517,22 @@ class TestObservationModes:
             write_frequency="turn",
             observation_mode=observation_mode,
             user_observe_me=True,
-            user_observe_others=(observation_mode == "bidirectional"),
-            ai_observe_me=(observation_mode == "bidirectional"),
-            ai_observe_others=(observation_mode in {"directional", "bidirectional"}),
+            user_observe_others=(observation_mode == "directional"),
+            ai_observe_me=(observation_mode == "directional"),
+            ai_observe_others=True,
         )
         mgr = HonchoSessionManager(config=cfg)
         mgr._honcho = MagicMock()
         return mgr
 
-    def test_session_peer_configs_respect_unified_directional_and_bidirectional(self):
+    def test_session_peer_configs_respect_unified_and_directional(self):
         fake_module = type("FakeHonchoSessionModule", (), {"SessionPeerConfig": _FakeSessionPeerConfig})
         user_peer = object()
         ai_peer = object()
 
         expected = {
-            "unified": ((True, False), (False, False)),
-            "directional": ((True, False), (False, True)),
-            "bidirectional": ((True, True), (True, True)),
+            "unified": ((True, False), (False, True)),
+            "directional": ((True, True), (True, True)),
         }
 
         for mode, ((user_me, user_others), (ai_me, ai_others)) in expected.items():
@@ -511,32 +557,8 @@ class TestObservationModes:
             assert (user_cfg.observe_me, user_cfg.observe_others) == (user_me, user_others)
             assert (ai_cfg.observe_me, ai_cfg.observe_others) == (ai_me, ai_others)
 
-    def test_dialectic_query_uses_cross_observation_for_directional_and_bidirectional(self):
-        for mode in ("directional", "bidirectional"):
-            mgr = self._make_manager(mode)
-            session = HonchoSession(
-                key="k",
-                user_peer_id="user",
-                assistant_peer_id="ai",
-                honcho_session_id="sess",
-            )
-            mgr._cache[session.key] = session
-
-            ai_peer = MagicMock()
-            ai_peer.chat.return_value = "answer"
-            mgr._peers_cache["ai"] = ai_peer
-
-            result = mgr.dialectic_query("k", "what does the user prefer?", peer="user")
-
-            assert result == "answer"
-            ai_peer.chat.assert_called_once_with(
-                "what does the user prefer?",
-                target="user",
-                reasoning_level="low",
-            )
-
-    def test_create_conclusion_uses_cross_scope_for_bidirectional(self):
-        mgr = self._make_manager("bidirectional")
+    def test_dialectic_query_uses_cross_observation_for_directional(self):
+        mgr = self._make_manager("directional")
         session = HonchoSession(
             key="k",
             user_peer_id="user",
@@ -545,13 +567,47 @@ class TestObservationModes:
         )
         mgr._cache[session.key] = session
 
-        assistant_peer = MagicMock()
-        conclusions = MagicMock()
-        assistant_peer.conclusions_of.return_value = conclusions
-        mgr._peers_cache["ai"] = assistant_peer
+        ai_peer = MagicMock()
+        ai_peer.chat.return_value = "answer"
+        mgr._peers_cache["ai"] = ai_peer
 
-        ok = mgr.create_conclusion("k", "User prefers terse responses")
+        result = mgr.dialectic_query("k", "what does the user prefer?", peer="user")
 
-        assert ok is True
-        assistant_peer.conclusions_of.assert_called_once_with("user")
-        conclusions.create.assert_called_once()
+        assert result == "answer"
+        ai_peer.chat.assert_called_once_with(
+            "what does the user prefer?",
+            target="user",
+            reasoning_level="low",
+        )
+
+
+class TestProviderHealthWarnings:
+    def test_system_prompt_block_includes_health_warning(self):
+        provider = HonchoMemoryProvider()
+        provider._manager = MagicMock()
+        provider._session_key = "cli:test"
+        provider._recall_mode = "hybrid"
+        provider._manager.get_queue_health_warning.return_value = (
+            "Honcho warning: derivation queue appears stalled."
+        )
+        provider._manager.get_prefetch_context.return_value = {}
+
+        block = provider.system_prompt_block()
+
+        assert "Honcho Health Warning" in block
+        assert "derivation queue appears stalled" in block
+
+    def test_honcho_profile_returns_warning_field(self):
+        provider = HonchoMemoryProvider()
+        provider._manager = MagicMock()
+        provider._session_key = "cli:test"
+        provider._session_initialized = True
+        provider._manager.get_queue_health_warning.return_value = (
+            "Honcho warning: derivation queue appears stalled."
+        )
+        provider._manager.get_peer_card.return_value = []
+
+        payload = json.loads(provider.handle_tool_call("honcho_profile", {}))
+
+        assert payload["result"] == "No profile facts available yet."
+        assert "derivation queue appears stalled" in payload["warning"]

@@ -192,16 +192,16 @@ class TestFromGlobalConfig:
         config_file.write_text(json.dumps({
             "apiKey": "key",
             "observationMode": "directional",
-            "hosts": {"hermes": {"observationMode": "bidirectional"}},
+            "hosts": {"hermes": {"observationMode": "unified"}},
         }))
         config = HonchoClientConfig.from_global_config(config_path=config_file)
-        assert config.observation_mode == "bidirectional"
+        assert config.observation_mode == "unified"
 
     def test_observation_mode_aliases_normalize(self, tmp_path):
         config_file = tmp_path / "config.json"
-        config_file.write_text(json.dumps({"apiKey": "key", "observationMode": "all"}))
+        config_file.write_text(json.dumps({"apiKey": "key", "observationMode": "cross"}))
         config = HonchoClientConfig.from_global_config(config_path=config_file)
-        assert config.observation_mode == "bidirectional"
+        assert config.observation_mode == "directional"
 
     def test_corrupt_config_falls_back_to_env(self, tmp_path):
         config_file = tmp_path / "config.json"

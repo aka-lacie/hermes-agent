@@ -8,6 +8,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
+from time import monotonic
 from typing import Any, TYPE_CHECKING
 
 from plugins.memory.honcho.client import get_honcho_client
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 # Sentinel to signal the async writer thread to shut down
 _ASYNC_SHUTDOWN = object()
+_QUEUE_HEALTH_TTL_SECONDS = 30.0
+_QUEUE_STALL_GRACE_SECONDS = 90.0
+_QUEUE_STALL_IMMEDIATE_PENDING = 25
 
 
 @dataclass
@@ -127,6 +131,16 @@ class HonchoSessionManager:
         self._dialectic_max_input_chars: int = (
             config.dialectic_max_input_chars if config else 10000
         )
+        self._queue_health_lock = threading.Lock()
+        self._queue_health_checked_at: float = 0.0
+        self._queue_health_warning: str = ""
+        self._queue_health_stalled_since: float | None = None
+        self._queue_health_last_pending: int = 0
+        self._queue_health_last_in_progress: int = 0
+        self._queue_health_last_completed: int = 0
+        self._queue_health_ttl_seconds: float = _QUEUE_HEALTH_TTL_SECONDS
+        self._queue_stall_grace_seconds: float = _QUEUE_STALL_GRACE_SECONDS
+        self._queue_stall_immediate_pending: int = _QUEUE_STALL_IMMEDIATE_PENDING
 
         # Async write queue — started lazily on first enqueue
         self._async_queue: queue.Queue | None = None
@@ -643,29 +657,6 @@ class HonchoSessionManager:
         with self._prefetch_cache_lock:
             return self._context_cache.pop(session_key, {})
 
-    def _context_from_session_perspective(
-        self, honcho_session: Any, *, target: str, perspective: str
-    ) -> dict[str, Any]:
-        """Fetch representation + peer card for one target/perspective pair."""
-        try:
-            ctx = honcho_session.context(
-                summary=False,
-                tokens=self._context_tokens,
-                peer_target=target,
-                peer_perspective=perspective,
-            )
-            representation = (
-                getattr(ctx, "representation", None)
-                or getattr(ctx, "peer_representation", None)
-                or ""
-            )
-            card = self._normalize_card(getattr(ctx, "peer_card", None))
-            return {"representation": representation, "card": card}
-        except Exception:
-            # Fall back to the direct peer API when perspective-scoped context
-            # isn't available.
-            return self._fetch_peer_context(target)
-
     def get_prefetch_context(self, session_key: str, user_message: str | None = None) -> dict[str, str]:
         """
         Pre-fetch user and AI peer context from Honcho.
@@ -680,53 +671,129 @@ class HonchoSessionManager:
             user_message: Unused; kept for call-site compatibility.
 
         Returns:
-            Dictionary with four perspective-specific representation/card pairs.
+            Dictionary with 'representation', 'card', 'ai_representation',
+            and 'ai_card' keys.
         """
         session = self._cache.get(session_key)
         if not session:
             return {}
 
-        honcho_session = self._sessions_cache.get(session.honcho_session_id)
-        if not honcho_session:
-            return {}
-
         result: dict[str, str] = {}
+        try:
+            user_ctx = self._fetch_peer_context(session.user_peer_id)
+            result["representation"] = user_ctx["representation"]
+            result["card"] = "\n".join(user_ctx["card"])
+        except Exception as e:
+            logger.warning("Failed to fetch user context from Honcho: %s", e)
 
-        def _store_context(prefix: str, *, target: str, perspective: str, log_level: str = "warning") -> None:
-            try:
-                ctx = self._context_from_session_perspective(
-                    honcho_session, target=target, perspective=perspective
-                )
-                result[f"{prefix}_representation"] = ctx["representation"]
-                result[f"{prefix}_card"] = "\n".join(ctx["card"])
-            except Exception as e:
-                message = f"Failed to fetch {prefix.replace('_', ' ')} context from Honcho: {e}"
-                getattr(logger, log_level)(message)
+        # Also fetch AI peer's own representation so Hermes knows itself.
+        try:
+            ai_ctx = self._fetch_peer_context(session.assistant_peer_id)
+            result["ai_representation"] = ai_ctx["representation"]
+            result["ai_card"] = "\n".join(ai_ctx["card"])
+        except Exception as e:
+            logger.debug("Failed to fetch AI peer context from Honcho: %s", e)
 
-        _store_context(
-            "user_self",
-            target=session.user_peer_id,
-            perspective=session.user_peer_id,
-        )
-        _store_context(
-            "ai_user_model",
-            target=session.user_peer_id,
-            perspective=session.assistant_peer_id,
-        )
-        _store_context(
-            "ai_self",
-            target=session.assistant_peer_id,
-            perspective=session.assistant_peer_id,
-            log_level="debug",
-        )
-        _store_context(
-            "user_ai_model",
-            target=session.assistant_peer_id,
-            perspective=session.user_peer_id,
-            log_level="debug",
-        )
+        warning = self.get_queue_health_warning(session_key)
+        if warning:
+            result["warning"] = warning
 
         return result
+
+    def _extract_session_pending(self, queue_status: Any, session_key: str) -> int | None:
+        """Return pending queue work for the current Honcho session, if available."""
+        session = self._cache.get(session_key)
+        if not session:
+            return None
+
+        session_map = getattr(queue_status, "sessions", None)
+        if not isinstance(session_map, dict):
+            return None
+
+        scoped = session_map.get(session.honcho_session_id)
+        if scoped is None:
+            return None
+
+        try:
+            return int(getattr(scoped, "pending_work_units", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+
+    def get_queue_health_warning(
+        self,
+        session_key: str,
+        *,
+        force_refresh: bool = False,
+    ) -> str:
+        """Warn when Honcho accepts writes but the derivation queue is not moving."""
+        now = monotonic()
+        with self._queue_health_lock:
+            if (
+                not force_refresh
+                and self._queue_health_checked_at
+                and (now - self._queue_health_checked_at) < self._queue_health_ttl_seconds
+            ):
+                return self._queue_health_warning
+
+        try:
+            queue_status = self.honcho.queue_status()
+        except Exception as e:
+            logger.debug("Honcho queue_status() failed: %s", e)
+            return ""
+
+        try:
+            pending = int(getattr(queue_status, "pending_work_units", 0) or 0)
+            in_progress = int(getattr(queue_status, "in_progress_work_units", 0) or 0)
+            completed = int(getattr(queue_status, "completed_work_units", 0) or 0)
+        except (TypeError, ValueError):
+            return ""
+
+        session_pending = self._extract_session_pending(queue_status, session_key)
+        tracked_pending = session_pending if session_pending is not None else pending
+        stalled = tracked_pending > 0 and in_progress == 0
+
+        with self._queue_health_lock:
+            if stalled:
+                progress_made = (
+                    pending < self._queue_health_last_pending
+                    or in_progress > self._queue_health_last_in_progress
+                    or completed > self._queue_health_last_completed
+                )
+                if self._queue_health_stalled_since is None or progress_made:
+                    self._queue_health_stalled_since = now
+            else:
+                self._queue_health_stalled_since = None
+
+            stalled_for = (
+                now - self._queue_health_stalled_since
+                if self._queue_health_stalled_since is not None
+                else 0.0
+            )
+
+            warning = ""
+            if stalled and (
+                tracked_pending >= self._queue_stall_immediate_pending
+                or stalled_for >= self._queue_stall_grace_seconds
+            ):
+                scope = (
+                    f"session pending={tracked_pending}, "
+                    if session_pending is not None
+                    else ""
+                )
+                warning = (
+                    "Honcho warning: derivation queue appears stalled "
+                    f"({scope}workspace pending={pending}, in_progress={in_progress}, completed={completed}). "
+                    "Peer cards and representations may be stale or empty until the deriver catches up."
+                )
+                if warning != self._queue_health_warning:
+                    logger.warning("%s", warning)
+
+            self._queue_health_checked_at = now
+            self._queue_health_warning = warning
+            self._queue_health_last_pending = pending
+            self._queue_health_last_in_progress = in_progress
+            self._queue_health_last_completed = completed
+            return warning
 
     def migrate_local_history(self, session_key: str, messages: list[dict[str, Any]]) -> bool:
         """

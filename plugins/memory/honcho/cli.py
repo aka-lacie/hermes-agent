@@ -408,11 +408,10 @@ def cmd_setup(args) -> None:
     # --- 4. Observation mode ---
     current_obs = hermes_host.get("observationMode") or cfg.get("observationMode", "directional")
     print("\n  Observation mode:")
-    print("    unified       -- user observes self; AI peer is passive")
-    print("    directional   -- user observes self; AI peer observes user (default)")
-    print("    bidirectional -- both peers observe self and each other")
+    print("    directional  -- all observations on, each AI peer builds its own view (default)")
+    print("    unified      -- shared pool, user observes self, AI observes others only")
     new_obs = _prompt("Observation mode", default=current_obs)
-    if new_obs in ("unified", "directional", "bidirectional"):
+    if new_obs in ("unified", "directional"):
         hermes_host["observationMode"] = new_obs
     else:
         hermes_host["observationMode"] = "directional"
@@ -831,9 +830,8 @@ def cmd_mode(args) -> None:
 def cmd_observation(args) -> None:
     """Show or set the Honcho observation mode."""
     modes = {
-        "unified": "user observes self; AI peer is passive",
-        "directional": "user observes self; AI peer observes user",
-        "bidirectional": "both peers observe self and each other",
+        "directional": "all observations on, each AI peer builds its own view",
+        "unified": "shared pool, user observes self, AI observes others only",
     }
     cfg = _read_config()
     mode_arg = getattr(args, "mode", None)
@@ -848,7 +846,7 @@ def cmd_observation(args) -> None:
         for name, desc in modes.items():
             marker = " <-" if name == current else ""
             print(f"  {name:<13} {desc}{marker}")
-        print("\n  Set with: hermes honcho observation [unified|directional|bidirectional]\n")
+        print("\n  Set with: hermes honcho observation [unified|directional]\n")
         return
 
     if mode_arg not in modes:
@@ -1311,11 +1309,11 @@ def register_cli(subparser) -> None:
     )
 
     observation_parser = subs.add_parser(
-        "observation", help="Show or set observation mode (unified/directional/bidirectional)",
+        "observation", help="Show or set observation mode (unified/directional)",
     )
     observation_parser.add_argument(
         "mode", nargs="?", metavar="MODE",
-        choices=("unified", "directional", "bidirectional"),
+        choices=("unified", "directional"),
         help="Observation mode to set. Omit to show current.",
     )
 

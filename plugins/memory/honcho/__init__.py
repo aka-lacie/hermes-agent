@@ -347,6 +347,10 @@ class HonchoMemoryProvider(MemoryProvider):
         """Format the prefetch context dict into a readable system prompt block."""
         parts = []
 
+        warning = ctx.get("warning", "")
+        if warning:
+            parts.append(f"## Honcho Health Warning\n{warning}")
+
         rep = ctx.get("representation", "")
         if rep:
             parts.append(f"## User Representation\n{rep}")
@@ -385,6 +389,12 @@ class HonchoMemoryProvider(MemoryProvider):
                     "honcho_context, and honcho_conclude tools to access user memory."
                 )
             return ""
+
+        health_warning = ""
+        try:
+            health_warning = self._manager.get_queue_health_warning(self._session_key)
+        except Exception as e:
+            logger.debug("Honcho health check failed: %s", e)
 
         # ----- B4: First-turn context baking -----
         first_turn_block = ""
@@ -425,8 +435,13 @@ class HonchoMemoryProvider(MemoryProvider):
                 "honcho_conclude to save facts about the user."
             )
 
+        extra_sections = []
+        if health_warning:
+            extra_sections.append(f"## Honcho Health Warning\n{health_warning}")
         if first_turn_block:
-            return f"{header}\n\n{first_turn_block}"
+            extra_sections.append(first_turn_block)
+        if extra_sections:
+            return f"{header}\n\n" + "\n\n".join(extra_sections)
         return header
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -664,11 +679,19 @@ class HonchoMemoryProvider(MemoryProvider):
             return tool_error("Honcho is not active for this session.")
 
         try:
+            warning = self._manager.get_queue_health_warning(self._session_key)
+
+            def _result_payload(result: Any) -> str:
+                payload = {"result": result}
+                if warning:
+                    payload["warning"] = warning
+                return json.dumps(payload)
+
             if tool_name == "honcho_profile":
                 card = self._manager.get_peer_card(self._session_key)
                 if not card:
-                    return json.dumps({"result": "No profile facts available yet."})
-                return json.dumps({"result": card})
+                    return _result_payload("No profile facts available yet.")
+                return _result_payload(card)
 
             elif tool_name == "honcho_search":
                 query = args.get("query", "")
@@ -679,8 +702,8 @@ class HonchoMemoryProvider(MemoryProvider):
                     self._session_key, query, max_tokens=max_tokens
                 )
                 if not result:
-                    return json.dumps({"result": "No relevant context found."})
-                return json.dumps({"result": result})
+                    return _result_payload("No relevant context found.")
+                return _result_payload(result)
 
             elif tool_name == "honcho_context":
                 query = args.get("query", "")
@@ -690,7 +713,7 @@ class HonchoMemoryProvider(MemoryProvider):
                 result = self._manager.dialectic_query(
                     self._session_key, query, peer=peer
                 )
-                return json.dumps({"result": result or "No result from Honcho."})
+                return _result_payload(result or "No result from Honcho.")
 
             elif tool_name == "honcho_conclude":
                 conclusion = args.get("conclusion", "")
@@ -698,7 +721,7 @@ class HonchoMemoryProvider(MemoryProvider):
                     return tool_error("Missing required parameter: conclusion")
                 ok = self._manager.create_conclusion(self._session_key, conclusion)
                 if ok:
-                    return json.dumps({"result": f"Conclusion saved: {conclusion}"})
+                    return _result_payload(f"Conclusion saved: {conclusion}")
                 return tool_error("Failed to save conclusion.")
 
             return tool_error(f"Unknown tool: {tool_name}")
