@@ -94,14 +94,11 @@ def _resolve_bool(host_val, root_val, *, default: bool) -> bool:
     return default
 
 
-_VALID_OBSERVATION_MODES = {"unified", "directional", "bidirectional"}
+_VALID_OBSERVATION_MODES = {"unified", "directional"}
 _OBSERVATION_MODE_ALIASES = {
     "shared": "unified",
     "separate": "directional",
     "cross": "directional",
-    "both": "bidirectional",
-    "all": "bidirectional",
-    "full": "bidirectional",
 }
 
 
@@ -115,16 +112,12 @@ def _normalize_observation_mode(val: str) -> str:
 # Explicit per-peer config always wins over presets.
 _OBSERVATION_PRESETS = {
     "directional": {
-        "user_observe_me": True, "user_observe_others": False,
-        "ai_observe_me": False, "ai_observe_others": True,
+        "user_observe_me": True, "user_observe_others": True,
+        "ai_observe_me": True, "ai_observe_others": True,
     },
     "unified": {
         "user_observe_me": True, "user_observe_others": False,
-        "ai_observe_me": False, "ai_observe_others": False,
-    },
-    "bidirectional": {
-        "user_observe_me": True, "user_observe_others": True,
-        "ai_observe_me": True, "ai_observe_others": True,
+        "ai_observe_me": False, "ai_observe_others": True,
     },
 }
 
@@ -200,8 +193,12 @@ class HonchoClientConfig:
     # "context" — auto-injected context only, Honcho tools removed
     # "tools"   — Honcho tools only, no auto-injected context
     recall_mode: str = "hybrid"
-    # Observation mode: legacy string shorthand ("unified", "directional",
-    # or "bidirectional").
+    # When True and recallMode is "tools", create the Honcho session eagerly
+    # during initialize() instead of deferring to the first tool call.
+    # This ensures sync_turn() can write from the very first turn.
+    # Does NOT enable automatic context injection — only changes init timing.
+    init_on_session_start: bool = False
+    # Observation mode: legacy string shorthand ("directional" or "unified").
     # Kept for backward compat; granular per-peer booleans below are preferred.
     observation_mode: str = "unified"
     # Per-peer observation booleans — maps 1:1 to Honcho's SessionPeerConfig.
@@ -377,6 +374,11 @@ class HonchoClientConfig:
                 host_block.get("recallMode")
                 or raw.get("recallMode")
                 or "hybrid"
+            ),
+            init_on_session_start=_resolve_bool(
+                host_block.get("initOnSessionStart"),
+                raw.get("initOnSessionStart"),
+                default=False,
             ),
             # Migration guard: existing configs without an explicit
             # observationMode keep the old "unified" default so users
