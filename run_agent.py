@@ -2078,7 +2078,7 @@ class AIAgent:
                 msg["content"] = override
 
     def _build_current_time_user_context(self) -> str:
-        """Return an ephemeral current-time tag for the active user turn."""
+        """Return an ephemeral system-time tag for the active user turn."""
         if not getattr(self, "_inject_current_time_in_user_turn", False):
             return ""
         try:
@@ -2086,7 +2086,7 @@ class AIAgent:
 
             stamp = _hermes_now().strftime("%Y-%m-%d %a %I:%M %p %Z").strip()
             if stamp:
-                return f"<time-now>{stamp}</time-now>"
+                return f"<system_time>{stamp}</system_time>"
         except Exception:
             logger.debug("Current-time user context injection failed", exc_info=True)
         return ""
@@ -2548,6 +2548,8 @@ class AIAgent:
         *,
         reason: str,
         error: Optional[Exception] = None,
+        effective_system: Optional[str] = None,
+        api_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Path]:
         """
         Dump a debug-friendly HTTP request record for the active inference API.
@@ -2582,6 +2584,12 @@ class AIAgent:
                 },
             }
 
+            if effective_system is not None or api_messages is not None:
+                dump_payload["assembled_context"] = {
+                    "effective_system": effective_system or "",
+                    "messages": copy.deepcopy(api_messages) if api_messages is not None else None,
+                }
+
             if error is not None:
                 error_info: Dict[str, Any] = {
                     "type": type(error).__name__,
@@ -2612,6 +2620,7 @@ class AIAgent:
                 json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8",
             )
+            self._prune_request_debug_dumps(self._get_request_dump_keep_last())
 
             self._vprint(f"{self.log_prefix}🧾 Request debug dump written to: {dump_file}")
 
@@ -2623,6 +2632,55 @@ class AIAgent:
             if self.verbose_logging:
                 logging.warning(f"Failed to dump API request debug payload: {dump_error}")
             return None
+
+    def _get_request_dump_keep_last(self) -> int:
+        keep_last = 5
+        try:
+            from hermes_cli.config import read_raw_config
+
+            raw_config = read_raw_config()
+            if isinstance(raw_config, dict):
+                debug_cfg = raw_config.get("debug")
+                if isinstance(debug_cfg, dict):
+                    request_dump_cfg = debug_cfg.get("request_dumps")
+                    if isinstance(request_dump_cfg, dict):
+                        configured_keep = request_dump_cfg.get("keep_last")
+                        if isinstance(configured_keep, (int, float)):
+                            keep_last = max(1, int(configured_keep))
+        except Exception:
+            pass
+        return keep_last
+
+    def _request_dump_enabled(self) -> bool:
+        if env_var_enabled("HERMES_DUMP_REQUESTS"):
+            return True
+        try:
+            from hermes_cli.config import read_raw_config
+
+            raw_config = read_raw_config()
+            if not isinstance(raw_config, dict):
+                return False
+            debug_cfg = raw_config.get("debug")
+            if not isinstance(debug_cfg, dict):
+                return False
+            request_dump_cfg = debug_cfg.get("request_dumps")
+            if not isinstance(request_dump_cfg, dict):
+                return False
+            return bool(request_dump_cfg.get("enabled"))
+        except Exception:
+            return False
+
+    def _prune_request_debug_dumps(self, keep_last: int) -> None:
+        if keep_last < 1:
+            keep_last = 1
+        try:
+            session_id = str(self.session_id or "")
+            dumps = sorted(self.logs_dir.glob(f"request_dump_{session_id}_*.json"))
+            stale = dumps[:-keep_last]
+            for path in stale:
+                path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("Failed to prune request debug dumps: %s", exc)
 
     @staticmethod
     def _clean_session_content(content: str) -> str:
@@ -8037,19 +8095,24 @@ class AIAgent:
                 # API-call-time only — the original message in `messages` is
                 # never mutated, so nothing leaks into session persistence.
                 if idx == current_turn_user_idx and msg.get("role") == "user":
-                    _injections = []
+                    _prefix_injections = []
+                    _suffix_injections = []
                     if _current_time_user_context:
-                        _injections.append(_current_time_user_context)
+                        _prefix_injections.append(_current_time_user_context)
                     if _ext_prefetch_cache:
                         _fenced = build_memory_context_block(_ext_prefetch_cache)
                         if _fenced:
-                            _injections.append(_fenced)
+                            _suffix_injections.append(_fenced)
                     if _plugin_user_context:
-                        _injections.append(_plugin_user_context)
-                    if _injections:
+                        _suffix_injections.append(_plugin_user_context)
+                    if _prefix_injections or _suffix_injections:
                         _base = api_msg.get("content", "")
                         if isinstance(_base, str):
-                            api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                            _parts = [*_prefix_injections]
+                            if _base:
+                                _parts.append(_base)
+                            _parts.extend(_suffix_injections)
+                            api_msg["content"] = "\n\n".join(_parts)
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved
@@ -8194,8 +8257,13 @@ class AIAgent:
                     except Exception:
                         pass
 
-                    if env_var_enabled("HERMES_DUMP_REQUESTS"):
-                        self._dump_api_request_debug(api_kwargs, reason="preflight")
+                    if self._request_dump_enabled():
+                        self._dump_api_request_debug(
+                            api_kwargs,
+                            reason="preflight",
+                            effective_system=effective_system,
+                            api_messages=api_messages,
+                        )
 
                     # Always prefer the streaming path — even without stream
                     # consumers.  Streaming gives us fine-grained health

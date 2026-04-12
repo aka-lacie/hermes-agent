@@ -473,7 +473,7 @@ agent:
 
   # Inject the current local datetime into the current user turn at API-call
   # time only, using a compact tag like:
-  #   <time-now>2026-04-09 Thu 01:39 AM PDT</time-now>
+  #   <system_time>2026-04-09 Thu 01:39 AM PDT</system_time>
   # This is NOT persisted to transcripts or session storage.
   inject_current_time_in_user_turn: false
   # Inactivity timeout for gateway agent runs (seconds, 0 = unlimited).

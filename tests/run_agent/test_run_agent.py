@@ -139,6 +139,40 @@ def test_aiagent_reuses_existing_errors_log_handler():
             root_logger.addHandler(handler)
 
 
+def test_request_dump_uses_config_and_captures_final_api_context(agent):
+    agent.client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="Final answer", tool_calls=None),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+    agent.logs_dir.mkdir(parents=True, exist_ok=True)
+
+    with (
+        patch("hermes_cli.config.read_raw_config", return_value={"debug": {"request_dumps": {"enabled": True, "keep_last": 5}}}),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_dump_api_request_debug") as mock_dump,
+    ):
+        result = agent.run_conversation("hello")
+
+    assert result["final_response"] == "Final answer"
+    assert mock_dump.call_count == 1
+    _, kwargs = mock_dump.call_args
+    assert kwargs["reason"] == "preflight"
+    assert kwargs["effective_system"]
+    assert kwargs["api_messages"][0]["role"] == "system"
+    assert kwargs["api_messages"][0]["content"] == kwargs["effective_system"]
+    assert any(
+        msg.get("role") == "user" and msg.get("content") == "hello"
+        for msg in kwargs["api_messages"]
+    )
+
+
 class TestProviderModelNormalization:
     def test_aiagent_strips_matching_native_provider_prefix(self):
         with (
@@ -1614,7 +1648,7 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
-    def test_current_time_tag_injected_only_into_api_payload(self, agent):
+    def test_system_time_tag_injected_only_into_api_payload(self, agent):
         self._setup_agent(agent)
         agent._inject_current_time_in_user_turn = True
         agent.client.chat.completions.create.return_value = _mock_response(
@@ -1635,7 +1669,7 @@ class TestRunConversation:
         api_messages = call_args.kwargs["messages"]
         api_user = next(msg for msg in api_messages if msg.get("role") == "user")
         assert api_user["content"] == (
-            "hello\n\n<time-now>2026-04-09 Thu 01:39 AM PDT</time-now>"
+            "<system_time>2026-04-09 Thu 01:39 AM PDT</system_time>\n\nhello"
         )
 
         persisted_messages = mock_persist.call_args.args[0]
