@@ -315,7 +315,7 @@ class TestQueueHealthWarnings:
 
     def test_format_first_turn_context_uses_dynamic_observation_heading(self):
         provider = HonchoMemoryProvider()
-        provider._config = SimpleNamespace(peer_name="Sonya", ai_peer="Yuri")
+        provider._config = SimpleNamespace(peer_name="canonical-user", ai_peer="assistant-peer")
 
         block = provider._format_first_turn_context(
             {
@@ -324,7 +324,7 @@ class TestQueueHealthWarnings:
             }
         )
 
-        assert "## Yuri's observation of Sonya" in block
+        assert "## assistant-peer's observation of canonical-user" in block
         assert "Observed preference: off-white backgrounds" in block
         assert "PREFERENCE: prefers off-white" in block
         assert "## User Representation" not in block
