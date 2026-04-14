@@ -398,27 +398,27 @@ class TestBuildSourceUserAliases:
         return StubAdapter(config=config, platform=Platform.DISCORD)
 
     def test_build_source_maps_known_alias_to_canonical_name(self):
-        adapter = self._adapter({"lacie": "Sonya"})
+        adapter = self._adapter({"alias-user": "canonical-user"})
         source = adapter.build_source(
             chat_id="123",
             chat_type="dm",
             user_id="42",
-            user_name="lacie",
+            user_name="alias-user",
         )
-        assert source.user_name == "Sonya"
+        assert source.user_name == "canonical-user"
 
     def test_build_source_alias_mapping_is_case_insensitive(self):
-        adapter = self._adapter({"lacie": "Sonya"})
+        adapter = self._adapter({"alias-user": "canonical-user"})
         source = adapter.build_source(
             chat_id="123",
             chat_type="dm",
             user_id="42",
-            user_name="LACIE",
+            user_name="ALIAS-USER",
         )
-        assert source.user_name == "Sonya"
+        assert source.user_name == "canonical-user"
 
     def test_build_source_leaves_unknown_user_name_unchanged(self):
-        adapter = self._adapter({"lacie": "Sonya"})
+        adapter = self._adapter({"alias-user": "canonical-user"})
         source = adapter.build_source(
             chat_id="123",
             chat_type="dm",

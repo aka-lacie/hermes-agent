@@ -110,7 +110,7 @@ class TestGatewayConfigRoundtrip:
             quick_commands={"limits": {"type": "exec", "command": "echo ok"}},
             group_sessions_per_user=False,
             thread_sessions_per_user=True,
-            user_aliases={"lacie": "Sonya"},
+            user_aliases={"alias-user": "canonical-user"},
         )
         d = config.to_dict()
         restored = GatewayConfig.from_dict(d)
@@ -121,7 +121,7 @@ class TestGatewayConfigRoundtrip:
         assert restored.quick_commands == {"limits": {"type": "exec", "command": "echo ok"}}
         assert restored.group_sessions_per_user is False
         assert restored.thread_sessions_per_user is True
-        assert restored.user_aliases == {"lacie": "Sonya"}
+        assert restored.user_aliases == {"alias-user": "canonical-user"}
 
     def test_roundtrip_preserves_unauthorized_dm_behavior(self):
         config = GatewayConfig(
@@ -231,8 +231,8 @@ class TestLoadGatewayConfig:
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
             "user_aliases:\n"
-            "  lacie: Sonya\n"
-            "  LACIE-WORK: Sonya\n"
+            "  alias-user: canonical-user\n"
+            "  ALIAS-WORK: canonical-user\n"
             "discord:\n"
             "  require_mention: true\n",
             encoding="utf-8",
@@ -242,10 +242,10 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        assert config.user_aliases == {"lacie": "Sonya", "lacie-work": "Sonya"}
+        assert config.user_aliases == {"alias-user": "canonical-user", "alias-work": "canonical-user"}
         assert config.platforms[Platform.DISCORD].extra["user_aliases"] == {
-            "lacie": "Sonya",
-            "lacie-work": "Sonya",
+            "alias-user": "canonical-user",
+            "alias-work": "canonical-user",
         }
 
 
