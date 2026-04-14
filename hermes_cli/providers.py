@@ -132,6 +132,15 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_override="https://api.x.ai/v1",
         base_url_env_var="XAI_BASE_URL",
     ),
+    "xiaomi": HermesOverlay(
+        transport="openai_chat",
+        base_url_env_var="XIAOMI_BASE_URL",
+    ),
+    "arcee": HermesOverlay(
+        transport="openai_chat",
+        base_url_override="https://api.arcee.ai/api/v1",
+        base_url_env_var="ARCEE_BASE_URL",
+    ),
 }
 
 
@@ -175,6 +184,7 @@ ALIASES: Dict[str, str] = {
     # kimi-for-coding (models.dev ID)
     "kimi": "kimi-for-coding",
     "kimi-coding": "kimi-for-coding",
+    "kimi-coding-cn": "kimi-for-coding",
     "moonshot": "kimi-for-coding",
 
     # minimax-cn
@@ -222,6 +232,14 @@ ALIASES: Dict[str, str] = {
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
 
+    # xiaomi
+    "mimo": "xiaomi",
+    "xiaomi-mimo": "xiaomi",
+
+    # arcee
+    "arcee-ai": "arcee",
+    "arceeai": "arcee",
+
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
     "lm-studio": "lmstudio",
@@ -242,6 +260,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "nous": "Nous Portal",
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
+    "xiaomi": "Xiaomi MiMo",
     "local": "Local endpoint",
 }
 
