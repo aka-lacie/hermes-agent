@@ -891,6 +891,29 @@ def test_dump_api_request_debug_uses_chat_completions_url(monkeypatch, tmp_path)
     assert payload["request"]["url"] == "http://127.0.0.1:9208/v1/chat/completions"
 
 
+def test_dump_api_request_debug_includes_assembled_context_and_prunes_old_files(monkeypatch, tmp_path):
+    import json
+
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    agent.session_id = "session-debug"
+
+    for idx in range(7):
+        dump_file = agent._dump_api_request_debug(
+            _codex_request_kwargs(),
+            reason="preflight",
+            effective_system=f"system-{idx}",
+            api_messages=[{"role": "user", "content": f"hello-{idx}"}],
+        )
+
+    payload = json.loads(dump_file.read_text())
+    assert payload["assembled_context"]["effective_system"] == "system-6"
+    assert payload["assembled_context"]["messages"] == [{"role": "user", "content": "hello-6"}]
+
+    files = sorted(tmp_path.glob("request_dump_session-debug_*.json"))
+    assert len(files) == 5
+
+
 # --- Reasoning-only response tests (fix for empty content retry loop) ---
 
 

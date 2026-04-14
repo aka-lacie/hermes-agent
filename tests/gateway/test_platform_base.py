@@ -376,6 +376,57 @@ class TestTruncateMessage:
         assert "(1/" in chunks[0]
         assert f"({len(chunks)}/{len(chunks)})" in chunks[-1]
 
+
+class TestBuildSourceUserAliases:
+    def _adapter(self, aliases=None):
+        class StubAdapter(BasePlatformAdapter):
+            async def connect(self):
+                return True
+
+            async def disconnect(self):
+                pass
+
+            async def send(self, *a, **kw):
+                pass
+
+            async def get_chat_info(self, *a):
+                return {}
+
+        from gateway.config import Platform, PlatformConfig
+
+        config = PlatformConfig(enabled=True, token="test", extra={"user_aliases": aliases or {}})
+        return StubAdapter(config=config, platform=Platform.DISCORD)
+
+    def test_build_source_maps_known_alias_to_canonical_name(self):
+        adapter = self._adapter({"lacie": "Sonya"})
+        source = adapter.build_source(
+            chat_id="123",
+            chat_type="dm",
+            user_id="42",
+            user_name="lacie",
+        )
+        assert source.user_name == "Sonya"
+
+    def test_build_source_alias_mapping_is_case_insensitive(self):
+        adapter = self._adapter({"lacie": "Sonya"})
+        source = adapter.build_source(
+            chat_id="123",
+            chat_type="dm",
+            user_id="42",
+            user_name="LACIE",
+        )
+        assert source.user_name == "Sonya"
+
+    def test_build_source_leaves_unknown_user_name_unchanged(self):
+        adapter = self._adapter({"lacie": "Sonya"})
+        source = adapter.build_source(
+            chat_id="123",
+            chat_type="dm",
+            user_id="42",
+            user_name="someone-else",
+        )
+        assert source.user_name == "someone-else"
+
     def test_code_block_first_chunk_closed(self):
         adapter = self._adapter()
         msg = "Before\n```python\n" + "x = 1\n" * 100 + "```\nAfter"

@@ -45,6 +45,21 @@ def _normalize_unauthorized_dm_behavior(value: Any, default: str = "pair") -> st
     return default
 
 
+def _normalize_user_aliases(value: Any) -> Dict[str, str]:
+    """Normalize a config mapping of alias -> canonical user name."""
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: Dict[str, str] = {}
+    for alias, canonical in value.items():
+        alias_str = str(alias).strip()
+        canonical_str = str(canonical).strip()
+        if not alias_str or not canonical_str:
+            continue
+        normalized[alias_str.casefold()] = canonical_str
+    return normalized
+
+
 class Platform(Enum):
     """Supported messaging platforms."""
     LOCAL = "local"
@@ -253,6 +268,9 @@ class GatewayConfig:
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
+    # Canonical user identity mapping across messaging platforms
+    user_aliases: Dict[str, str] = field(default_factory=dict)
+
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
@@ -346,6 +364,7 @@ class GatewayConfig:
             "group_sessions_per_user": self.group_sessions_per_user,
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
+            "user_aliases": self.user_aliases,
             "streaming": self.streaming.to_dict(),
         }
     
@@ -393,6 +412,7 @@ class GatewayConfig:
             data.get("unauthorized_dm_behavior"),
             "pair",
         )
+        user_aliases = _normalize_user_aliases(data.get("user_aliases"))
 
         return cls(
             platforms=platforms,
@@ -407,6 +427,7 @@ class GatewayConfig:
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
+            user_aliases=user_aliases,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
         )
 
@@ -499,6 +520,9 @@ def load_gateway_config() -> GatewayConfig:
                     yaml_cfg.get("unauthorized_dm_behavior"),
                     "pair",
                 )
+
+            if "user_aliases" in yaml_cfg:
+                gw_data["user_aliases"] = _normalize_user_aliases(yaml_cfg.get("user_aliases"))
 
             # Merge platforms section from config.yaml into gw_data so that
             # nested keys like platforms.webhook.extra.routes are loaded.
@@ -657,6 +681,17 @@ def load_gateway_config() -> GatewayConfig:
 
     # Override with environment variables
     _apply_env_overrides(config)
+
+    # Make the canonical user-alias map visible to every platform adapter.
+    if config.user_aliases:
+        for pconfig in config.platforms.values():
+            if not isinstance(pconfig.extra, dict):
+                pconfig.extra = {}
+            merged_aliases = dict(config.user_aliases)
+            platform_aliases = _normalize_user_aliases(pconfig.extra.get("user_aliases"))
+            if platform_aliases:
+                merged_aliases.update(platform_aliases)
+            pconfig.extra["user_aliases"] = merged_aliases
     
     # --- Validate loaded values ---
     policy = config.default_reset_policy

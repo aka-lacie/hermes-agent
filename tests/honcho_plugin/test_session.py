@@ -230,25 +230,23 @@ class TestPeerLookupHelpers:
         assert "- Location: Melbourne" in result
         user_peer.context.assert_called_once_with(search_query="neuralancer")
 
-    def test_get_prefetch_context_fetches_user_and_ai_from_peer_api(self):
+    def test_get_prefetch_context_fetches_ai_observation_of_user(self):
         mgr, session = self._make_cached_manager()
         mgr._fetch_peer_context = MagicMock(
-            side_effect=[
-                {"representation": "User self", "card": ["Name: Robert"]},
-                {"representation": "AI self", "card": ["Owner: Robert"]},
-            ]
+            return_value={"representation": "AI on user", "card": ["Name: Robert"]}
         )
 
         with patch.object(mgr, "get_queue_health_warning", return_value=""):
             result = mgr.get_prefetch_context(session.key)
 
         assert result == {
-            "representation": "User self",
-            "card": "Name: Robert",
-            "ai_representation": "AI self",
-            "ai_card": "Owner: Robert",
+            "observation_representation": "AI on user",
+            "observation_card": "Name: Robert",
         }
-        assert mgr._fetch_peer_context.call_count == 2
+        mgr._fetch_peer_context.assert_called_once_with(
+            session.assistant_peer_id,
+            target_peer_id=session.user_peer_id,
+        )
 
     def test_get_ai_representation_uses_peer_api(self):
         mgr, session = self._make_cached_manager()
@@ -303,10 +301,7 @@ class TestQueueHealthWarnings:
     def test_get_prefetch_context_includes_warning(self):
         mgr, session = self._make_manager()
         mgr._fetch_peer_context = MagicMock(
-            side_effect=[
-                {"representation": "User self", "card": ["Name: Robert"]},
-                {"representation": "AI self", "card": ["Owner: Robert"]},
-            ]
+            return_value={"representation": "AI on user", "card": ["Name: Robert"]}
         )
 
         with patch.object(
@@ -317,6 +312,23 @@ class TestQueueHealthWarnings:
             result = mgr.get_prefetch_context(session.key)
 
         assert result["warning"] == "Honcho warning: derivation queue appears stalled."
+
+    def test_format_first_turn_context_uses_dynamic_observation_heading(self):
+        provider = HonchoMemoryProvider()
+        provider._config = SimpleNamespace(peer_name="Sonya", ai_peer="Yuri")
+
+        block = provider._format_first_turn_context(
+            {
+                "observation_representation": "Observed preference: off-white backgrounds",
+                "observation_card": "PREFERENCE: prefers off-white",
+            }
+        )
+
+        assert "## Yuri's observation of Sonya" in block
+        assert "Observed preference: off-white backgrounds" in block
+        assert "PREFERENCE: prefers off-white" in block
+        assert "## User Representation" not in block
+        assert "## AI Identity Card" not in block
 
 
 # ---------------------------------------------------------------------------

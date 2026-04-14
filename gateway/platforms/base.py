@@ -1821,13 +1821,18 @@ class BasePlatformAdapter(ABC):
         # Normalize empty topic to None
         if chat_topic is not None and not chat_topic.strip():
             chat_topic = None
+        canonical_user_name = user_name
+        if canonical_user_name:
+            alias_map = self.config.extra.get("user_aliases", {}) if isinstance(self.config.extra, dict) else {}
+            if isinstance(alias_map, dict):
+                canonical_user_name = alias_map.get(canonical_user_name.strip().casefold(), canonical_user_name)
         return SessionSource(
             platform=self.platform,
             chat_id=str(chat_id),
             chat_name=chat_name,
             chat_type=chat_type,
             user_id=str(user_id) if user_id else None,
-            user_name=user_name,
+            user_name=canonical_user_name,
             thread_id=str(thread_id) if thread_id else None,
             chat_topic=chat_topic.strip() if chat_topic else None,
             user_id_alt=user_id_alt,

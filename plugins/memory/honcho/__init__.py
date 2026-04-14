@@ -351,21 +351,19 @@ class HonchoMemoryProvider(MemoryProvider):
         if warning:
             parts.append(f"## Honcho Health Warning\n{warning}")
 
-        rep = ctx.get("representation", "")
-        if rep:
-            parts.append(f"## User Representation\n{rep}")
+        user_name = (self._config.peer_name if self._config and self._config.peer_name else "User").strip()
+        ai_name = (self._config.ai_peer if self._config and self._config.ai_peer else "Agent").strip()
+        heading = f"## {ai_name}'s observation of {user_name}"
 
-        card = ctx.get("card", "")
-        if card:
-            parts.append(f"## User Peer Card\n{card}")
-
-        ai_rep = ctx.get("ai_representation", "")
-        if ai_rep:
-            parts.append(f"## AI Self-Representation\n{ai_rep}")
-
-        ai_card = ctx.get("ai_card", "")
-        if ai_card:
-            parts.append(f"## AI Identity Card\n{ai_card}")
+        observation_rep = ctx.get("observation_representation", "")
+        observation_card = ctx.get("observation_card", "")
+        section_parts = []
+        if observation_rep:
+            section_parts.append(observation_rep)
+        if observation_card:
+            section_parts.append(observation_card)
+        if section_parts:
+            parts.append(f"{heading}\n" + "\n\n".join(section_parts))
 
         if not parts:
             return ""

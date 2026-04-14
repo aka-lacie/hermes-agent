@@ -603,6 +603,8 @@ DEFAULT_CONFIG = {
     "command_allowlist": [],
     # User-defined quick commands that bypass the agent loop (type: exec only)
     "quick_commands": {},
+    # Canonical user identity mapping for messaging gateways (alias -> canonical name)
+    "user_aliases": {},
     # Custom personalities — add your own entries here
     # Supports string format: {"name": "system prompt"}
     # Or dict format: {"name": {"description": "...", "system_prompt": "...", "tone": "...", "style": "..."}}
@@ -634,6 +636,14 @@ DEFAULT_CONFIG = {
         "level": "INFO",       # Minimum level for agent.log: DEBUG, INFO, WARNING
         "max_size_mb": 5,      # Max size per log file before rotation
         "backup_count": 3,     # Number of rotated backup files to keep
+    },
+
+    # Debugging aids — optional developer-facing diagnostics.
+    "debug": {
+        "request_dumps": {
+            "enabled": False,  # Dump final provider request payload/context before send
+            "keep_last": 5,    # Keep only the most recent dumps per session
+        },
     },
 
     # Config schema version - bump this when adding new required fields
