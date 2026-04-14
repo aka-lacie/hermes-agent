@@ -85,6 +85,7 @@ local = [
   "hermes-agent[cron]",
   "hermes-agent[honcho]",
   "hermes-agent[pty]",
+  "hermes-agent[web]",
 ]
 web = ["fastapi>=0.104.0,<1", "uvicorn[standard]>=0.24.0,<1"]
 rl = [
