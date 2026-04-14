@@ -1,3 +1,7 @@
+# LOCAL FORK NOTE
+
+If present locally, open [[plans/local-fork-notes]] before doing merge work, production sync, or anything involving private infrastructure. That file is intentionally local-only and may not exist in public clones.
+
 # Hermes Agent - Development Guide
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
