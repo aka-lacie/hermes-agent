@@ -2875,9 +2875,9 @@ class AIAgent:
         try:
             from hermes_time import now as _hermes_now
 
-            stamp = _hermes_now().strftime("%Y-%m-%d %a %I:%M %p %Z").strip()
+            stamp = _hermes_now().strftime("%Y-%m-%d %a %H:%M %Z").strip()
             if stamp:
-                return f"<system_time>{stamp}</system_time>"
+                return f"[{stamp}]"
         except Exception:
             logger.debug("Current-time user context injection failed", exc_info=True)
         return ""
@@ -9318,8 +9318,12 @@ class AIAgent:
                     if _prefix_injections or _suffix_injections:
                         _base = api_msg.get("content", "")
                         if isinstance(_base, str):
-                            _parts = [*_prefix_injections]
-                            if _base:
+                            _parts = []
+                            if _prefix_injections:
+                                _prefix = " ".join(p for p in _prefix_injections if p)
+                                if _prefix:
+                                    _parts.append(f"{_prefix} {_base}".strip() if _base else _prefix)
+                            elif _base:
                                 _parts.append(_base)
                             _parts.extend(_suffix_injections)
                             api_msg["content"] = "\n\n".join(_parts)

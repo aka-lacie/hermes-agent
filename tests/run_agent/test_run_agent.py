@@ -1758,9 +1758,7 @@ class TestRunConversation:
         assert call_args is not None
         api_messages = call_args.kwargs["messages"]
         api_user = next(msg for msg in api_messages if msg.get("role") == "user")
-        assert api_user["content"] == (
-            "<system_time>2026-04-09 Thu 01:39 AM PDT</system_time>\n\nhello"
-        )
+        assert api_user["content"] == "[2026-04-09 Thu 01:39 PDT] hello"
 
         persisted_messages = mock_persist.call_args.args[0]
         assert persisted_messages[0]["content"] == "hello"
