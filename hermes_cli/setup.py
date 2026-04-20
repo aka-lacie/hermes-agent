@@ -20,10 +20,7 @@ import copy
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from hermes_cli.nous_subscription import (
-    apply_nous_provider_defaults,
-    get_nous_subscription_features,
-)
+from hermes_cli.nous_subscription import get_nous_subscription_features
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 from hermes_constants import get_optional_skills_dir
 
@@ -92,20 +89,19 @@ _DEFAULT_PROVIDER_MODELS = {
         "grok-code-fast-1",
     ],
     "gemini": [
-        "gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview",
-        "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
-        "gemma-4-31b-it", "gemma-4-26b-it",
+        "gemini-3.1-pro-preview", "gemini-3-pro-preview",
+        "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview",
     ],
     "zai": ["glm-5.1", "glm-5", "glm-4.7", "glm-4.5", "glm-4.5-flash"],
-    "kimi-coding": ["kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
-    "kimi-coding-cn": ["kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
+    "kimi-coding": ["kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
+    "kimi-coding-cn": ["kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
     "arcee": ["trinity-large-thinking", "trinity-large-preview", "trinity-mini"],
     "minimax": ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"],
     "minimax-cn": ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"],
     "ai-gateway": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5", "google/gemini-3-flash"],
     "kilocode": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-3-pro-preview", "google/gemini-3-flash-preview"],
     "opencode-zen": ["gpt-5.4", "gpt-5.3-codex", "claude-sonnet-4-6", "gemini-3-flash", "glm-5", "kimi-k2.5", "minimax-m2.7"],
-    "opencode-go": ["glm-5", "kimi-k2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m2.5", "minimax-m2.7"],
+    "opencode-go": ["glm-5.1", "glm-5", "kimi-k2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m2.5", "minimax-m2.7"],
     "huggingface": [
         "Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3-235B-A22B-Thinking-2507",
         "Qwen/Qwen3-Coder-480B-A35B-Instruct", "deepseek-ai/DeepSeek-R1-0528",
@@ -213,20 +209,20 @@ def prompt(question: str, default: str = None, password: bool = False) -> str:
         sys.exit(1)
 
 
-def _curses_prompt_choice(question: str, choices: list, default: int = 0) -> int:
+def _curses_prompt_choice(question: str, choices: list, default: int = 0, description: str | None = None) -> int:
     """Single-select menu using curses. Delegates to curses_radiolist."""
     from hermes_cli.curses_ui import curses_radiolist
-    return curses_radiolist(question, choices, selected=default, cancel_returns=-1)
+    return curses_radiolist(question, choices, selected=default, cancel_returns=-1, description=description)
 
 
 
-def prompt_choice(question: str, choices: list, default: int = 0) -> int:
+def prompt_choice(question: str, choices: list, default: int = 0, description: str | None = None) -> int:
     """Prompt for a choice from a list with arrow key navigation.
 
     Escape keeps the current default (skips the question).
     Ctrl+C exits the wizard.
     """
-    idx = _curses_prompt_choice(question, choices, default)
+    idx = _curses_prompt_choice(question, choices, default, description=description)
     if idx >= 0:
         if idx == default:
             print_info("  Skipped (keeping current)")
@@ -433,6 +429,8 @@ def _print_setup_summary(config: dict, hermes_home):
         tool_status.append(("Text-to-Speech (MiniMax)", True, None))
     elif tts_provider == "mistral" and get_env_value("MISTRAL_API_KEY"):
         tool_status.append(("Text-to-Speech (Mistral Voxtral)", True, None))
+    elif tts_provider == "gemini" and (get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY")):
+        tool_status.append(("Text-to-Speech (Google Gemini)", True, None))
     elif tts_provider == "neutts":
         try:
             import importlib.util
@@ -835,14 +833,7 @@ def setup_model_provider(config: dict, *, quick: bool = False):
             print_info("Skipped — add later with 'hermes setup' or configure AUXILIARY_VISION_* settings")
 
 
-    if selected_provider == "nous" and nous_subscription_selected:
-        changed_defaults = apply_nous_provider_defaults(config)
-        current_tts = str(config.get("tts", {}).get("provider") or "edge")
-        if "tts" in changed_defaults:
-            print_success("TTS provider set to: OpenAI TTS via your Nous subscription")
-        else:
-            print_info(f"Keeping your existing TTS provider: {current_tts}")
-
+    # Tool Gateway prompt is already shown by _model_flow_nous() above.
     save_config(config)
 
     if not quick and selected_provider != "nous":
@@ -920,8 +911,10 @@ def _setup_tts_provider(config: dict):
         "edge": "Edge TTS",
         "elevenlabs": "ElevenLabs",
         "openai": "OpenAI TTS",
+        "xai": "xAI TTS",
         "minimax": "MiniMax TTS",
         "mistral": "Mistral Voxtral TTS",
+        "gemini": "Google Gemini TTS",
         "neutts": "NeuTTS",
     }
     current_label = provider_labels.get(current_provider, current_provider)
@@ -941,12 +934,14 @@ def _setup_tts_provider(config: dict):
             "Edge TTS (free, cloud-based, no setup needed)",
             "ElevenLabs (premium quality, needs API key)",
             "OpenAI TTS (good quality, needs API key)",
+            "xAI TTS (Grok voices, needs API key)",
             "MiniMax TTS (high quality with voice cloning, needs API key)",
             "Mistral Voxtral TTS (multilingual, native Opus, needs API key)",
+            "Google Gemini TTS (30 prebuilt voices, prompt-controllable, needs API key)",
             "NeuTTS (local on-device, free, ~300MB model download)",
         ]
     )
-    providers.extend(["edge", "elevenlabs", "openai", "minimax", "mistral", "neutts"])
+    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts"])
     choices.append(f"Keep current ({current_label})")
     keep_current_idx = len(choices) - 1
     idx = prompt_choice("Select TTS provider:", choices, keep_current_idx)
@@ -1012,6 +1007,23 @@ def _setup_tts_provider(config: dict):
                 print_warning("No API key provided. Falling back to Edge TTS.")
                 selected = "edge"
 
+    elif selected == "xai":
+        existing = get_env_value("XAI_API_KEY")
+        if not existing:
+            print()
+            api_key = prompt("xAI API key for TTS", password=True)
+            if api_key:
+                save_env_value("XAI_API_KEY", api_key)
+                print_success("xAI TTS API key saved")
+            else:
+                from hermes_constants import display_hermes_home as _dhh
+                print_warning(
+                    "No xAI API key provided for TTS. Configure XAI_API_KEY via "
+                    f"hermes setup model or {_dhh()}/.env to use xAI TTS. "
+                    "Falling back to Edge TTS."
+                )
+                selected = "edge"
+
     elif selected == "minimax":
         existing = get_env_value("MINIMAX_API_KEY")
         if not existing:
@@ -1032,6 +1044,19 @@ def _setup_tts_provider(config: dict):
             if api_key:
                 save_env_value("MISTRAL_API_KEY", api_key)
                 print_success("Mistral TTS API key saved")
+            else:
+                print_warning("No API key provided. Falling back to Edge TTS.")
+                selected = "edge"
+
+    elif selected == "gemini":
+        existing = get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY")
+        if not existing:
+            print()
+            print_info("Get a free API key at https://aistudio.google.com/app/apikey")
+            api_key = prompt("Gemini API key for TTS", password=True)
+            if api_key:
+                save_env_value("GEMINI_API_KEY", api_key)
+                print_success("Gemini TTS API key saved")
             else:
                 print_warning("No API key provided. Falling back to Edge TTS.")
                 selected = "edge"
@@ -1435,7 +1460,9 @@ def setup_agent_settings(config: dict):
     )
     print_info("Maximum tool-calling iterations per conversation.")
     print_info("Higher = more complex tasks, but costs more tokens.")
-    print_info("Default is 90, which works for most tasks. Use 150+ for open exploration.")
+    print_info(
+        f"Press Enter to keep {current_max}. Use 90 for most tasks or 150+ for open exploration."
+    )
 
     max_iter_str = prompt("Max iterations", current_max)
     try:
@@ -1611,9 +1638,19 @@ def _setup_telegram():
             return
 
     print_info("Create a bot via @BotFather on Telegram")
-    token = prompt("Telegram bot token", password=True)
-    if not token:
-        return
+    import re
+
+    while True:
+        token = prompt("Telegram bot token", password=True)
+        if not token:
+            return
+        if not re.match(r"^\d+:[A-Za-z0-9_-]{30,}$", token):
+            print_error(
+                "Invalid token format. Expected: <numeric_id>:<alphanumeric_hash> "
+                "(e.g., 123456789:ABCdefGHI-jklMNOpqrSTUvwxYZ)"
+            )
+            continue
+        break
     save_env_value("TELEGRAM_BOT_TOKEN", token)
     print_success("Telegram token saved")
 
@@ -1969,6 +2006,8 @@ def _setup_wecom_callback():
     _gw_setup()
 
 
+
+
 def _setup_bluebubbles():
     """Configure BlueBubbles iMessage gateway."""
     print_header("BlueBubbles (iMessage)")
@@ -2034,6 +2073,12 @@ def _setup_bluebubbles():
     print_info("   Install: https://docs.bluebubbles.app/helper-bundle/installation")
 
 
+def _setup_qqbot():
+    """Configure QQ Bot (Official API v2) via gateway setup."""
+    from hermes_cli.gateway import _setup_qqbot as _gateway_setup_qqbot
+    _gateway_setup_qqbot()
+
+
 def _setup_webhooks():
     """Configure webhook integration."""
     print_header("Webhooks")
@@ -2097,6 +2142,7 @@ _GATEWAY_PLATFORMS = [
     ("WeCom Callback (Self-Built App)", "WECOM_CALLBACK_CORP_ID", _setup_wecom_callback),
     ("Weixin (WeChat)", "WEIXIN_ACCOUNT_ID", _setup_weixin),
     ("BlueBubbles (iMessage)", "BLUEBUBBLES_SERVER_URL", _setup_bluebubbles),
+    ("QQ Bot", "QQ_APP_ID", _setup_qqbot),
     ("Webhooks (GitHub, GitLab, etc.)", "WEBHOOK_ENABLED", _setup_webhooks),
 ]
 
@@ -2148,6 +2194,7 @@ def setup_gateway(config: dict):
         or get_env_value("WECOM_BOT_ID")
         or get_env_value("WEIXIN_ACCOUNT_ID")
         or get_env_value("BLUEBUBBLES_SERVER_URL")
+        or get_env_value("QQ_APP_ID")
         or get_env_value("WEBHOOK_ENABLED")
     )
     if any_messaging:
@@ -2169,6 +2216,10 @@ def setup_gateway(config: dict):
             missing_home.append("Slack")
         if get_env_value("BLUEBUBBLES_SERVER_URL") and not get_env_value("BLUEBUBBLES_HOME_CHANNEL"):
             missing_home.append("BlueBubbles")
+        if get_env_value("QQ_APP_ID") and not (
+            get_env_value("QQBOT_HOME_CHANNEL") or get_env_value("QQ_HOME_CHANNEL")
+        ):
+            missing_home.append("QQBot")
 
         if missing_home:
             print()
@@ -2192,8 +2243,10 @@ def setup_gateway(config: dict):
             _is_service_running,
             supports_systemd_services,
             has_conflicting_systemd_units,
+            has_legacy_hermes_units,
             install_linux_gateway_from_setup,
             print_systemd_scope_conflict_warning,
+            print_legacy_unit_warning,
             systemd_start,
             systemd_restart,
             launchd_install,
@@ -2209,6 +2262,10 @@ def setup_gateway(config: dict):
         print()
         if supports_systemd and has_conflicting_systemd_units():
             print_systemd_scope_conflict_warning()
+            print()
+
+        if supports_systemd and has_legacy_hermes_units():
+            print_legacy_unit_warning()
             print()
 
         if service_running:
