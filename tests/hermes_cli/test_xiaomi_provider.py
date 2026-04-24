@@ -136,13 +136,15 @@ class TestXiaomiModelCatalog:
         assert PROVIDER_TO_MODELS_DEV["xiaomi"] == "xiaomi"
 
     def test_static_model_list_fallback(self):
-        """Static _PROVIDER_MODELS fallback must exist for model picker."""
+        """Static _PROVIDER_MODELS fallback must exist for model picker.
+
+        We only assert the provider key is present — the specific model
+        names are data that changes with upstream releases and doesn't
+        belong in tests.
+        """
         from hermes_cli.models import _PROVIDER_MODELS
         assert "xiaomi" in _PROVIDER_MODELS
-        models = _PROVIDER_MODELS["xiaomi"]
-        assert "mimo-v2-pro" in models
-        assert "mimo-v2-omni" in models
-        assert "mimo-v2-flash" in models
+        assert len(_PROVIDER_MODELS["xiaomi"]) >= 1
 
     def test_list_agentic_models_mock(self, monkeypatch):
         """When models.dev returns Xiaomi data, list_agentic_models should return models."""
@@ -285,10 +287,10 @@ class TestXiaomiAuxiliary:
         assert "xiaomi" not in _API_KEY_PROVIDER_AUX_MODELS
 
     def test_vision_model_override(self):
-        """Xiaomi vision tasks should use mimo-v2-omni (multimodal), not the main model."""
+        """Xiaomi vision tasks should use mimo-v2.5 (multimodal), not the main model."""
         from agent.auxiliary_client import _PROVIDER_VISION_MODELS
         assert "xiaomi" in _PROVIDER_VISION_MODELS
-        assert _PROVIDER_VISION_MODELS["xiaomi"] == "mimo-v2-omni"
+        assert _PROVIDER_VISION_MODELS["xiaomi"] == "mimo-v2.5"
 
 
 # =============================================================================

@@ -40,6 +40,37 @@ from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
+    """Resolve the toolset list for a cron job.
+
+    Precedence:
+    1. Per-job ``enabled_toolsets`` (set via ``cronjob`` tool on create/update).
+       Keeps the agent's job-scoped toolset override intact — #6130.
+    2. Per-platform ``hermes tools`` config for the ``cron`` platform.
+       Mirrors gateway behavior (``_get_platform_tools(cfg, platform_key)``)
+       so users can gate cron toolsets globally without recreating every job.
+    3. ``None`` on any lookup failure — AIAgent loads the full default set
+       (legacy behavior before this change, preserved as the safety net).
+
+    _DEFAULT_OFF_TOOLSETS ({moa, homeassistant, rl}) are removed by
+    ``_get_platform_tools`` for unconfigured platforms, so fresh installs
+    get cron WITHOUT ``moa`` by default (issue reported by Norbert —
+    surprise $4.63 run).
+    """
+    per_job = job.get("enabled_toolsets")
+    if per_job:
+        return per_job
+    try:
+        from hermes_cli.tools_config import _get_platform_tools  # lazy: avoid heavy import at cron module load
+        return sorted(_get_platform_tools(cfg or {}, "cron"))
+    except Exception as exc:
+        logger.warning(
+            "Cron toolset resolution failed, falling back to full default toolset: %s",
+            exc,
+        )
+        return None
+
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
 _KNOWN_DELIVERY_PLATFORMS = frozenset({
@@ -252,7 +283,11 @@ def _send_media_via_adapter(adapter, chat_id: str, media_files: list, metadata: 
                 coro = adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=metadata)
 
             future = asyncio.run_coroutine_threadsafe(coro, loop)
-            result = future.result(timeout=30)
+            try:
+                result = future.result(timeout=30)
+            except TimeoutError:
+                future.cancel()
+                raise
             if result and not getattr(result, "success", True):
                 logger.warning(
                     "Job '%s': media send failed for %s: %s",
@@ -382,7 +417,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
                         loop,
                     )
-                    send_result = future.result(timeout=60)
+                    try:
+                        send_result = future.result(timeout=60)
+                    except TimeoutError:
+                        future.cancel()
+                        raise
                     if send_result and not getattr(send_result, "success", True):
                         err = getattr(send_result, "error", "unknown")
                         logger.warning(
@@ -422,7 +461,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # prevent "coroutine was never awaited" RuntimeWarning, then retry in a
                 # fresh thread that has no running loop.
                 coro.close()
-                import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
                     result = future.result(timeout=30)
@@ -810,14 +848,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         prefill_messages = None
         prefill_file = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or _cfg.get("prefill_messages_file", "")
         if prefill_file:
-            import json as _json
             pfpath = Path(prefill_file).expanduser()
             if not pfpath.is_absolute():
                 pfpath = _hermes_home / pfpath
             if pfpath.exists():
                 try:
                     with open(pfpath, "r", encoding="utf-8") as _pf:
-                        prefill_messages = _json.load(_pf)
+                        prefill_messages = json.load(_pf)
                     if not isinstance(prefill_messages, list):
                         prefill_messages = None
                 except Exception as e:
@@ -880,6 +917,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_ignored=pr.get("ignore"),
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
+            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
             disabled_toolsets=["cronjob", "messaging", "clarify"],
             quiet_mode=True,
             skip_context_files=True,  # Don't inject SOUL.md/AGENTS.md from scheduler cwd
@@ -964,6 +1002,12 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"Cron job '{job_name}' idle for "
                 f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
                 f"— last activity: {_last_desc}"
+            )
+
+        # Guard against non-dict returns from run_conversation under error conditions
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"agent.run_conversation returned {type(result).__name__} instead of dict: {result!r}"
             )
 
         final_response = result.get("final_response", "") or ""
@@ -1085,7 +1129,6 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
             logger.warning("Invalid HERMES_CRON_MAX_PARALLEL value; defaulting to unbounded")
         if _max_workers is None:
             try:
-                from hermes_cli.config import load_config
                 _ucfg = load_config() or {}
                 _cfg_par = (
                     _ucfg.get("cron", {}) if isinstance(_ucfg, dict) else {}
