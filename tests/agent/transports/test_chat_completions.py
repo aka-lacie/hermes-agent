@@ -34,14 +34,30 @@ class TestChatCompletionsBasic:
         msgs = [
             {"role": "assistant", "content": "ok", "codex_reasoning_items": [{"id": "rs_1"}],
              "tool_calls": [{"id": "call_1", "call_id": "call_1", "response_item_id": "fc_1",
+                            "extra_content": {"google": {"thought_signature": "SIG"}},
                             "type": "function", "function": {"name": "t", "arguments": "{}"}}]},
         ]
         result = transport.convert_messages(msgs)
         assert "codex_reasoning_items" not in result[0]
         assert "call_id" not in result[0]["tool_calls"][0]
         assert "response_item_id" not in result[0]["tool_calls"][0]
+        assert "extra_content" not in result[0]["tool_calls"][0]
         # Original list untouched (deepcopy-on-demand)
         assert "codex_reasoning_items" in msgs[0]
+        assert "extra_content" in msgs[0]["tool_calls"][0]
+
+    def test_convert_messages_can_preserve_gemini_extra_content(self, transport):
+        msgs = [
+            {"role": "assistant", "content": "ok",
+             "tool_calls": [{"id": "call_1", "call_id": "call_1", "response_item_id": "fc_1",
+                            "extra_content": {"google": {"thought_signature": "SIG"}},
+                            "type": "function", "function": {"name": "t", "arguments": "{}"}}]},
+        ]
+        result = transport.convert_messages(msgs, preserve_tool_call_extra_content=True)
+        tool_call = result[0]["tool_calls"][0]
+        assert "call_id" not in tool_call
+        assert "response_item_id" not in tool_call
+        assert tool_call["extra_content"] == {"google": {"thought_signature": "SIG"}}
 
 
 class TestChatCompletionsBuildKwargs:
@@ -238,6 +254,28 @@ class TestChatCompletionsKimi:
         )
         assert kw["extra_body"]["thinking"] == {"type": "disabled"}
 
+    def test_native_gemini_requests_thought_summaries(self, transport):
+        kw = transport.build_kwargs(
+            model="gemini-3.1-pro-preview",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            native_gemini_protocol=True,
+            reasoning_config={"enabled": True, "effort": "medium"},
+        )
+
+        assert kw["extra_body"]["thinking_config"] == {"includeThoughts": True}
+
+    def test_native_gemini_respects_reasoning_disabled(self, transport):
+        kw = transport.build_kwargs(
+            model="gemini-3.1-pro-preview",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            native_gemini_protocol=True,
+            reasoning_config={"enabled": False},
+        )
+
+        assert kw["extra_body"]["thinking_config"] == {"includeThoughts": False}
+
     def test_moonshot_tool_schemas_are_sanitized_by_model_name(self, transport):
         """Aggregator routes (Nous, OpenRouter) hit Moonshot by model name, not base URL."""
         tools = [
@@ -380,6 +418,36 @@ class TestChatCompletionsNormalize:
         nr = transport.normalize_response(r)
         assert nr.reasoning == "summary text"
         assert nr.provider_data == {"reasoning_content": "detailed scratchpad"}
+
+    def test_response_level_gemini_content_preserved(self, transport):
+        """Native Gemini responses carry full content.parts on the message.
+        The normalizer must keep it so the agent can persist and replay thought
+        parts and thoughtSignature values on later turns."""
+        gemini_content = {
+            "role": "model",
+            "parts": [
+                {"thought": True, "text": "internal plan"},
+                {"text": "Visible answer", "thoughtSignature": "sig-answer"},
+            ],
+        }
+        r = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content="Visible answer",
+                    tool_calls=None,
+                    reasoning="internal plan",
+                    reasoning_content="internal plan",
+                    gemini_content=gemini_content,
+                ),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.gemini_content == gemini_content
+        assert nr.provider_data["gemini_content"] == gemini_content
 
 
 class TestChatCompletionsCacheStats:

@@ -289,9 +289,25 @@ def run_doctor(args):
             default_model = (model_section.get("default") or model_section.get("model") or "").strip()
 
             known_providers: set = set()
+            custom_provider_labels: set = set()
             try:
                 from hermes_cli.auth import PROVIDER_REGISTRY
                 known_providers = set(PROVIDER_REGISTRY.keys()) | {"openrouter", "custom", "auto"}
+            except Exception:
+                pass
+            custom_providers = []
+            try:
+                from hermes_cli.config import get_compatible_custom_providers
+                custom_providers = get_compatible_custom_providers(cfg)
+                for _entry in custom_providers:
+                    if not isinstance(_entry, dict):
+                        continue
+                    provider_key = str(_entry.get("provider_key", "") or "").strip()
+                    name = str(_entry.get("name", "") or "").strip()
+                    if provider_key:
+                        custom_provider_labels.add(provider_key)
+                    if name:
+                        custom_provider_labels.add(name)
             except Exception:
                 pass
             try:
@@ -300,15 +316,34 @@ def run_doctor(args):
                 _resolve_provider = None
 
             canonical_provider = provider
-            if provider and _resolve_provider is not None and provider != "auto":
+            try:
+                from hermes_cli.providers import resolve_provider_full
+                provider_def = resolve_provider_full(
+                    provider_raw,
+                    cfg.get("providers"),
+                    custom_providers,
+                )
+            except Exception:
+                provider_def = None
+            is_custom_provider = bool(provider_def and provider_def.source == "user-config")
+            if is_custom_provider:
+                canonical_provider = "custom"
+            elif provider and _resolve_provider is not None and provider != "auto":
                 try:
                     canonical_provider = _resolve_provider(provider)
                 except Exception:
                     canonical_provider = None
 
             if provider and provider != "auto":
-                if canonical_provider is None or (known_providers and canonical_provider not in known_providers):
-                    known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
+                if (
+                    not is_custom_provider
+                    and (
+                        canonical_provider is None
+                        or (known_providers and canonical_provider not in known_providers)
+                    )
+                ):
+                    all_known = known_providers | custom_provider_labels
+                    known_list = ", ".join(sorted(all_known)) if all_known else "(unavailable)"
                     check_fail(
                         f"model.provider '{provider_raw}' is not a recognised provider",
                         f"(known: {known_list})",

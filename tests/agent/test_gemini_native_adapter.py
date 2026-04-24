@@ -85,6 +85,46 @@ def test_build_native_request_uses_original_function_name_for_tool_result():
     assert tool_response["name"] == "get_weather"
 
 
+def test_build_native_request_replays_preserved_gemini_content_verbatim():
+    from agent.gemini_native_adapter import build_gemini_request
+
+    preserved_parts = [
+        {"thought": True, "text": "internal plan"},
+        {
+            "functionCall": {"name": "search", "args": {"q": "hermes"}},
+            "thoughtSignature": "sig-search",
+        },
+        {"text": "Visible answer", "thoughtSignature": "sig-answer"},
+    ]
+    request = build_gemini_request(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "ignored",
+                "gemini_content": {"role": "model", "parts": preserved_parts},
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": '{"q":"hermes"}'},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": '{"ok": true}',
+            },
+        ],
+        tools=[],
+        tool_choice=None,
+    )
+
+    assert request["contents"][0]["role"] == "model"
+    assert request["contents"][0]["parts"] == preserved_parts
+    assert request["contents"][1]["parts"][0]["functionResponse"]["name"] == "search"
+
+
 def test_build_native_request_strips_json_schema_only_fields_from_tool_parameters():
     from agent.gemini_native_adapter import build_gemini_request
 
@@ -232,6 +272,14 @@ def test_native_client_accepts_injected_http_client():
     injected = SimpleNamespace(close=lambda: None)
     client = GeminiNativeClient(api_key="AIza-test", http_client=injected)
     assert client._http is injected
+
+
+def test_is_native_gemini_base_url_accepts_provider_pinned_proxy_route():
+    from agent.gemini_native_adapter import is_native_gemini_base_url
+
+    assert is_native_gemini_base_url("http://127.0.0.1:8080/api/provider/gemini/v1beta")
+    assert is_native_gemini_base_url("http://127.0.0.1:8080/api/provider/google/v1beta")
+    assert not is_native_gemini_base_url("http://127.0.0.1:8080/v1/chat/completions")
 
 
 @pytest.mark.asyncio

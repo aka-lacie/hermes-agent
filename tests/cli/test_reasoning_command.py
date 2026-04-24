@@ -470,6 +470,11 @@ class TestInlineThinkBlockExtraction(unittest.TestCase):
         agent = MagicMock(spec=AIAgent)
         agent._build_assistant_message = AIAgent._build_assistant_message.__get__(agent)
         agent._extract_reasoning = AIAgent._extract_reasoning.__get__(agent)
+        agent._preserve_gemini_content = AIAgent._preserve_gemini_content.__get__(agent)
+        agent._copy_reasoning_content_for_api = AIAgent._copy_reasoning_content_for_api.__get__(agent)
+        agent._prepare_api_message = AIAgent._prepare_api_message.__get__(agent)
+        agent.provider = "openrouter"
+        agent.base_url = "https://openrouter.ai/api/v1"
         agent.verbose_logging = False
         agent.reasoning_callback = None
         agent.stream_delta_callback = None  # non-streaming by default
@@ -529,6 +534,55 @@ class TestInlineThinkBlockExtraction(unittest.TestCase):
         agent._build_assistant_message(api_msg, "stop")
         self.assertEqual(len(captured), 1)
         self.assertIn("Deep analysis", captured[0])
+
+    def test_build_assistant_message_preserves_gemini_content(self):
+        agent = self._make_agent()
+        api_msg = self._build_msg(
+            "Visible answer.",
+            reasoning="Structured reasoning from API.",
+        )
+        api_msg.gemini_content = {
+            "role": "model",
+            "parts": [
+                {"thought": True, "text": "Structured reasoning from API."},
+                {"text": "Visible answer.", "thoughtSignature": "sig-answer"},
+            ],
+        }
+        result = agent._build_assistant_message(api_msg, "stop")
+        self.assertIn("gemini_content", result)
+        self.assertEqual(result["gemini_content"]["parts"][1]["thoughtSignature"], "sig-answer")
+
+    def test_prepare_api_message_keeps_gemini_content_only_for_native_routes(self):
+        agent = self._make_agent()
+        msg = {
+            "role": "assistant",
+            "content": "Visible answer.",
+            "reasoning": "Structured reasoning from API.",
+            "gemini_content": {
+                "role": "model",
+                "parts": [
+                    {"thought": True, "text": "Structured reasoning from API."},
+                    {"text": "Visible answer.", "thoughtSignature": "sig-answer"},
+                ],
+            },
+            "finish_reason": "stop",
+        }
+
+        native_msg = agent._prepare_api_message(
+            msg,
+            native_gemini_protocol=True,
+            sanitize_tool_calls=False,
+        )
+        self.assertIn("gemini_content", native_msg)
+        self.assertNotIn("reasoning_content", native_msg)
+
+        generic_msg = agent._prepare_api_message(
+            msg,
+            native_gemini_protocol=False,
+            sanitize_tool_calls=False,
+        )
+        self.assertNotIn("gemini_content", generic_msg)
+        self.assertEqual(generic_msg["reasoning_content"], "Structured reasoning from API.")
 
 
 # ---------------------------------------------------------------------------

@@ -183,6 +183,7 @@ class ProviderDef:
     auth_type: str = "api_key"
     doc: str = ""
     source: str = ""                      # "models.dev", "hermes", "user-config"
+    configured_models: Tuple[str, ...] = ()
 
 
 # -- Aliases ------------------------------------------------------------------
@@ -508,6 +509,7 @@ def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[Pr
         is_aggregator=False,
         auth_type="api_key",
         source="user-config",
+        configured_models=_configured_model_ids(entry),
     )
 
 
@@ -519,6 +521,30 @@ def custom_provider_slug(display_name: str) -> str:
     produce identical slugs.
     """
     return "custom:" + display_name.strip().lower().replace(" ", "-")
+
+
+def _configured_model_ids(entry: Dict[str, Any]) -> Tuple[str, ...]:
+    """Return model IDs declared on a user-configured provider entry."""
+    models: List[str] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, str):
+            model = value.strip()
+            if model and model not in models:
+                models.append(model)
+
+    _add(entry.get("model"))
+    _add(entry.get("default_model"))
+
+    cfg_models = entry.get("models")
+    if isinstance(cfg_models, dict):
+        for model in cfg_models:
+            _add(str(model))
+    elif isinstance(cfg_models, list):
+        for model in cfg_models:
+            _add(str(model))
+
+    return tuple(models)
 
 
 def resolve_custom_provider(
@@ -548,11 +574,18 @@ def resolve_custom_provider(
             continue
 
         slug = custom_provider_slug(display_name)
-        if requested not in {display_name.lower(), slug}:
+        provider_key = str(entry.get("provider_key", "") or "").strip()
+        provider_key_norm = provider_key.lower().replace(" ", "-") if provider_key else ""
+        if requested not in {
+            display_name.lower(),
+            slug,
+            provider_key_norm,
+            f"custom:{provider_key_norm}" if provider_key_norm else "",
+        }:
             continue
 
         return ProviderDef(
-            id=slug,
+            id=provider_key or slug,
             name=display_name,
             transport="openai_chat",
             api_key_env_vars=(),
@@ -560,6 +593,7 @@ def resolve_custom_provider(
             is_aggregator=False,
             auth_type="api_key",
             source="user-config",
+            configured_models=_configured_model_ids(entry),
         )
 
     return None

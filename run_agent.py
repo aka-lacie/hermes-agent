@@ -3067,6 +3067,7 @@ class AIAgent:
                     finish_reason=msg.get("finish_reason"),
                     reasoning=msg.get("reasoning") if role == "assistant" else None,
                     reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
+                    gemini_content=msg.get("gemini_content") if role == "assistant" else None,
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                 )
@@ -4768,27 +4769,26 @@ class AIAgent:
                 self._client_log_context(),
             )
             return client
-        if self.provider == "gemini":
-            from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
+        from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
 
-            base_url = str(client_kwargs.get("base_url", "") or "")
-            if is_native_gemini_base_url(base_url):
-                safe_kwargs = {
-                    k: v for k, v in client_kwargs.items()
-                    if k in {"api_key", "base_url", "default_headers", "timeout", "http_client"}
-                }
-                if "http_client" not in safe_kwargs:
-                    keepalive_http = self._build_keepalive_http_client()
-                    if keepalive_http is not None:
-                        safe_kwargs["http_client"] = keepalive_http
-                client = GeminiNativeClient(**safe_kwargs)
-                logger.info(
-                    "Gemini native client created (%s, shared=%s) %s",
-                    reason,
-                    shared,
-                    self._client_log_context(),
-                )
-                return client
+        base_url = str(client_kwargs.get("base_url", "") or "")
+        if is_native_gemini_base_url(base_url):
+            safe_kwargs = {
+                k: v for k, v in client_kwargs.items()
+                if k in {"api_key", "base_url", "default_headers", "timeout", "http_client"}
+            }
+            if "http_client" not in safe_kwargs:
+                keepalive_http = self._build_keepalive_http_client()
+                if keepalive_http is not None:
+                    safe_kwargs["http_client"] = keepalive_http
+            client = GeminiNativeClient(**safe_kwargs)
+            logger.info(
+                "Gemini native client created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
         # Inject TCP keepalives so the kernel detects dead provider connections
         # instead of letting them sit silently in CLOSE-WAIT (#10324).  Without
         # this, a peer that drops mid-stream leaves the socket in a state where
@@ -5874,6 +5874,8 @@ class AIAgent:
             self._capture_rate_limits(getattr(stream, "response", None))
 
             content_parts: list = []
+            gemini_parts: list = []
+            gemini_function_part_positions: dict = {}
             tool_calls_acc: dict = {}
             tool_gen_notified: set = set()
             # Ollama-compatible endpoints reuse index 0 for every tool call
@@ -5887,6 +5889,24 @@ class AIAgent:
             role = "assistant"
             reasoning_parts: list = []
             usage_obj = None
+
+            def _accumulate_gemini_part(gemini_part: Any, *, tool_call_slot: Any = None) -> None:
+                if not isinstance(gemini_part, dict):
+                    return
+                part = copy.deepcopy(gemini_part)
+                if isinstance(part.get("functionCall"), dict):
+                    if tool_call_slot is None:
+                        gemini_parts.append(part)
+                        return
+                    position = gemini_function_part_positions.get(tool_call_slot)
+                    if position is None:
+                        gemini_function_part_positions[tool_call_slot] = len(gemini_parts)
+                        gemini_parts.append(part)
+                    else:
+                        gemini_parts[position] = part
+                    return
+                gemini_parts.append(part)
+
             for chunk in stream:
                 last_chunk_time["t"] = time.time()
                 self._touch_activity("receiving stream response")
@@ -5912,6 +5932,13 @@ class AIAgent:
                     reasoning_parts.append(reasoning_text)
                     _fire_first_delta()
                     self._fire_reasoning_delta(reasoning_text)
+                gemini_part = getattr(delta, "gemini_part", None)
+                gemini_part_is_function_call = (
+                    isinstance(gemini_part, dict)
+                    and isinstance(gemini_part.get("functionCall"), dict)
+                )
+                if isinstance(gemini_part, dict) and not gemini_part_is_function_call:
+                    _accumulate_gemini_part(gemini_part)
 
                 # Accumulate text content — fire callback only when no tool calls
                 if delta and delta.content:
@@ -5940,6 +5967,7 @@ class AIAgent:
                                 pass
 
                 # Accumulate tool call deltas — notify display on first name
+                gemini_function_part_recorded = False
                 if delta and delta.tool_calls:
                     for tc_delta in delta.tool_calls:
                         raw_idx = tc_delta.index if tc_delta.index is not None else 0
@@ -6004,6 +6032,11 @@ class AIAgent:
                             # at line ~6107 return `tool_calls=None`, silently
                             # discarding the attempted action.
                             result["partial_tool_names"].append(name)
+                        if gemini_part_is_function_call:
+                            _accumulate_gemini_part(gemini_part, tool_call_slot=idx)
+                            gemini_function_part_recorded = True
+                if gemini_part_is_function_call and not gemini_function_part_recorded:
+                    _accumulate_gemini_part(gemini_part)
 
                 if chunk.choices[0].finish_reason:
                     finish_reason = chunk.choices[0].finish_reason
@@ -6046,6 +6079,11 @@ class AIAgent:
                 content=full_content,
                 tool_calls=mock_tool_calls,
                 reasoning_content=full_reasoning,
+                gemini_content=(
+                    {"role": "model", "parts": gemini_parts}
+                    if gemini_parts
+                    else None
+                ),
             )
             mock_choice = SimpleNamespace(
                 index=0,
@@ -7390,6 +7428,8 @@ class AIAgent:
             supports_reasoning=self._supports_reasoning_extra_body(),
             github_reasoning_extra=self._github_models_reasoning_extra_body() if _is_gh else None,
             anthropic_max_output=_ant_max,
+            native_gemini_protocol=self._uses_gemini_native_protocol(),
+            preserve_tool_call_extra_content=self._uses_gemini_native_protocol(),
         )
 
     def _supports_reasoning_extra_body(self) -> bool:
@@ -7461,6 +7501,75 @@ class AIAgent:
 
         return {"effort": requested_effort}
 
+    def _uses_gemini_native_protocol(
+        self,
+        *,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> bool:
+        """Return True when the active route expects Gemini native ``contents[]``."""
+        resolved_provider = provider or self.provider
+        resolved_base_url = str(base_url if base_url is not None else (self.base_url or ""))
+        if resolved_provider == "google-gemini-cli" or resolved_base_url.startswith("cloudcode-pa://"):
+            return True
+        try:
+            from agent.gemini_native_adapter import is_native_gemini_base_url
+
+            return is_native_gemini_base_url(resolved_base_url)
+        except Exception:
+            return False
+
+    def _preserve_gemini_content(self, assistant_message: Any) -> Optional[Dict[str, Any]]:
+        """Return a sanitized deep copy of a native Gemini ``content`` object."""
+        gemini_content = getattr(assistant_message, "gemini_content", None)
+        if gemini_content is None and hasattr(assistant_message, "model_extra"):
+            model_extra = getattr(assistant_message, "model_extra", None) or {}
+            if isinstance(model_extra, dict):
+                gemini_content = model_extra.get("gemini_content")
+        if gemini_content is None and hasattr(assistant_message, "provider_data"):
+            provider_data = getattr(assistant_message, "provider_data", None) or {}
+            if isinstance(provider_data, dict):
+                gemini_content = provider_data.get("gemini_content")
+        if not isinstance(gemini_content, dict):
+            return None
+        parts = gemini_content.get("parts")
+        if not isinstance(parts, list):
+            return None
+        preserved = copy.deepcopy(gemini_content)
+        _sanitize_structure_surrogates(preserved)
+        role = preserved.get("role")
+        if not isinstance(role, str) or not role.strip():
+            preserved["role"] = "model"
+        return preserved
+
+    def _prepare_api_message(
+        self,
+        msg: dict,
+        *,
+        native_gemini_protocol: bool,
+        sanitize_tool_calls: bool,
+    ) -> dict:
+        """Convert an internal message dict to the API-facing payload shape."""
+        api_msg = msg.copy()
+        role = msg.get("role")
+        if role == "assistant":
+            if native_gemini_protocol:
+                api_msg.pop("reasoning_content", None)
+                if not isinstance(api_msg.get("gemini_content"), dict):
+                    api_msg.pop("gemini_content", None)
+            else:
+                self._copy_reasoning_content_for_api(msg, api_msg)
+                api_msg.pop("gemini_content", None)
+        else:
+            api_msg.pop("gemini_content", None)
+
+        api_msg.pop("reasoning", None)
+        api_msg.pop("finish_reason", None)
+        api_msg.pop("_thinking_prefill", None)
+        if sanitize_tool_calls and not native_gemini_protocol:
+            self._sanitize_tool_calls_for_strict_api(api_msg)
+        return api_msg
+
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """Build a normalized assistant message dict from an API response message.
 
@@ -7530,6 +7639,10 @@ class AIAgent:
             raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
             if raw_reasoning_content is not None:
                 msg["reasoning_content"] = _sanitize_surrogates(raw_reasoning_content)
+
+        gemini_content = self._preserve_gemini_content(assistant_message)
+        if gemini_content is not None:
+            msg["gemini_content"] = gemini_content
 
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
             # Pass reasoning_details back unmodified so providers (OpenRouter,
@@ -7644,12 +7757,12 @@ class AIAgent:
         Responses API compatibility (e.g. if the session falls back to a
         Codex provider later).
 
-        Fields stripped: call_id, response_item_id
+        Fields stripped: call_id, response_item_id, extra_content
         """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
-        _STRIP_KEYS = {"call_id", "response_item_id"}
+        _STRIP_KEYS = {"call_id", "response_item_id", "extra_content"}
         api_msg["tool_calls"] = [
             {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
             if isinstance(tc, dict) else tc
@@ -7709,16 +7822,15 @@ class AIAgent:
         try:
             # Build API messages for the flush call
             _needs_sanitize = self._should_sanitize_tool_calls()
+            _native_gemini_protocol = self._uses_gemini_native_protocol()
             api_messages = []
             for msg in messages:
-                api_msg = msg.copy()
-                self._copy_reasoning_content_for_api(msg, api_msg)
-                api_msg.pop("reasoning", None)
-                api_msg.pop("finish_reason", None)
+                api_msg = self._prepare_api_message(
+                    msg,
+                    native_gemini_protocol=_native_gemini_protocol,
+                    sanitize_tool_calls=_needs_sanitize,
+                )
                 api_msg.pop("_flush_sentinel", None)
-                api_msg.pop("_thinking_prefill", None)
-                if _needs_sanitize:
-                    self._sanitize_tool_calls_for_strict_api(api_msg)
                 api_messages.append(api_msg)
 
             if self._cached_system_prompt:
@@ -8816,14 +8928,16 @@ class AIAgent:
             # Build API messages, stripping internal-only fields
             # (finish_reason, reasoning) that strict APIs like Mistral reject with 422
             _needs_sanitize = self._should_sanitize_tool_calls()
+            _native_gemini_protocol = self._uses_gemini_native_protocol()
             api_messages = []
             for msg in messages:
-                api_msg = msg.copy()
-                for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
-                    api_msg.pop(internal_field, None)
-                if _needs_sanitize:
-                    self._sanitize_tool_calls_for_strict_api(api_msg)
-                api_messages.append(api_msg)
+                api_messages.append(
+                    self._prepare_api_message(
+                        msg,
+                        native_gemini_protocol=_native_gemini_protocol,
+                        sanitize_tool_calls=_needs_sanitize,
+                    )
+                )
 
             effective_system = self._cached_system_prompt or ""
             if self.ephemeral_system_prompt:
@@ -9452,6 +9566,8 @@ class AIAgent:
             # However, providers like Moonshot AI require a separate 'reasoning_content' field
             # on assistant messages with tool_calls. We handle both cases here.
             api_messages = []
+            native_gemini_protocol = self._uses_gemini_native_protocol()
+            sanitize_tool_calls = self._should_sanitize_tool_calls()
             tool_name_by_id = {}
             for _msg in messages:
                 if _msg.get("role") != "assistant":
@@ -9466,7 +9582,11 @@ class AIAgent:
                     if _cid and _name:
                         tool_name_by_id[_cid] = _name
             for idx, msg in enumerate(messages):
-                api_msg = msg.copy()
+                api_msg = self._prepare_api_message(
+                    msg,
+                    native_gemini_protocol=native_gemini_protocol,
+                    sanitize_tool_calls=sanitize_tool_calls,
+                )
 
                 # Inject ephemeral context into the current turn's user message.
                 # Sources: memory manager prefetch + plugin pre_llm_call hooks
@@ -9497,25 +9617,6 @@ class AIAgent:
                             _parts.extend(_suffix_injections)
                             api_msg["content"] = "\n\n".join(_parts)
 
-                # For ALL assistant messages, pass reasoning back to the API
-                # This ensures multi-turn reasoning context is preserved
-                self._copy_reasoning_content_for_api(msg, api_msg)
-
-                # Remove 'reasoning' field - it's for trajectory storage only
-                # We've copied it to 'reasoning_content' for the API above
-                if "reasoning" in api_msg:
-                    api_msg.pop("reasoning")
-                # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
-                if "finish_reason" in api_msg:
-                    api_msg.pop("finish_reason")
-                # Strip internal thinking-prefill marker
-                api_msg.pop("_thinking_prefill", None)
-                # Strip Codex Responses API fields (call_id, response_item_id) for
-                # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
-                # Uses new dicts so the internal messages list retains the fields
-                # for Codex Responses compatibility.
-                if self._should_sanitize_tool_calls():
-                    self._sanitize_tool_calls_for_strict_api(api_msg)
                 # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
                 # The signature field helps maintain reasoning continuity
                 api_messages.append(api_msg)

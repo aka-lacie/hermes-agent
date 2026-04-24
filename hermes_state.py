@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS messages (
     finish_reason TEXT,
     reasoning TEXT,
     reasoning_content TEXT,
+    gemini_content TEXT,
     reasoning_details TEXT,
     codex_reasoning_items TEXT
 );
@@ -356,6 +357,15 @@ class SessionDB:
                 except sqlite3.OperationalError:
                     pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 8")
+            if current_version < 9:
+                # v9: preserve native Gemini content parts, including
+                # thought=True blocks and thoughtSignature values, across
+                # gateway restarts and SQLite-backed transcript reloads.
+                try:
+                    cursor.execute('ALTER TABLE messages ADD COLUMN "gemini_content" TEXT')
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                cursor.execute("UPDATE schema_version SET version = 9")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -954,6 +964,7 @@ class SessionDB:
         finish_reason: str = None,
         reasoning: str = None,
         reasoning_content: str = None,
+        gemini_content: Any = None,
         reasoning_details: Any = None,
         codex_reasoning_items: Any = None,
     ) -> int:
@@ -972,6 +983,10 @@ class SessionDB:
             json.dumps(codex_reasoning_items)
             if codex_reasoning_items else None
         )
+        gemini_content_json = (
+            json.dumps(gemini_content)
+            if gemini_content else None
+        )
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
         # Pre-compute tool call count
@@ -983,8 +998,9 @@ class SessionDB:
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
-                   reasoning, reasoning_content, reasoning_details, codex_reasoning_items)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   reasoning, reasoning_content, gemini_content,
+                   reasoning_details, codex_reasoning_items)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -997,6 +1013,7 @@ class SessionDB:
                     finish_reason,
                     reasoning,
                     reasoning_content,
+                    gemini_content_json,
                     reasoning_details_json,
                     codex_items_json,
                 ),
@@ -1047,7 +1064,8 @@ class SessionDB:
         with self._lock:
             cursor = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
-                "reasoning, reasoning_content, reasoning_details, codex_reasoning_items "
+                "reasoning, reasoning_content, gemini_content, "
+                "reasoning_details, codex_reasoning_items "
                 "FROM messages WHERE session_id = ? ORDER BY timestamp, id",
                 (session_id,),
             )
@@ -1073,6 +1091,12 @@ class SessionDB:
                     msg["reasoning"] = row["reasoning"]
                 if row["reasoning_content"] is not None:
                     msg["reasoning_content"] = row["reasoning_content"]
+                if row["gemini_content"]:
+                    try:
+                        msg["gemini_content"] = json.loads(row["gemini_content"])
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning("Failed to deserialize gemini_content, falling back to None")
+                        msg["gemini_content"] = None
                 if row["reasoning_details"]:
                     try:
                         msg["reasoning_details"] = json.loads(row["reasoning_details"])
@@ -1588,4 +1612,3 @@ class SessionDB:
             result["error"] = str(exc)
 
         return result
-

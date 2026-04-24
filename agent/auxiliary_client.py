@@ -1718,7 +1718,12 @@ def resolve_provider_client(
             elif base_url_host_matches(custom_base, "api.githubcopilot.com"):
                 from hermes_cli.models import copilot_default_headers
                 extra["default_headers"] = copilot_default_headers()
-            client = OpenAI(api_key=custom_key, base_url=custom_base, **extra)
+            from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
+
+            if is_native_gemini_base_url(custom_base):
+                client = GeminiNativeClient(api_key=custom_key, base_url=custom_base)
+            else:
+                client = OpenAI(api_key=custom_key, base_url=custom_base, **extra)
             client = _wrap_if_needed(client, final_model, custom_base)
             return (_to_async_client(client, final_model) if async_mode
                     else (client, final_model))
@@ -1752,7 +1757,12 @@ def resolve_provider_client(
                     model or custom_entry.get("model") or _read_main_model() or "gpt-4o-mini",
                     provider,
                 )
-                client = OpenAI(api_key=custom_key, base_url=custom_base)
+                from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
+
+                if is_native_gemini_base_url(custom_base):
+                    client = GeminiNativeClient(api_key=custom_key, base_url=custom_base)
+                else:
+                    client = OpenAI(api_key=custom_key, base_url=custom_base)
                 client = _wrap_if_needed(client, final_model, custom_base)
                 logger.debug(
                     "resolve_provider_client: named custom provider %r (%s)",

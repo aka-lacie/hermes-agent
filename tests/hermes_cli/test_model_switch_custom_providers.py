@@ -104,6 +104,53 @@ def test_switch_model_accepts_explicit_named_custom_provider(monkeypatch):
     assert result.api_key == "no-key-required"
 
 
+def test_switch_model_accepts_provider_dict_configured_model(monkeypatch):
+    """Picker-selected models from a keyed provider's manifest should not need live validation."""
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested: {
+            "api_key": "proxy-key",
+            "base_url": "http://localhost:8080/api/provider/google/v1beta",
+            "api_mode": "chat_completions",
+        },
+    )
+
+    def fail_validation(*_args, **_kwargs):
+        raise AssertionError("configured provider model should not hit live validation")
+
+    monkeypatch.setattr("hermes_cli.models.validate_requested_model", fail_validation)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None)
+
+    user_providers = {
+        "cliproxyapi-gemini-native": {
+            "name": "CLIProxyAPI Gemini Native",
+            "base_url": "http://localhost:8080/api/provider/google/v1beta",
+            "model": "gemini-3.1-pro-preview",
+            "models": {
+                "gemini-3.1-pro-preview": {"context_length": 1048576},
+                "gemini-3-flash-preview": {"context_length": 1048576},
+            },
+        }
+    }
+
+    result = switch_model(
+        raw_input="gemini-3.1-pro-preview",
+        current_provider="cliproxyapi-gemini-native",
+        current_model="gemini-3-flash-preview",
+        explicit_provider="cliproxyapi-gemini-native",
+        user_providers=user_providers,
+        custom_providers=[],
+    )
+
+    assert result.success is True
+    assert result.target_provider == "cliproxyapi-gemini-native"
+    assert result.provider_label == "CLIProxyAPI Gemini Native"
+    assert result.new_model == "gemini-3.1-pro-preview"
+    assert result.base_url == "http://localhost:8080/api/provider/google/v1beta"
+    assert result.api_key == "proxy-key"
+
+
 def test_list_groups_same_name_custom_providers_into_one_row(monkeypatch):
     """Multiple custom_providers entries sharing a name should produce one row
     with all models collected, not N duplicate rows."""

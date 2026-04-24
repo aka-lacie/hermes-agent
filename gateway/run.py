@@ -7337,6 +7337,9 @@ class GatewayRunner:
                     tool_call_id=msg.get("tool_call_id"),
                     reasoning=msg.get("reasoning"),
                     reasoning_content=msg.get("reasoning_content"),
+                    gemini_content=msg.get("gemini_content"),
+                    reasoning_details=msg.get("reasoning_details"),
+                    codex_reasoning_items=msg.get("codex_reasoning_items"),
                 )
             except Exception:
                 pass  # Best-effort copy
@@ -9991,7 +9994,8 @@ class GatewayRunner:
                         # The agent's _build_api_kwargs converts these to the
                         # provider-specific format (reasoning_content, etc.).
                         if role == "assistant":
-                            for _rkey in ("reasoning", "reasoning_details",
+                            for _rkey in ("reasoning", "reasoning_content",
+                                          "gemini_content", "reasoning_details",
                                           "codex_reasoning_items"):
                                 _rval = msg.get(_rkey)
                                 if _rval:

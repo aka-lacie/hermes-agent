@@ -28,6 +28,7 @@ reverse-engineered from the opencode-gemini-auth and clawdbot implementations.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -95,15 +96,51 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
         args = {"_raw": args_raw}
     if not isinstance(args, dict):
         args = {"_value": args}
-    return {
+    part = {
         "functionCall": {
             "name": fn.get("name") or "",
             "args": args,
         },
-        # Sentinel signature — matches opencode-gemini-auth's approach.
-        # Without this, Code Assist rejects function calls that originated
-        # outside its own chain.
-        "thoughtSignature": "skip_thought_signature_validator",
+    }
+    # Prefer the real signature when we have one from a prior Gemini turn.
+    extra = tool_call.get("extra_content") or {}
+    if isinstance(extra, dict):
+        google = extra.get("google") or extra.get("thought_signature")
+        if isinstance(google, dict):
+            sig = google.get("thought_signature") or google.get("thoughtSignature")
+            if isinstance(sig, str) and sig:
+                part["thoughtSignature"] = sig
+                return part
+        elif isinstance(google, str) and google:
+            part["thoughtSignature"] = google
+            return part
+    # Sentinel signature — matches opencode-gemini-auth's approach.
+    # Without this, Code Assist rejects function calls that originated
+    # outside its own chain.
+    part["thoughtSignature"] = "skip_thought_signature_validator"
+    return part
+
+
+def _tool_call_extra_from_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    sig = part.get("thoughtSignature")
+    if isinstance(sig, str) and sig:
+        return {"google": {"thought_signature": sig}}
+    return None
+
+
+def _clone_gemini_content(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    content = message.get("gemini_content")
+    if not isinstance(content, dict):
+        return None
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return None
+    cloned_parts = [copy.deepcopy(part) for part in parts if isinstance(part, dict)]
+    if not cloned_parts and parts:
+        return None
+    return {
+        "role": str(content.get("role") or ""),
+        "parts": cloned_parts,
     }
 
 
@@ -159,16 +196,24 @@ def _build_gemini_contents(
         gemini_role = _ROLE_MAP_OPENAI_TO_GEMINI.get(role, "user")
         parts: List[Dict[str, Any]] = []
 
-        text = _coerce_content_to_text(msg.get("content"))
-        if text:
-            parts.append({"text": text})
+        preserved_content = _clone_gemini_content(msg) if role == "assistant" else None
+        if preserved_content is not None:
+            preserved_role = str(preserved_content.get("role") or "").strip().lower()
+            if preserved_role in {"user", "model"}:
+                gemini_role = preserved_role
+            parts.extend(preserved_content.get("parts") or [])
+        else:
+            text = _coerce_content_to_text(msg.get("content"))
+            if text:
+                parts.append({"text": text})
 
         # Assistant messages can carry tool_calls
         tool_calls = msg.get("tool_calls") or []
         if isinstance(tool_calls, list):
             for tc in tool_calls:
                 if isinstance(tc, dict):
-                    parts.append(_translate_tool_call_to_gemini(tc))
+                    if preserved_content is None:
+                        parts.append(_translate_tool_call_to_gemini(tc))
 
         if not parts:
             # Gemini rejects empty parts; skip the turn entirely
@@ -360,12 +405,16 @@ def _translate_gemini_response(
                 args_str = json.dumps(fc.get("args") or {}, ensure_ascii=False)
             except (TypeError, ValueError):
                 args_str = "{}"
-            tool_calls.append(SimpleNamespace(
+            tool_call = SimpleNamespace(
                 id=f"call_{uuid.uuid4().hex[:12]}",
                 type="function",
                 index=i,
                 function=SimpleNamespace(name=str(fc["name"]), arguments=args_str),
-            ))
+            )
+            extra_content = _tool_call_extra_from_part(part)
+            if extra_content:
+                tool_call.extra_content = extra_content
+            tool_calls.append(tool_call)
 
     finish_reason = "tool_calls" if tool_calls else _map_gemini_finish_reason(
         str(cand.get("finishReason") or "")
@@ -388,6 +437,7 @@ def _translate_gemini_response(
         reasoning="".join(reasoning_pieces) or None,
         reasoning_content="".join(reasoning_pieces) or None,
         reasoning_details=None,
+        gemini_content=copy.deepcopy(content_obj) if isinstance(content_obj, dict) else None,
     )
     choice = SimpleNamespace(
         index=0,
@@ -408,6 +458,7 @@ def _empty_response(model: str) -> SimpleNamespace:
     message = SimpleNamespace(
         role="assistant", content="", tool_calls=None,
         reasoning=None, reasoning_content=None, reasoning_details=None,
+        gemini_content=None,
     )
     choice = SimpleNamespace(index=0, message=message, finish_reason="stop")
     usage = SimpleNamespace(
@@ -451,12 +502,13 @@ def _make_stream_chunk(
     tool_call_delta: Optional[Dict[str, Any]] = None,
     finish_reason: Optional[str] = None,
     reasoning: str = "",
+    gemini_part: Optional[Dict[str, Any]] = None,
 ) -> _GeminiStreamChunk:
     delta_kwargs: Dict[str, Any] = {"role": "assistant"}
     if content:
         delta_kwargs["content"] = content
     if tool_call_delta is not None:
-        delta_kwargs["tool_calls"] = [SimpleNamespace(
+        tool_delta = SimpleNamespace(
             index=tool_call_delta.get("index", 0),
             id=tool_call_delta.get("id") or f"call_{uuid.uuid4().hex[:12]}",
             type="function",
@@ -464,10 +516,16 @@ def _make_stream_chunk(
                 name=tool_call_delta.get("name") or "",
                 arguments=tool_call_delta.get("arguments") or "",
             ),
-        )]
+        )
+        extra_content = tool_call_delta.get("extra_content")
+        if isinstance(extra_content, dict):
+            tool_delta.extra_content = extra_content
+        delta_kwargs["tool_calls"] = [tool_delta]
     if reasoning:
         delta_kwargs["reasoning"] = reasoning
         delta_kwargs["reasoning_content"] = reasoning
+    if isinstance(gemini_part, dict):
+        delta_kwargs["gemini_part"] = copy.deepcopy(gemini_part)
     delta = SimpleNamespace(**delta_kwargs)
     choice = SimpleNamespace(index=0, delta=delta, finish_reason=finish_reason)
     return _GeminiStreamChunk(
@@ -532,11 +590,17 @@ def _translate_stream_event(
             continue
         if part.get("thought") is True and isinstance(part.get("text"), str):
             chunks.append(_make_stream_chunk(
-                model=model, reasoning=part["text"],
+                model=model,
+                reasoning=part["text"],
+                gemini_part=part,
             ))
             continue
         if isinstance(part.get("text"), str) and part["text"]:
-            chunks.append(_make_stream_chunk(model=model, content=part["text"]))
+            chunks.append(_make_stream_chunk(
+                model=model,
+                content=part["text"],
+                gemini_part=part,
+            ))
         fc = part.get("functionCall")
         if isinstance(fc, dict) and fc.get("name"):
             name = str(fc["name"])
@@ -552,7 +616,9 @@ def _translate_stream_event(
                     "index": idx,
                     "name": name,
                     "arguments": args_str,
+                    "extra_content": _tool_call_extra_from_part(part),
                 },
+                gemini_part=part,
             ))
 
     finish_reason_raw = str(cand.get("finishReason") or "")

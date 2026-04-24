@@ -635,6 +635,48 @@ class TestBuildGeminiRequest:
         assert fr_part["functionResponse"]["name"] == "get_weather"
         assert fr_part["functionResponse"]["response"] == {"temp": 72}
 
+    def test_tool_call_translation_prefers_preserved_signature(self):
+        from agent.gemini_cloudcode_adapter import build_gemini_request
+
+        req = build_gemini_request(messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "SF"}'},
+                    "extra_content": {"google": {"thought_signature": "sig-123"}},
+                }],
+            },
+        ])
+        fc_part = req["contents"][0]["parts"][0]
+        assert fc_part["thoughtSignature"] == "sig-123"
+
+    def test_build_request_replays_preserved_gemini_content_verbatim(self):
+        from agent.gemini_cloudcode_adapter import build_gemini_request
+
+        preserved_parts = [
+            {"thought": True, "text": "internal plan"},
+            {
+                "functionCall": {"name": "search", "args": {"q": "hermes"}},
+                "thoughtSignature": "sig-search",
+            },
+        ]
+        req = build_gemini_request(messages=[
+            {
+                "role": "assistant",
+                "content": "ignored",
+                "gemini_content": {"role": "model", "parts": preserved_parts},
+                "tool_calls": [{
+                    "id": "c1", "type": "function",
+                    "function": {"name": "search", "arguments": '{"q":"hermes"}'},
+                }],
+            },
+        ])
+        assert req["contents"][0]["role"] == "model"
+        assert req["contents"][0]["parts"] == preserved_parts
+
     def test_tools_translated_to_function_declarations(self):
         from agent.gemini_cloudcode_adapter import build_gemini_request
 
@@ -793,6 +835,7 @@ class TestTranslateGeminiResponse:
                 "candidates": [{
                     "content": {"parts": [{
                         "functionCall": {"name": "lookup", "args": {"q": "weather"}},
+                        "thoughtSignature": "sig-lookup",
                     }]},
                     "finishReason": "STOP",
                 }],
@@ -802,6 +845,8 @@ class TestTranslateGeminiResponse:
         tc = result.choices[0].message.tool_calls[0]
         assert tc.function.name == "lookup"
         assert json.loads(tc.function.arguments) == {"q": "weather"}
+        assert tc.extra_content == {"google": {"thought_signature": "sig-lookup"}}
+        assert result.choices[0].message.gemini_content["parts"][0]["thoughtSignature"] == "sig-lookup"
         assert result.choices[0].finish_reason == "tool_calls"
 
     def test_thought_parts_go_to_reasoning(self):

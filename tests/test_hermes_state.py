@@ -308,6 +308,27 @@ class TestMessageStorage:
         assert "reasoning_content" in conv[0]
         assert conv[0]["reasoning_content"] == ""
 
+    def test_gemini_content_persisted_and_restored(self, db):
+        """Native Gemini thought parts must survive SQLite-backed session replay."""
+        db.create_session(session_id="s1", source="cli")
+        gemini_content = {
+            "role": "model",
+            "parts": [
+                {"thought": True, "text": "internal plan"},
+                {"text": "Visible answer", "thoughtSignature": "sig-answer"},
+            ],
+        }
+        db.append_message(
+            "s1",
+            role="assistant",
+            content="Visible answer",
+            gemini_content=gemini_content,
+        )
+
+        conv = db.get_messages_as_conversation("s1")
+        assert len(conv) == 1
+        assert conv[0]["gemini_content"] == gemini_content
+
     def test_reasoning_not_set_for_non_assistant(self, db):
         """reasoning is never leaked onto user or tool messages."""
         db.create_session(session_id="s1", source="telegram")
@@ -1173,7 +1194,7 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 8
+        assert version == 9
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1229,12 +1250,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v8
+        # Open with SessionDB — should migrate to v9
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 8
+        assert cursor.fetchone()[0] == 9
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -1246,6 +1267,11 @@ class TestSchemaInit:
             "SELECT api_call_count FROM sessions WHERE id = 'existing'"
         )
         assert cursor.fetchone()[0] == 0
+
+        # Verify gemini_content column was added for native Gemini replay
+        cursor = migrated_db._conn.execute("PRAGMA table_info(messages)")
+        message_columns = {row[1] for row in cursor.fetchall()}
+        assert "gemini_content" in message_columns
 
         # Verify we can set title on migrated session
         assert migrated_db.set_session_title("existing", "Migrated Title") is True
@@ -1911,4 +1937,3 @@ class TestAutoMaintenance:
         assert marker is not None
         # Should parse as a float timestamp close to now.
         assert abs(float(marker) - time.time()) < 60
-

@@ -125,6 +125,60 @@ def test_run_doctor_sets_interactive_env_for_tool_checks(monkeypatch, tmp_path):
     assert seen["interactive"] == "1"
 
 
+def test_run_doctor_accepts_configured_provider_key(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    project = tmp_path / "project"
+    home.mkdir(parents=True, exist_ok=True)
+    project.mkdir(exist_ok=True)
+    (home / ".env").write_text("OPENAI_API_KEY=proxy-key\n", encoding="utf-8")
+    (home / "config.yaml").write_text(
+        """
+model:
+  provider: cliproxyapi-gemini-native
+  default: gemini-3.1-pro-preview
+providers:
+  cliproxyapi-gemini-native:
+    name: CLIProxyAPI Gemini Native
+    base_url: http://localhost:8080/api/provider/google/v1beta
+    api_key: proxy-key
+    model: gemini-3.1-pro-preview
+    models:
+      gemini-3.1-pro-preview: {}
+      gemini-3-flash-preview: {}
+memory: {}
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+    monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project)
+    monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+
+    fake_model_tools = types.SimpleNamespace(
+        check_tool_availability=lambda *a, **kw: ([], []),
+        TOOLSET_REQUIREMENTS={},
+    )
+    monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+    try:
+        from hermes_cli import auth as _auth_mod
+        monkeypatch.setattr(_auth_mod, "get_nous_auth_status", lambda: {})
+        monkeypatch.setattr(_auth_mod, "get_codex_auth_status", lambda: {})
+    except Exception:
+        pass
+
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=False))
+    out = buf.getvalue()
+
+    assert "model.provider 'cliproxyapi-gemini-native' is unknown" not in out
+    assert "model.provider 'cliproxyapi-gemini-native' is not a recognised provider" not in out
+
+
 def test_check_gateway_service_linger_warns_when_disabled(monkeypatch, tmp_path, capsys):
     unit_path = tmp_path / "hermes-gateway.service"
     unit_path.write_text("[Unit]\n")

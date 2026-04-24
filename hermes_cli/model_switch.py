@@ -590,6 +590,7 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+    explicit_pdef = None
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -623,6 +624,7 @@ def switch_model(
                 error_message=_switch_err,
             )
 
+        explicit_pdef = pdef
         target_provider = pdef.id
 
         # If no model specified, try auto-detect from endpoint
@@ -755,7 +757,9 @@ def switch_model(
 
     provider_changed = target_provider != current_provider
     provider_label = get_label(target_provider)
-    if target_provider.startswith("custom:"):
+    if explicit_pdef is not None and explicit_pdef.source == "user-config":
+        provider_label = explicit_pdef.name
+    elif target_provider.startswith("custom:"):
         custom_pdef = resolve_provider_full(
             target_provider,
             user_providers,
@@ -809,20 +813,34 @@ def switch_model(
     new_model = normalize_model_for_provider(new_model, target_provider)
 
     # --- Validate ---
-    try:
-        validation = validate_requested_model(
-            new_model,
-            target_provider,
-            api_key=api_key,
-            base_url=base_url,
-        )
-    except Exception as e:
+    configured_models = set(explicit_pdef.configured_models) if explicit_pdef is not None else set()
+    if new_model in configured_models:
         validation = {
-            "accepted": False,
-            "persist": False,
-            "recognized": False,
-            "message": f"Could not validate `{new_model}`: {e}",
+            "accepted": True,
+            "persist": True,
+            "recognized": True,
+            "message": None,
         }
+    else:
+        validation_provider = (
+            "custom"
+            if explicit_pdef is not None and explicit_pdef.source == "user-config"
+            else target_provider
+        )
+        try:
+            validation = validate_requested_model(
+                new_model,
+                validation_provider,
+                api_key=api_key,
+                base_url=base_url,
+            )
+        except Exception as e:
+            validation = {
+                "accepted": False,
+                "persist": False,
+                "recognized": False,
+                "message": f"Could not validate `{new_model}`: {e}",
+            }
 
     if not validation.get("accepted"):
         msg = validation.get("message", "Invalid model")

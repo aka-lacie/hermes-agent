@@ -31,10 +31,17 @@ class ChatCompletionsTransport(ProviderTransport):
     def convert_messages(self, messages: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
         """Messages are already in OpenAI format — sanitize Codex leaks only.
 
-        Strips Codex Responses API fields (``codex_reasoning_items`` on the
-        message, ``call_id``/``response_item_id`` on tool_calls) that strict
-        chat-completions providers reject with 400/422.
+        Strips fields that strict chat-completions providers reject with
+        400/422: ``codex_reasoning_items`` on the message, plus
+        ``call_id``/``response_item_id`` on tool_calls. Gemini-native
+        ``extra_content`` is also stripped for strict chat-completions replay,
+        unless the caller explicitly preserves it for native Gemini routes.
         """
+        preserve_extra_content = bool(kwargs.get("preserve_tool_call_extra_content"))
+        strip_tool_call_keys = {"call_id", "response_item_id"}
+        if not preserve_extra_content:
+            strip_tool_call_keys.add("extra_content")
+
         needs_sanitize = False
         for msg in messages:
             if not isinstance(msg, dict):
@@ -45,7 +52,7 @@ class ChatCompletionsTransport(ProviderTransport):
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
-                    if isinstance(tc, dict) and ("call_id" in tc or "response_item_id" in tc):
+                    if isinstance(tc, dict) and any(key in tc for key in strip_tool_call_keys):
                         needs_sanitize = True
                         break
                 if needs_sanitize:
@@ -63,8 +70,8 @@ class ChatCompletionsTransport(ProviderTransport):
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
                     if isinstance(tc, dict):
-                        tc.pop("call_id", None)
-                        tc.pop("response_item_id", None)
+                        for key in strip_tool_call_keys:
+                            tc.pop(key, None)
         return sanitized
 
     def convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -113,13 +120,18 @@ class ChatCompletionsTransport(ProviderTransport):
             # Reasoning
             supports_reasoning: bool
             github_reasoning_extra: dict | None
+            native_gemini_protocol: bool
             # Claude on OpenRouter/Nous max output
             anthropic_max_output: int | None
             # Extra
             extra_body_additions: dict | None — pre-built extra_body entries
         """
-        # Codex sanitization: drop reasoning_items / call_id / response_item_id
-        sanitized = self.convert_messages(messages)
+        # Strict-provider sanitization: drop reasoning_items and provider-only
+        # tool call metadata unless the caller needs Gemini native replay data.
+        sanitized = self.convert_messages(
+            messages,
+            preserve_tool_call_extra_content=params.get("preserve_tool_call_extra_content", False),
+        )
 
         # Qwen portal prep AFTER codex sanitization.  If sanitize already
         # deepcopied, reuse that copy via the in-place variant to avoid a
@@ -224,6 +236,7 @@ class ChatCompletionsTransport(ProviderTransport):
         is_openrouter = params.get("is_openrouter", False)
         is_nous = params.get("is_nous", False)
         is_github_models = params.get("is_github_models", False)
+        is_native_gemini = bool(params.get("native_gemini_protocol", False))
 
         provider_prefs = params.get("provider_preferences")
         if provider_prefs and is_openrouter:
@@ -254,6 +267,11 @@ class ChatCompletionsTransport(ProviderTransport):
                         extra_body["reasoning"] = rc
                 else:
                     extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
+
+        if is_native_gemini:
+            native_thinking_config = self._native_gemini_thinking_config(reasoning_config)
+            if native_thinking_config:
+                extra_body["thinking_config"] = native_thinking_config
 
         if is_nous:
             extra_body["tags"] = ["product=hermes-agent"]
@@ -290,6 +308,26 @@ class ChatCompletionsTransport(ProviderTransport):
             api_kwargs.update(overrides)
 
         return api_kwargs
+
+    @staticmethod
+    def _native_gemini_thinking_config(reasoning_config: Any) -> Dict[str, Any]:
+        """Build Gemini native thinkingConfig for thought-summary capture."""
+        if isinstance(reasoning_config, dict):
+            enabled = reasoning_config.get("enabled", True)
+            effort = str(reasoning_config.get("effort") or "").strip().lower()
+            if enabled is False or effort == "none":
+                return {"includeThoughts": False}
+        else:
+            effort = ""
+
+        config: Dict[str, Any] = {"includeThoughts": True}
+        if effort in {"low", "high"}:
+            config["thinkingLevel"] = effort
+        elif effort == "minimal":
+            config["thinkingLevel"] = "low"
+        elif effort == "xhigh":
+            config["thinkingLevel"] = "high"
+        return config
 
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:
         """Normalize OpenAI ChatCompletion to NormalizedResponse.
@@ -352,6 +390,13 @@ class ChatCompletionsTransport(ProviderTransport):
         rd = getattr(msg, "reasoning_details", None)
         if rd:
             provider_data["reasoning_details"] = rd
+        gemini_content = getattr(msg, "gemini_content", None)
+        if gemini_content is None and hasattr(msg, "model_extra"):
+            model_extra = getattr(msg, "model_extra", None) or {}
+            if isinstance(model_extra, dict):
+                gemini_content = model_extra.get("gemini_content")
+        if isinstance(gemini_content, dict):
+            provider_data["gemini_content"] = copy.deepcopy(gemini_content)
 
         return NormalizedResponse(
             content=msg.content,

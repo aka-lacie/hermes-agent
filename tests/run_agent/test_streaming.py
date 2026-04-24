@@ -18,6 +18,7 @@ import pytest
 def _make_stream_chunk(
     content=None, tool_calls=None, finish_reason=None,
     model=None, reasoning_content=None, usage=None,
+    gemini_part=None,
 ):
     """Build a mock streaming chunk matching OpenAI's ChatCompletionChunk shape."""
     delta = SimpleNamespace(
@@ -26,6 +27,8 @@ def _make_stream_chunk(
         reasoning_content=reasoning_content,
         reasoning=None,
     )
+    if gemini_part is not None:
+        delta.gemini_part = gemini_part
     choice = SimpleNamespace(
         index=0,
         delta=delta,
@@ -234,6 +237,125 @@ class TestStreamingAccumulator:
         assert tc[0].extra_content == {
             "google": {"thought_signature": "sig-123"}
         }
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_gemini_function_call_parts_are_finalized_per_tool_call(self, mock_close, mock_create):
+        """Gemini native streaming may replay the same functionCall part."""
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(
+                tool_calls=[
+                    _make_tool_call_delta(
+                        index=0,
+                        tc_id="call_search",
+                        name="search",
+                        arguments='{"q": "hermes"}',
+                    )
+                ],
+                gemini_part={
+                    "functionCall": {"name": "search", "args": {"q": "hermes"}},
+                    "thoughtSignature": "sig-partial",
+                },
+            ),
+            _make_stream_chunk(
+                tool_calls=[
+                    _make_tool_call_delta(
+                        index=0,
+                        tc_id="call_search",
+                        arguments="",
+                    )
+                ],
+                gemini_part={
+                    "functionCall": {"name": "search", "args": {"q": "hermes"}},
+                    "thoughtSignature": "sig-final",
+                },
+            ),
+            _make_stream_chunk(finish_reason="tool_calls"),
+        ]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        gemini_content = response.choices[0].message.gemini_content
+        assert gemini_content == {
+            "role": "model",
+            "parts": [
+                {
+                    "functionCall": {"name": "search", "args": {"q": "hermes"}},
+                    "thoughtSignature": "sig-final",
+                }
+            ],
+        }
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_gemini_function_call_parts_keep_parallel_calls_distinct(self, mock_close, mock_create):
+        """Separate Gemini tool-call slots must remain separate native parts."""
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(
+                tool_calls=[
+                    _make_tool_call_delta(
+                        index=0,
+                        tc_id="call_a",
+                        name="read_file",
+                        arguments='{"path": "a"}',
+                    )
+                ],
+                gemini_part={"functionCall": {"name": "read_file", "args": {"path": "a"}}},
+            ),
+            _make_stream_chunk(
+                tool_calls=[
+                    _make_tool_call_delta(
+                        index=1,
+                        tc_id="call_b",
+                        name="read_file",
+                        arguments='{"path": "b"}',
+                    )
+                ],
+                gemini_part={"functionCall": {"name": "read_file", "args": {"path": "b"}}},
+            ),
+            _make_stream_chunk(finish_reason="tool_calls"),
+        ]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].message.gemini_content["parts"] == [
+            {"functionCall": {"name": "read_file", "args": {"path": "a"}}},
+            {"functionCall": {"name": "read_file", "args": {"path": "b"}}},
+        ]
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
@@ -1132,8 +1254,6 @@ class TestPartialToolCallWarning:
         assert "Stream stalled" not in content, (
             f"Unexpected warning on text-only partial stream: {content!r}"
         )
-
-
 class TestSilentRetryMidToolCall:
     """Regression: when the stream dies mid tool-call JSON after text was
     already delivered, we previously stubbed the turn with a "retry manually"
@@ -1354,4 +1474,3 @@ class TestSilentRetryMidToolCall:
         assert "Stream stalled" not in content, (
             f"Text-only stall should not emit tool-call warning: {content!r}"
         )
-
