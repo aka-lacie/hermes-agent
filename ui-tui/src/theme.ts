@@ -36,6 +36,7 @@ export interface ThemeBrand {
   name: string
   icon: string
   prompt: string
+  subtitle: string
   welcome: string
   goodbye: string
   tool: string
@@ -82,6 +83,7 @@ const BRAND: ThemeBrand = {
   name: 'Hermes Agent',
   icon: '⚕',
   prompt: '❯',
+  subtitle: 'Nous Research · Messenger of the Digital Gods',
   welcome: 'Type your message or /help for commands.',
   goodbye: 'Goodbye! ⚕',
   tool: '┊',
@@ -253,8 +255,9 @@ export function fromSkin(
 
     brand: {
       name: branding.agent_name ?? d.brand.name,
-      icon: d.brand.icon,
+      icon: branding.icon ?? d.brand.icon,
       prompt: branding.prompt_symbol ?? d.brand.prompt,
+      subtitle: branding.subtitle ?? d.brand.subtitle,
       welcome: branding.welcome ?? d.brand.welcome,
       goodbye: branding.goodbye ?? d.brand.goodbye,
       tool: toolPrefix || d.brand.tool,

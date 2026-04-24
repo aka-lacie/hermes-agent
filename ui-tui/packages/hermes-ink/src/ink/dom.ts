@@ -339,7 +339,9 @@ const measureTextNode = function (
     // pathological frames where yoga probes many widths.
     if (cache.entries.size >= MEASURE_CACHE_CAP) {
       const firstKey = cache.entries.keys().next().value
-      cache.entries.delete(firstKey)
+      if (firstKey !== undefined) {
+        cache.entries.delete(firstKey)
+      }
     }
     cache.entries.set(key, { _gen: cache.gen, result })
     return result
