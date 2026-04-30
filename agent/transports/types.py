@@ -97,7 +97,7 @@ class NormalizedResponse:
     Response-level ``provider_data`` examples:
 
     * Anthropic: ``{"reasoning_details": [...]}``
-    * Codex: ``{"codex_reasoning_items": [...]}``
+    * Codex: ``{"codex_reasoning_items": [...], "codex_message_items": [...]}``
     * Gemini: ``{"gemini_content": {"role": "model", "parts": [...]}}``
     * Others: ``None``
     """
@@ -131,6 +131,11 @@ class NormalizedResponse:
     def gemini_content(self):
         pd = self.provider_data or {}
         return pd.get("gemini_content")
+
+    @property
+    def codex_message_items(self):
+        pd = self.provider_data or {}
+        return pd.get("codex_message_items")
 
 
 # ---------------------------------------------------------------------------

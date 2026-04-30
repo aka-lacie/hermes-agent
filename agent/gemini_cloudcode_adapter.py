@@ -31,7 +31,6 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import os
 import time
 import uuid
 from types import SimpleNamespace
@@ -40,10 +39,10 @@ from typing import Any, Dict, Iterator, List, Optional
 import httpx
 
 from agent import google_oauth
+from agent.gemini_content_utils import coalesce_split_function_response_turns
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 from agent.google_code_assist import (
     CODE_ASSIST_ENDPOINT,
-    FREE_TIER_ID,
     CodeAssistError,
     ProjectContext,
     resolve_project_context,
@@ -229,7 +228,7 @@ def _build_gemini_contents(
             "parts": [{"text": joined_system}],
         }
 
-    return contents, system_instruction
+    return coalesce_split_function_response_turns(contents), system_instruction
 
 
 def _translate_tools_to_gemini(tools: Any) -> List[Dict[str, Any]]:

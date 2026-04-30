@@ -134,7 +134,7 @@ class TestSendMessageTool:
             thread_id=None,
             media_files=[],
         )
-        mirror_mock.assert_called_once_with("telegram", "-1002", "hello", source_label="cli", thread_id=None)
+        mirror_mock.assert_called_once_with("telegram", "-1002", "hello", source_label="cli", thread_id=None, user_id=None)
 
     def test_cron_same_chat_different_thread_still_sends(self):
         config, telegram_cfg = _make_config()
@@ -173,7 +173,7 @@ class TestSendMessageTool:
             thread_id="99999",
             media_files=[],
         )
-        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="99999")
+        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="99999", user_id=None)
 
     def test_sends_to_explicit_telegram_topic_target(self):
         config, telegram_cfg = _make_config()
@@ -202,7 +202,7 @@ class TestSendMessageTool:
             thread_id="17585",
             media_files=[],
         )
-        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="17585")
+        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="17585", user_id=None)
 
     def test_resolved_telegram_topic_name_preserves_thread_id(self):
         config, telegram_cfg = _make_config()
@@ -304,6 +304,40 @@ class TestSendMessageTool:
             "[Sent audio attachment]",
             source_label="cli",
             thread_id=None,
+            user_id=None,
+        )
+
+    def test_mirror_receives_current_session_user_id(self):
+        config, _telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("gateway.session_context.get_session_env") as get_session_env_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            get_session_env_mock.side_effect = lambda name, default="": {
+                "HERMES_SESSION_PLATFORM": "telegram",
+                "HERMES_SESSION_USER_ID": "user-123",
+            }.get(name, default)
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:12345",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        mirror_mock.assert_called_once_with(
+            "telegram",
+            "12345",
+            "hello",
+            source_label="telegram",
+            thread_id=None,
+            user_id="user-123",
         )
 
     def test_top_level_send_failure_redacts_query_token(self):
@@ -576,7 +610,7 @@ class TestSendToPlatformChunking:
 
         sent_calls = []
 
-        async def fake_send(token, chat_id, message, media_files=None, thread_id=None):
+        async def fake_send(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False):
             sent_calls.append(media_files or [])
             return {"success": True, "platform": "telegram", "chat_id": chat_id, "message_id": str(len(sent_calls))}
 
@@ -598,7 +632,7 @@ class TestSendToPlatformChunking:
         """Discord standalone path mirrors gateway text-first media delivery."""
         sent_calls = []
 
-        async def fake_send(token, chat_id, message, media_files=None):
+        async def fake_send(token, chat_id, message, media_files=None, thread_id=None):
             sent_calls.append((message, media_files or []))
             return {"success": True, "platform": "discord", "chat_id": chat_id, "message_id": str(len(sent_calls))}
 
@@ -616,9 +650,8 @@ class TestSendToPlatformChunking:
             )
 
         assert len(sent_calls) >= 3
-        assert all(call[1] == [] for call in sent_calls[:-2])
-        assert sent_calls[-2] == ("", [("/tmp/voice.ogg", True)])
-        assert sent_calls[-1] == ("", [("/tmp/photo.png", False)])
+        assert all(call[1] == [] for call in sent_calls[:-1])
+        assert sent_calls[-1][1] == [("/tmp/voice.ogg", True), ("/tmp/photo.png", False)]
 
 
 class TestSendDiscordMediaDelivery:
@@ -629,7 +662,7 @@ class TestSendDiscordMediaDelivery:
         ) as voice_mock, patch(
             "tools.send_message_tool._send_discord_attachments",
             new=AsyncMock(return_value={"success": True, "platform": "discord", "chat_id": "123", "message_id": "9"}),
-        ) as attachment_mock:
+        ) as attachment_mock, patch("os.path.exists", return_value=True):
             result = asyncio.run(
                 _send_discord(
                     "tok",
@@ -650,7 +683,7 @@ class TestSendDiscordMediaDelivery:
         ) as voice_mock, patch(
             "tools.send_message_tool._send_discord_attachments",
             new=AsyncMock(),
-        ) as attachment_mock:
+        ) as attachment_mock, patch("os.path.exists", return_value=True):
             result = asyncio.run(
                 _send_discord(
                     "tok",
@@ -671,7 +704,7 @@ class TestSendDiscordMediaDelivery:
         ) as voice_mock, patch(
             "tools.send_message_tool._send_discord_attachments",
             new=AsyncMock(return_value={"success": True, "platform": "discord", "chat_id": "123", "message_id": "5"}),
-        ) as attachment_mock:
+        ) as attachment_mock, patch("os.path.exists", return_value=True):
             result = asyncio.run(
                 _send_discord(
                     "tok",
@@ -841,6 +874,116 @@ class TestParseTargetRefDiscord:
         assert chat_id == "123456"
         assert thread_id == "789"
         assert is_explicit is True
+
+
+class TestParseTargetRefMatrix:
+    """_parse_target_ref correctly handles Matrix room IDs and user MXIDs."""
+
+    def test_matrix_room_id_is_explicit(self):
+        """Matrix room IDs (!) are recognized as explicit targets."""
+        chat_id, thread_id, is_explicit = _parse_target_ref("matrix", "!HLOQwxYGgFPMPJUSNR:matrix.org")
+        assert chat_id == "!HLOQwxYGgFPMPJUSNR:matrix.org"
+        assert thread_id is None
+        assert is_explicit is True
+
+    def test_matrix_user_mxid_is_explicit(self):
+        """Matrix user MXIDs (@) are recognized as explicit targets."""
+        chat_id, thread_id, is_explicit = _parse_target_ref("matrix", "@hermes:matrix.org")
+        assert chat_id == "@hermes:matrix.org"
+        assert thread_id is None
+        assert is_explicit is True
+
+    def test_matrix_alias_is_not_explicit(self):
+        """Matrix room aliases (#) are NOT explicit — they need resolution."""
+        chat_id, thread_id, is_explicit = _parse_target_ref("matrix", "#general:matrix.org")
+        assert chat_id is None
+        assert is_explicit is False
+
+    def test_matrix_prefix_only_matches_matrix_platform(self):
+        """! and @ prefixes are only treated as explicit for the matrix platform."""
+        chat_id, _, is_explicit = _parse_target_ref("telegram", "!something")
+        assert is_explicit is False
+
+        chat_id, _, is_explicit = _parse_target_ref("discord", "@someone")
+        assert is_explicit is False
+
+
+class TestParseTargetRefE164:
+    """_parse_target_ref accepts E.164 phone numbers for phone-based platforms."""
+
+    def test_signal_e164_preserves_plus_prefix(self):
+        """signal:+E164 is explicit and preserves the leading '+' for signal-cli."""
+        chat_id, thread_id, is_explicit = _parse_target_ref("signal", "+41791234567")
+        assert chat_id == "+41791234567"
+        assert thread_id is None
+        assert is_explicit is True
+
+    def test_sms_e164_is_explicit(self):
+        chat_id, _, is_explicit = _parse_target_ref("sms", "+15551234567")
+        assert chat_id == "+15551234567"
+        assert is_explicit is True
+
+    def test_whatsapp_e164_is_explicit(self):
+        chat_id, _, is_explicit = _parse_target_ref("whatsapp", "+15551234567")
+        assert chat_id == "+15551234567"
+        assert is_explicit is True
+
+    def test_signal_bare_digits_still_work(self):
+        """Bare digit strings continue to match the generic numeric branch."""
+        chat_id, _, is_explicit = _parse_target_ref("signal", "15551234567")
+        assert chat_id == "15551234567"
+        assert is_explicit is True
+
+    def test_signal_invalid_e164_rejected(self):
+        """Too-short, too-long, and non-numeric E.164 strings are not explicit."""
+        assert _parse_target_ref("signal", "+123")[2] is False
+        assert _parse_target_ref("signal", "+1234567890123456")[2] is False
+        assert _parse_target_ref("signal", "+12abc4567890")[2] is False
+        assert _parse_target_ref("signal", "+")[2] is False
+
+    def test_e164_prefix_only_matches_phone_platforms(self):
+        """'+' prefix must NOT be treated as explicit for non-phone platforms."""
+        assert _parse_target_ref("telegram", "+15551234567")[2] is False
+        assert _parse_target_ref("discord", "+15551234567")[2] is False
+        assert _parse_target_ref("matrix", "+15551234567")[2] is False
+
+
+class TestParseTargetRefSlack:
+    """_parse_target_ref recognizes Slack channel/user IDs as explicit."""
+
+    def test_public_channel_id_is_explicit(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref("slack", "C0B0QV5434G")
+        assert chat_id == "C0B0QV5434G"
+        assert thread_id is None
+        assert is_explicit is True
+
+    def test_private_channel_id_is_explicit(self):
+        assert _parse_target_ref("slack", "G123ABCDEF")[2] is True
+
+    def test_dm_id_is_explicit(self):
+        assert _parse_target_ref("slack", "D123ABCDEF")[2] is True
+
+    def test_user_id_is_not_explicit(self):
+        """Slack user IDs (U...) and workspace IDs (W...) are NOT explicit send
+        targets. chat.postMessage rejects them — a DM must be opened first via
+        conversations.open to obtain a D... conversation ID.
+        """
+        assert _parse_target_ref("slack", "U123ABCDEF")[2] is False
+        assert _parse_target_ref("slack", "W123ABCDEF")[2] is False
+
+    def test_whitespace_is_stripped(self):
+        chat_id, _, is_explicit = _parse_target_ref("slack", "  C0B0QV5434G  ")
+        assert chat_id == "C0B0QV5434G"
+        assert is_explicit is True
+
+    def test_lowercase_or_short_id_is_not_explicit(self):
+        assert _parse_target_ref("slack", "c0b0qv5434g")[2] is False
+        assert _parse_target_ref("slack", "C123")[2] is False
+        assert _parse_target_ref("slack", "X0B0QV5434G")[2] is False
+
+    def test_slack_id_not_explicit_for_other_platforms(self):
+        assert _parse_target_ref("discord", "C0B0QV5434G")[2] is False
+        assert _parse_target_ref("telegram", "C0B0QV5434G")[2] is False
 
 
 class TestSendDiscordThreadId:

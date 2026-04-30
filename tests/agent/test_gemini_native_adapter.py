@@ -85,6 +85,42 @@ def test_build_native_request_uses_original_function_name_for_tool_result():
     assert tool_response["name"] == "get_weather"
 
 
+def test_build_native_request_coalesces_split_parallel_tool_results():
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path": "a"}'},
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "search_files", "arguments": '{"pattern": "x"}'},
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"content": "a"}'},
+            {"role": "tool", "tool_call_id": "call_2", "content": '{"matches": []}'},
+        ],
+        tools=[],
+        tool_choice=None,
+    )
+
+    assert len(request["contents"]) == 2
+    response_parts = request["contents"][1]["parts"]
+    assert [part["functionResponse"]["name"] for part in response_parts] == [
+        "read_file",
+        "search_files",
+    ]
+
+
 def test_build_native_request_replays_preserved_gemini_content_verbatim():
     from agent.gemini_native_adapter import build_gemini_request
 
@@ -280,6 +316,19 @@ def test_is_native_gemini_base_url_accepts_provider_pinned_proxy_route():
     assert is_native_gemini_base_url("http://127.0.0.1:8080/api/provider/gemini/v1beta")
     assert is_native_gemini_base_url("http://127.0.0.1:8080/api/provider/google/v1beta")
     assert not is_native_gemini_base_url("http://127.0.0.1:8080/v1/chat/completions")
+
+
+def test_native_client_rejects_empty_api_key_with_actionable_message():
+    """Empty/whitespace api_key must raise at construction, not produce a cryptic
+    Google GFE 'Error 400 (Bad Request)!!1' HTML page on the first request."""
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    for bad in ("", "   ", None):
+        with pytest.raises(RuntimeError) as excinfo:
+            GeminiNativeClient(api_key=bad)  # type: ignore[arg-type]
+        msg = str(excinfo.value)
+        assert "GOOGLE_API_KEY" in msg and "GEMINI_API_KEY" in msg
+        assert "aistudio.google.com" in msg
 
 
 @pytest.mark.asyncio

@@ -12,10 +12,82 @@ reasoning configuration, temperature handling, and extra_body assembly.
 import copy
 from typing import Any, Dict, List, Optional
 
+from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
+
+
+def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
+    """Translate Hermes/OpenRouter-style reasoning config to Gemini thinkingConfig."""
+    if reasoning_config is None or not isinstance(reasoning_config, dict):
+        return None
+
+    if reasoning_config.get("enabled") is False:
+        # Gemini can hide thought parts even when internal thinking still
+        # happens; omit thinkingLevel to avoid model-specific validation quirks.
+        return {"includeThoughts": False}
+
+    effort = str(reasoning_config.get("effort", "medium") or "medium").strip().lower()
+    if effort == "none":
+        return {"includeThoughts": False}
+
+    thinking_config: Dict[str, Any] = {"includeThoughts": True}
+    normalized_model = (model or "").strip().lower()
+    if normalized_model.startswith("google/"):
+        normalized_model = normalized_model.split("/", 1)[1]
+
+    # Gemini 2.5 accepts thinkingBudget; don't guess a budget from Hermes'
+    # coarse effort levels. ``includeThoughts`` alone is enough to surface
+    # thought parts without risking request validation errors.
+    if normalized_model.startswith("gemini-2.5-"):
+        return thinking_config
+
+    if effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+        effort = "medium"
+
+    # Gemini 3 Flash documents low/medium/high thinking levels; Gemini 3 Pro
+    # is stricter (low/high). Clamp Hermes' wider effort set to what each
+    # family accepts so we never forward an undocumented level verbatim.
+    if normalized_model.startswith(("gemini-3", "gemini-3.1")):
+        if "flash" in normalized_model:
+            if effort in {"minimal", "low"}:
+                thinking_config["thinkingLevel"] = "low"
+            elif effort in {"high", "xhigh"}:
+                thinking_config["thinkingLevel"] = "high"
+            else:
+                thinking_config["thinkingLevel"] = "medium"
+        elif "pro" in normalized_model:
+            thinking_config["thinkingLevel"] = (
+                "high" if effort in {"high", "xhigh"} else "low"
+            )
+
+    return thinking_config
+
+
+def _snake_case_gemini_thinking_config(config: dict | None) -> dict | None:
+    """Convert Gemini thinking config keys to the OpenAI-compat field names."""
+    if not isinstance(config, dict) or not config:
+        return None
+
+    translated: Dict[str, Any] = {}
+    if isinstance(config.get("includeThoughts"), bool):
+        translated["include_thoughts"] = config["includeThoughts"]
+    if isinstance(config.get("thinkingLevel"), str) and config["thinkingLevel"].strip():
+        translated["thinking_level"] = config["thinkingLevel"].strip().lower()
+    if isinstance(config.get("thinkingBudget"), (int, float)):
+        translated["thinking_budget"] = int(config["thinkingBudget"])
+    return translated or None
+
+
+def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
+    normalized = str(base_url or "").strip().rstrip("/").lower()
+    if not normalized:
+        return False
+    if "generativelanguage.googleapis.com" not in normalized:
+        return False
+    return normalized.endswith("/openai")
 
 
 class ChatCompletionsTransport(ProviderTransport):
@@ -31,11 +103,11 @@ class ChatCompletionsTransport(ProviderTransport):
     def convert_messages(self, messages: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
         """Messages are already in OpenAI format — sanitize Codex leaks only.
 
-        Strips fields that strict chat-completions providers reject with
-        400/422: ``codex_reasoning_items`` on the message, plus
-        ``call_id``/``response_item_id`` on tool_calls. Gemini-native
-        ``extra_content`` is also stripped for strict chat-completions replay,
-        unless the caller explicitly preserves it for native Gemini routes.
+        Strips Codex Responses API fields (``codex_reasoning_items`` /
+        ``codex_message_items`` on the message, ``call_id``/``response_item_id``
+        on tool_calls) that strict chat-completions providers reject with 400/422.
+        Gemini-native ``extra_content`` is also stripped for strict replay unless
+        the caller explicitly preserves it for native Gemini routes.
         """
         preserve_extra_content = bool(kwargs.get("preserve_tool_call_extra_content"))
         strip_tool_call_keys = {"call_id", "response_item_id"}
@@ -46,7 +118,7 @@ class ChatCompletionsTransport(ProviderTransport):
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
-            if "codex_reasoning_items" in msg:
+            if "codex_reasoning_items" in msg or "codex_message_items" in msg:
                 needs_sanitize = True
                 break
             tool_calls = msg.get("tool_calls")
@@ -66,6 +138,7 @@ class ChatCompletionsTransport(ProviderTransport):
             if not isinstance(msg, dict):
                 continue
             msg.pop("codex_reasoning_items", None)
+            msg.pop("codex_message_items", None)
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
@@ -107,6 +180,7 @@ class ChatCompletionsTransport(ProviderTransport):
             is_github_models: bool
             is_nvidia_nim: bool
             is_kimi: bool
+            is_lmstudio: bool
             is_custom_provider: bool
             ollama_num_ctx: int | None
             # Provider routing
@@ -121,6 +195,7 @@ class ChatCompletionsTransport(ProviderTransport):
             supports_reasoning: bool
             github_reasoning_extra: dict | None
             native_gemini_protocol: bool
+            lmstudio_reasoning_options: list[str] | None  # raw allowed_options from /api/v1/models
             # Claude on OpenRouter/Nous max output
             anthropic_max_output: int | None
             # Extra
@@ -199,6 +274,7 @@ class ChatCompletionsTransport(ProviderTransport):
         anthropic_max_out = params.get("anthropic_max_output")
         is_nvidia_nim = params.get("is_nvidia_nim", False)
         is_kimi = params.get("is_kimi", False)
+        is_tokenhub = params.get("is_tokenhub", False)
         reasoning_config = params.get("reasoning_config")
 
         if ephemeral is not None and max_tokens_fn:
@@ -230,6 +306,33 @@ class ChatCompletionsTransport(ProviderTransport):
                         _kimi_effort = _e
                 api_kwargs["reasoning_effort"] = _kimi_effort
 
+        # Tencent TokenHub: top-level reasoning_effort (unless thinking disabled)
+        if is_tokenhub:
+            _tokenhub_thinking_off = bool(
+                reasoning_config
+                and isinstance(reasoning_config, dict)
+                and reasoning_config.get("enabled") is False
+            )
+            if not _tokenhub_thinking_off:
+                _tokenhub_effort = "high"
+                if reasoning_config and isinstance(reasoning_config, dict):
+                    _e = (reasoning_config.get("effort") or "").strip().lower()
+                    if _e in ("low", "medium", "high"):
+                        _tokenhub_effort = _e
+                api_kwargs["reasoning_effort"] = _tokenhub_effort
+
+        # LM Studio: top-level reasoning_effort. Only emit when the model
+        # declares reasoning support via /api/v1/models capabilities (gated
+        # upstream by params["supports_reasoning"]). resolve_lmstudio_effort
+        # is shared with run_agent's summary path so both stay in sync.
+        if params.get("is_lmstudio", False) and params.get("supports_reasoning", False):
+            _lm_effort = resolve_lmstudio_effort(
+                reasoning_config,
+                params.get("lmstudio_reasoning_options"),
+            )
+            if _lm_effort is not None:
+                api_kwargs["reasoning_effort"] = _lm_effort
+
         # extra_body assembly
         extra_body: Dict[str, Any] = {}
 
@@ -237,6 +340,8 @@ class ChatCompletionsTransport(ProviderTransport):
         is_nous = params.get("is_nous", False)
         is_github_models = params.get("is_github_models", False)
         is_native_gemini = bool(params.get("native_gemini_protocol", False))
+        provider_name = str(params.get("provider_name") or "").strip().lower()
+        base_url = params.get("base_url")
 
         provider_prefs = params.get("provider_preferences")
         if provider_prefs and is_openrouter:
@@ -252,8 +357,9 @@ class ChatCompletionsTransport(ProviderTransport):
                 "type": "enabled" if _kimi_thinking_enabled else "disabled",
             }
 
-        # Reasoning
-        if params.get("supports_reasoning", False):
+        # Reasoning. LM Studio is handled above via top-level reasoning_effort,
+        # so skip emitting extra_body.reasoning for it.
+        if params.get("supports_reasoning", False) and not params.get("is_lmstudio", False):
             if is_github_models:
                 gh_reasoning = params.get("github_reasoning_extra")
                 if gh_reasoning is not None:
@@ -268,7 +374,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 else:
                     extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
 
-        if is_native_gemini:
+        if is_native_gemini and provider_name not in {"gemini", "google-gemini-cli"}:
             native_thinking_config = self._native_gemini_thinking_config(reasoning_config)
             if native_thinking_config:
                 extra_body["thinking_config"] = native_thinking_config
@@ -293,6 +399,25 @@ class ChatCompletionsTransport(ProviderTransport):
 
         if is_qwen:
             extra_body["vl_high_resolution_images"] = True
+
+        if provider_name == "gemini":
+            raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
+            if _is_gemini_openai_compat_base_url(base_url):
+                thinking_config = _snake_case_gemini_thinking_config(raw_thinking_config)
+                if thinking_config:
+                    openai_compat_extra = extra_body.get("extra_body", {})
+                    google_extra = openai_compat_extra.get("google", {})
+                    google_extra["thinking_config"] = thinking_config
+                    openai_compat_extra["google"] = google_extra
+                    extra_body["extra_body"] = openai_compat_extra
+            elif is_native_gemini:
+                extra_body["thinking_config"] = raw_thinking_config or self._native_gemini_thinking_config(reasoning_config)
+            elif raw_thinking_config:
+                extra_body["thinking_config"] = raw_thinking_config
+        elif provider_name == "google-gemini-cli":
+            thinking_config = _build_gemini_thinking_config(model, reasoning_config)
+            if thinking_config:
+                extra_body["thinking_config"] = thinking_config
 
         # Merge any pre-built extra_body additions
         additions = params.get("extra_body_additions")

@@ -330,6 +330,39 @@ class TestQueueHealthWarnings:
         assert "## User Representation" not in block
         assert "## AI Identity Card" not in block
 
+    def test_sync_turn_strips_leaked_memory_context_before_honcho_ingest(self):
+        provider = HonchoMemoryProvider()
+        provider._session_key = "telegram:123"
+        provider._manager = MagicMock()
+        provider._cron_skipped = False
+        provider._config = SimpleNamespace(message_max_chars=25000)
+
+        session = MagicMock()
+        provider._manager.get_or_create.return_value = session
+
+        provider.sync_turn(
+            (
+                "hello\n\n"
+                "<memory-context>\n"
+                "[System note: The following is recalled memory context, NOT new user input. Treat as informational background data.]\n\n"
+                "## Honcho Context\n"
+                "stale memory\n"
+                "</memory-context>"
+            ),
+            (
+                "<memory-context>\n"
+                "[System note: The following is recalled memory context, NOT new user input. Treat as informational background data.]\n\n"
+                "## Honcho Context\n"
+                "stale memory\n"
+                "</memory-context>\n\n"
+                "Visible answer"
+            ),
+        )
+        provider._sync_thread.join(timeout=1.0)
+
+        assert session.add_message.call_args_list[0].args == ("user", "hello")
+        assert session.add_message.call_args_list[1].args == ("assistant", "Visible answer")
+
 
 # ---------------------------------------------------------------------------
 # Message chunking

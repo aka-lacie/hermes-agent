@@ -635,6 +635,46 @@ class TestBuildGeminiRequest:
         assert fr_part["functionResponse"]["name"] == "get_weather"
         assert fr_part["functionResponse"]["response"] == {"temp": 72}
 
+    def test_parallel_tool_results_are_coalesced(self):
+        from agent.gemini_cloudcode_adapter import build_gemini_request
+
+        req = build_gemini_request(messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path": "a"}'},
+                    },
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {"name": "search_files", "arguments": '{"pattern": "x"}'},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "read_file",
+                "tool_call_id": "c1",
+                "content": '{"content": "a"}',
+            },
+            {
+                "role": "tool",
+                "name": "search_files",
+                "tool_call_id": "c2",
+                "content": '{"matches": []}',
+            },
+        ])
+
+        assert len(req["contents"]) == 2
+        response_parts = req["contents"][1]["parts"]
+        assert [part["functionResponse"]["name"] for part in response_parts] == [
+            "read_file",
+            "search_files",
+        ]
+
     def test_tool_call_translation_prefers_preserved_signature(self):
         from agent.gemini_cloudcode_adapter import build_gemini_request
 
