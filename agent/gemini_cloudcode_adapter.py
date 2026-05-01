@@ -143,15 +143,24 @@ def _clone_gemini_content(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def _translate_tool_result_to_gemini(message: Dict[str, Any]) -> Dict[str, Any]:
+def _translate_tool_result_to_gemini(
+    message: Dict[str, Any],
+    *,
+    tool_name_by_call_id: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """OpenAI tool-role message -> Gemini functionResponse part.
 
-    The function name isn't in the OpenAI tool message directly; it must be
-    passed via the assistant message that issued the call. For simplicity we
-    look up ``name`` on the message (OpenAI SDK copies it there) or on the
-    ``tool_call_id`` cross-reference.
+    The function name often isn't in the OpenAI tool message directly; it must
+    be recovered from the assistant message that issued the call.
     """
-    name = str(message.get("name") or message.get("tool_call_id") or "tool")
+    tool_name_by_call_id = tool_name_by_call_id or {}
+    tool_call_id = str(message.get("tool_call_id") or "")
+    name = str(
+        message.get("name")
+        or tool_name_by_call_id.get(tool_call_id)
+        or tool_call_id
+        or "tool"
+    )
     content = _coerce_content_to_text(message.get("content"))
     # Gemini expects the response as a dict under `response`. We wrap plain
     # text in {"output": "..."}.
@@ -174,6 +183,7 @@ def _build_gemini_contents(
     """Convert OpenAI messages[] to Gemini contents[] + systemInstruction."""
     system_text_parts: List[str] = []
     contents: List[Dict[str, Any]] = []
+    tool_name_by_call_id: Dict[str, str] = {}
 
     for msg in messages:
         if not isinstance(msg, dict):
@@ -188,7 +198,12 @@ def _build_gemini_contents(
         if role == "tool" or role == "function":
             contents.append({
                 "role": "user",
-                "parts": [_translate_tool_result_to_gemini(msg)],
+                "parts": [
+                    _translate_tool_result_to_gemini(
+                        msg,
+                        tool_name_by_call_id=tool_name_by_call_id,
+                    )
+                ],
             })
             continue
 
@@ -211,6 +226,13 @@ def _build_gemini_contents(
         if isinstance(tool_calls, list):
             for tc in tool_calls:
                 if isinstance(tc, dict):
+                    tool_call_id = str(tc.get("id") or tc.get("call_id") or "")
+                    function = tc.get("function") or {}
+                    tool_name = (
+                        str(function.get("name") or "") if isinstance(function, dict) else ""
+                    )
+                    if tool_call_id and tool_name:
+                        tool_name_by_call_id[tool_call_id] = tool_name
                     if preserved_content is None:
                         parts.append(_translate_tool_call_to_gemini(tc))
 

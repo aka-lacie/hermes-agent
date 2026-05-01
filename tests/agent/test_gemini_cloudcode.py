@@ -635,6 +635,27 @@ class TestBuildGeminiRequest:
         assert fr_part["functionResponse"]["name"] == "get_weather"
         assert fr_part["functionResponse"]["response"] == {"temp": 72}
 
+    def test_tool_result_translation_uses_call_id_to_restore_name(self):
+        from agent.gemini_cloudcode_adapter import build_gemini_request
+
+        req = build_gemini_request(messages=[
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"},
+            }]},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": '{"temp": 72}',
+            },
+        ])
+
+        last = req["contents"][-1]
+        fr_part = next(p for p in last["parts"] if "functionResponse" in p)
+        assert fr_part["functionResponse"]["name"] == "get_weather"
+        assert fr_part["functionResponse"]["response"] == {"temp": 72}
+
     def test_parallel_tool_results_are_coalesced(self):
         from agent.gemini_cloudcode_adapter import build_gemini_request
 
