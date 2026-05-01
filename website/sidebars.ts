@@ -23,6 +23,7 @@ const sidebars: SidebarsConfig = {
         'user-guide/cli',
         'user-guide/tui',
         'user-guide/configuration',
+        'user-guide/configuring-models',
         'user-guide/sessions',
         'user-guide/profiles',
         'user-guide/git-worktrees',
@@ -61,6 +62,8 @@ const sidebars: SidebarsConfig = {
           items: [
             'user-guide/features/cron',
             'user-guide/features/delegation',
+            'user-guide/features/kanban',
+            'user-guide/features/kanban-tutorial',
             'user-guide/features/code-execution',
             'user-guide/features/hooks',
             'user-guide/features/batch-processing',

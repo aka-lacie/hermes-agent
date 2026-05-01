@@ -122,6 +122,21 @@ def _auto_continue_freshness_window() -> float:
         return float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
 
 
+def _float_env(name: str, default: float) -> float:
+    """Read an env var as float, falling back to ``default`` on typos/empty.
+
+    A misconfigured env var (e.g. ``HERMES_AGENT_TIMEOUT=abc``) must not
+    crash the gateway or an agent turn.  Unset/empty also falls back.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _is_fresh_gateway_interruption(
     value: Any,
     *,
@@ -224,7 +239,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
 from hermes_constants import get_hermes_home
-from utils import atomic_yaml_write, base_url_host_matches, is_truthy_value
+from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
 _hermes_home = get_hermes_home()
 
 # Load environment variables from ~/.hermes/.env first.
@@ -366,6 +381,8 @@ if _config_path.exists():
         if _display_cfg and isinstance(_display_cfg, dict):
             if "busy_input_mode" in _display_cfg and "HERMES_GATEWAY_BUSY_INPUT_MODE" not in os.environ:
                 os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(_display_cfg["busy_input_mode"])
+            if "busy_ack_enabled" in _display_cfg and "HERMES_GATEWAY_BUSY_ACK_ENABLED" not in os.environ:
+                os.environ["HERMES_GATEWAY_BUSY_ACK_ENABLED"] = str(_display_cfg["busy_ack_enabled"])
         # Timezone: bridge config.yaml → HERMES_TIMEZONE env var.
         # HERMES_TIMEZONE from .env takes precedence (already in os.environ).
         _tz_cfg = _cfg.get("timezone", "")
@@ -623,7 +640,7 @@ def _check_unavailable_skill(command_name: str) -> str | None:
             if not skills_dir.exists():
                 continue
             for skill_md in skills_dir.rglob("SKILL.md"):
-                if any(part in ('.git', '.github', '.hub') for part in skill_md.parts):
+                if any(part in ('.git', '.github', '.hub', '.archive') for part in skill_md.parts):
                     continue
                 name = skill_md.parent.name.lower().replace("_", "-")
                 if name == normalized and name in disabled:
@@ -867,6 +884,7 @@ class GatewayRunner:
         # /new and /reset.  /model and other mid-session operations
         # preserve the queue.
         self._queued_events: Dict[str, List[MessageEvent]] = {}
+        self._pending_native_image_paths_by_session: Dict[str, List[str]] = {}
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
         self._session_run_generation: Dict[str, int] = {}
 
@@ -1724,7 +1742,10 @@ class GatewayRunner:
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
-                return bool(cfg_get(cfg, "display", "show_reasoning", default=False))
+                return is_truthy_value(
+                    cfg_get(cfg, "display", "show_reasoning"),
+                    default=False,
+                )
         except Exception:
             pass
         return False
@@ -1859,6 +1880,22 @@ class GatewayRunner:
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        # --- Authorization gate (#17775) ---
+        # The cold path (_handle_message) checks _is_user_authorized before
+        # creating a session.  The busy path must enforce the same check;
+        # otherwise unauthorized users in shared threads (Slack/Telegram/Discord)
+        # can inject messages into an active session they don't own.
+        if not self._is_user_authorized(event.source):
+            logger.warning(
+                "Dropping message from unauthorized user in active session: "
+                "user=%s (%s), platform=%s, session=%s",
+                event.source.user_id,
+                event.source.user_name,
+                event.source.platform.value if event.source.platform else "unknown",
+                session_key,
+            )
+            return True  # handled (silently dropped); do not fall through
+
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
             adapter = self.adapters.get(event.source.platform)
@@ -1929,6 +1966,14 @@ class GatewayRunner:
                 running_agent.interrupt(event.text)
             except Exception:
                 pass  # don't let interrupt failure block the ack
+
+        # Check if busy ack is disabled — skip sending but still process the input.
+        # Placed before debounce so we don't stamp a "last ack" timestamp that was
+        # never actually delivered.
+        busy_ack_enabled = os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
+        if not busy_ack_enabled:
+            logger.debug("Busy ack suppressed for session %s", session_key)
+            return True  # input still processed, just no ack sent
 
         # Debounce: only send an acknowledgment once every 30 seconds per session
         # to avoid spamming the user when they send multiple messages quickly
@@ -2214,7 +2259,7 @@ class GatewayRunner:
         # (they might become active again next restart)
 
         try:
-            path.write_text(json.dumps(new_counts))
+            atomic_json_write(path, new_counts, indent=None)
         except Exception:
             pass
 
@@ -2282,7 +2327,7 @@ class GatewayRunner:
             if session_key in counts:
                 del counts[session_key]
                 if counts:
-                    path.write_text(json.dumps(counts))
+                    atomic_json_write(path, counts, indent=None)
                 else:
                     path.unlink(missing_ok=True)
         except Exception:
@@ -2701,6 +2746,17 @@ class GatewayRunner:
         # Start background session expiry watcher to finalize expired sessions
         asyncio.create_task(self._session_expiry_watcher())
 
+        # Start background kanban notifier — delivers `completed`, `blocked`,
+        # `spawn_auto_blocked`, and `crashed` events to gateway subscribers
+        # so human-in-the-loop workflows hear back without polling.
+        asyncio.create_task(self._kanban_notifier_watcher())
+
+        # Start background kanban dispatcher — spawns workers for ready
+        # tasks. Gated by `kanban.dispatch_in_gateway` (default True).
+        # When false, users run `hermes kanban daemon` externally or
+        # simply don't use kanban; this loop becomes a no-op.
+        asyncio.create_task(self._kanban_dispatcher_watcher())
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
@@ -2875,6 +2931,399 @@ class GatewayRunner:
                 if not self._running:
                     break
                 await asyncio.sleep(1)
+
+    async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
+        """Poll ``kanban_notify_subs`` and deliver terminal events to users.
+
+        For each subscription row, fetches ``task_events`` newer than the
+        stored cursor with kind in the terminal set (``completed``,
+        ``blocked``, ``gave_up``, ``crashed``, ``timed_out``). Sends one
+        message per new event to ``(platform, chat_id, thread_id)``,
+        then advances the cursor. When a task reaches a terminal state
+        (``completed`` / ``archived``), the subscription is removed.
+
+        Runs in the gateway event loop; all SQLite work is pushed to a
+        thread via ``asyncio.to_thread`` so the loop never blocks on the
+        WAL lock. Failures in one tick don't stop subsequent ticks.
+        """
+        from gateway.config import Platform as _Platform
+        try:
+            from hermes_cli import kanban_db as _kb
+        except Exception:
+            logger.warning("kanban notifier: kanban_db not importable; notifier disabled")
+            return
+
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+        # Terminal event kinds trigger automatic unsubscription — the task
+        # is done, blocked, or in a retry-needed state that the human
+        # shouldn't keep pinging a stale chat for. Previously we only
+        # unsubbed when task.status in ('done', 'archived'), which left
+        # subscriptions on 'blocked' / 'gave_up' / 'crashed' / 'timed_out'
+        # tasks stranded forever.
+        TERMINAL_EVENT_KINDS = TERMINAL_KINDS
+        # Per-subscription send-failure counter. Adapter.send raising
+        # means the chat is dead (deleted, bot kicked, etc.) — after N
+        # consecutive send failures the sub is dropped so we don't spin
+        # against a dead chat every 5 seconds forever.
+        MAX_SEND_FAILURES = 3
+        sub_fail_counts: dict[tuple, int] = getattr(
+            self, "_kanban_sub_fail_counts", {}
+        )
+        self._kanban_sub_fail_counts = sub_fail_counts
+
+        # Initial delay so the gateway can finish wiring adapters.
+        await asyncio.sleep(5)
+
+        while self._running:
+            try:
+                def _collect():
+                    conn = _kb.connect()
+                    try:
+                        _kb.init_db()  # idempotent; handles first-run
+                    except Exception:
+                        pass
+                    try:
+                        subs = _kb.list_notify_subs(conn)
+                        deliveries: list[dict] = []
+                        for sub in subs:
+                            cursor, events = _kb.unseen_events_for_sub(
+                                conn,
+                                task_id=sub["task_id"],
+                                platform=sub["platform"],
+                                chat_id=sub["chat_id"],
+                                thread_id=sub.get("thread_id") or "",
+                                kinds=TERMINAL_KINDS,
+                            )
+                            if not events:
+                                continue
+                            task = _kb.get_task(conn, sub["task_id"])
+                            deliveries.append({
+                                "sub": sub,
+                                "cursor": cursor,
+                                "events": events,
+                                "task": task,
+                            })
+                        return deliveries
+                    finally:
+                        conn.close()
+
+                deliveries = await asyncio.to_thread(_collect)
+                for d in deliveries:
+                    sub = d["sub"]
+                    task = d["task"]
+                    platform_str = (sub["platform"] or "").lower()
+                    try:
+                        plat = _Platform(platform_str)
+                    except ValueError:
+                        # Unknown platform string; skip and advance cursor so
+                        # we don't replay forever.
+                        await asyncio.to_thread(
+                            self._kanban_advance, sub, d["cursor"],
+                        )
+                        continue
+                    adapter = self.adapters.get(plat)
+                    if adapter is None:
+                        continue  # platform not currently connected
+                    title = (task.title if task else sub["task_id"])[:120]
+                    for ev in d["events"]:
+                        kind = ev.kind
+                        # Identity prefix: attribute terminal pings to the
+                        # worker that did the work. Makes fleets (where one
+                        # chat subscribes to many tasks) legible at a glance.
+                        who = (task.assignee if task and task.assignee else None)
+                        tag = f"@{who} " if who else ""
+                        if kind == "completed":
+                            # Prefer the run's summary (the worker's
+                            # intentional human-facing handoff, carried
+                            # in the event payload), then fall back to
+                            # task.result for legacy rows written before
+                            # runs shipped.
+                            handoff = ""
+                            payload_summary = None
+                            if ev.payload and ev.payload.get("summary"):
+                                payload_summary = str(ev.payload["summary"])
+                            if payload_summary:
+                                h = payload_summary.strip().splitlines()[0][:200]
+                                handoff = f"\n{h}"
+                            elif task and task.result:
+                                r = task.result.strip().splitlines()[0][:160]
+                                handoff = f"\n{r}"
+                            msg = (
+                                f"✔ {tag}Kanban {sub['task_id']} done"
+                                f" — {title}{handoff}"
+                            )
+                        elif kind == "blocked":
+                            reason = ""
+                            if ev.payload and ev.payload.get("reason"):
+                                reason = f": {str(ev.payload['reason'])[:160]}"
+                            msg = f"⏸ {tag}Kanban {sub['task_id']} blocked{reason}"
+                        elif kind == "gave_up":
+                            err = ""
+                            if ev.payload and ev.payload.get("error"):
+                                err = f"\n{str(ev.payload['error'])[:200]}"
+                            msg = (
+                                f"✖ {tag}Kanban {sub['task_id']} gave up "
+                                f"after repeated spawn failures{err}"
+                            )
+                        elif kind == "crashed":
+                            msg = (
+                                f"✖ {tag}Kanban {sub['task_id']} worker crashed "
+                                f"(pid gone); dispatcher will retry"
+                            )
+                        elif kind == "timed_out":
+                            limit = 0
+                            if ev.payload and ev.payload.get("limit_seconds"):
+                                limit = int(ev.payload["limit_seconds"])
+                            msg = (
+                                f"⏱ {tag}Kanban {sub['task_id']} timed out "
+                                f"(max_runtime={limit}s); will retry"
+                            )
+                        else:
+                            continue
+                        metadata: dict[str, Any] = {}
+                        if sub.get("thread_id"):
+                            metadata["thread_id"] = sub["thread_id"]
+                        sub_key = (
+                            sub["task_id"], sub["platform"],
+                            sub["chat_id"], sub.get("thread_id") or "",
+                        )
+                        try:
+                            await adapter.send(
+                                sub["chat_id"], msg, metadata=metadata,
+                            )
+                            # Reset the failure counter on success.
+                            sub_fail_counts.pop(sub_key, None)
+                        except Exception as exc:
+                            fails = sub_fail_counts.get(sub_key, 0) + 1
+                            sub_fail_counts[sub_key] = fails
+                            logger.warning(
+                                "kanban notifier: send failed for %s on %s "
+                                "(attempt %d/%d): %s",
+                                sub["task_id"], platform_str, fails,
+                                MAX_SEND_FAILURES, exc,
+                            )
+                            if fails >= MAX_SEND_FAILURES:
+                                logger.warning(
+                                    "kanban notifier: dropping subscription "
+                                    "%s on %s after %d consecutive send failures",
+                                    sub["task_id"], platform_str, fails,
+                                )
+                                await asyncio.to_thread(self._kanban_unsub, sub)
+                                sub_fail_counts.pop(sub_key, None)
+                            # Don't advance cursor on send failure — retry next tick.
+                            break
+                    else:
+                        # All events delivered; advance cursor + maybe unsub.
+                        await asyncio.to_thread(
+                            self._kanban_advance, sub, d["cursor"],
+                        )
+                        # Unsubscribe when the LAST delivered event is a
+                        # terminal kind (the task hit a "no further updates"
+                        # state), not just on task.status in {done, archived}.
+                        # Covers blocked / gave_up / crashed / timed_out which
+                        # used to leak subs forever.
+                        last_kind = d["events"][-1].kind if d["events"] else None
+                        task_terminal = task and task.status in ("done", "archived")
+                        event_terminal = last_kind in TERMINAL_EVENT_KINDS
+                        if task_terminal or event_terminal:
+                            await asyncio.to_thread(
+                                self._kanban_unsub, sub,
+                            )
+            except Exception as exc:
+                logger.warning("kanban notifier tick failed: %s", exc)
+            # Sleep with cancellation checks.
+            for _ in range(int(max(1, interval))):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
+    def _kanban_advance(self, sub: dict, cursor: int) -> None:
+        """Sync helper: advance a subscription's cursor. Runs in to_thread."""
+        from hermes_cli import kanban_db as _kb
+        conn = _kb.connect()
+        try:
+            _kb.advance_notify_cursor(
+                conn,
+                task_id=sub["task_id"],
+                platform=sub["platform"],
+                chat_id=sub["chat_id"],
+                thread_id=sub.get("thread_id") or "",
+                new_cursor=cursor,
+            )
+        finally:
+            conn.close()
+
+    def _kanban_unsub(self, sub: dict) -> None:
+        from hermes_cli import kanban_db as _kb
+        conn = _kb.connect()
+        try:
+            _kb.remove_notify_sub(
+                conn,
+                task_id=sub["task_id"],
+                platform=sub["platform"],
+                chat_id=sub["chat_id"],
+                thread_id=sub.get("thread_id") or "",
+            )
+        finally:
+            conn.close()
+
+    async def _kanban_dispatcher_watcher(self) -> None:
+        """Embedded kanban dispatcher — one tick every `dispatch_interval_seconds`.
+
+        Gated by `kanban.dispatch_in_gateway` in config.yaml (default True).
+        When true, the gateway hosts the single dispatcher for this profile:
+        no separate `hermes kanban daemon` process needed. When false, the
+        loop exits immediately and an external daemon is expected.
+
+        Each tick calls :func:`kanban_db.dispatch_once` inside
+        ``asyncio.to_thread`` so the SQLite WAL lock never blocks the
+        event loop. Failures in one tick don't stop subsequent ticks —
+        same pattern as `_kanban_notifier_watcher`.
+
+        Shutdown: the loop checks ``self._running`` between ticks; gateway
+        stop() flips it to False and cancels pending tasks, and the
+        in-flight ``to_thread`` returns on its own after the current
+        ``dispatch_once`` call finishes (typically <1ms on an idle board).
+        """
+        # Read config once at boot. If the user flips the flag later, they
+        # restart the gateway; same pattern as every other background
+        # watcher here. Honours HERMES_KANBAN_DISPATCH_IN_GATEWAY env var
+        # as an escape hatch (false-y value disables without editing YAML).
+        try:
+            from hermes_cli.config import load_config as _load_config
+        except Exception:
+            logger.warning("kanban dispatcher: config loader unavailable; disabled")
+            return
+        env_override = os.environ.get("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
+        if env_override in ("0", "false", "no", "off"):
+            logger.info("kanban dispatcher: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env")
+            return
+
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning("kanban dispatcher: cannot load config (%s); disabled", exc)
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        if not kanban_cfg.get("dispatch_in_gateway", True):
+            logger.info(
+                "kanban dispatcher: disabled via config kanban.dispatch_in_gateway=false"
+            )
+            return
+
+        try:
+            from hermes_cli import kanban_db as _kb
+        except Exception:
+            logger.warning("kanban dispatcher: kanban_db not importable; dispatcher disabled")
+            return
+
+        interval = float(kanban_cfg.get("dispatch_interval_seconds", 60) or 60)
+        if interval < 1.0:
+            interval = 1.0  # sanity floor — tighter than this is a footgun
+
+        # Initial delay so the gateway finishes wiring adapters before the
+        # dispatcher spawns workers (those workers may hit gateway notify
+        # subscriptions etc.). Matches the notifier watcher's delay.
+        await asyncio.sleep(5)
+
+        # Health telemetry mirrored from `_cmd_daemon`: warn when ready
+        # queue is non-empty but spawns are 0 for N consecutive ticks —
+        # usually means broken PATH, missing venv, or credential loss.
+        HEALTH_WINDOW = 6
+        bad_ticks = 0
+        last_warn_at = 0
+
+        def _tick_once() -> "Optional[object]":
+            """Run one dispatch_once; return result or None on error.
+
+            Runs in a worker thread via `asyncio.to_thread`."""
+            conn = None
+            try:
+                conn = _kb.connect()
+                try:
+                    _kb.init_db()  # idempotent, handles first-run
+                except Exception:
+                    pass
+                return _kb.dispatch_once(conn)
+            except Exception:
+                logger.exception("kanban dispatcher: tick failed")
+                return None
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        def _ready_nonempty() -> bool:
+            """Cheap probe: is there at least one ready+assigned+unclaimed task?"""
+            conn = None
+            try:
+                conn = _kb.connect()
+                row = conn.execute(
+                    "SELECT 1 FROM tasks "
+                    "WHERE status = 'ready' AND assignee IS NOT NULL "
+                    "    AND claim_lock IS NULL LIMIT 1"
+                ).fetchone()
+                return row is not None
+            except Exception:
+                return False
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        logger.info(
+            "kanban dispatcher: embedded in gateway (interval=%.1fs)", interval
+        )
+        while self._running:
+            try:
+                res = await asyncio.to_thread(_tick_once)
+                if res is not None and getattr(res, "spawned", None):
+                    # Quiet by default — only log when something actually
+                    # happened, so an idle gateway stays silent.
+                    logger.info(
+                        "kanban dispatcher: tick spawned=%d reclaimed=%d "
+                        "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
+                        len(res.spawned),
+                        res.reclaimed,
+                        len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
+                        len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
+                        res.promoted,
+                        len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
+                    )
+                # Health telemetry
+                ready_pending = await asyncio.to_thread(_ready_nonempty)
+                spawned_any = bool(res and getattr(res, "spawned", None))
+                if ready_pending and not spawned_any:
+                    bad_ticks += 1
+                else:
+                    bad_ticks = 0
+                if bad_ticks >= HEALTH_WINDOW:
+                    now = int(time.time())
+                    if now - last_warn_at >= 300:
+                        logger.warning(
+                            "kanban dispatcher stuck: ready queue non-empty for "
+                            "%d consecutive ticks but 0 workers spawned. Check "
+                            "profile health (venv, PATH, credentials) and "
+                            "`hermes kanban list --status ready`.",
+                            bad_ticks,
+                        )
+                        last_warn_at = now
+            except asyncio.CancelledError:
+                logger.debug("kanban dispatcher: cancelled")
+                raise
+            except Exception:
+                logger.exception("kanban dispatcher: unexpected watcher error")
+
+            # Sleep in 1s slices so shutdown is snappy — otherwise a stop()
+            # waits up to `interval` seconds for the current sleep to finish.
+            slept = 0.0
+            while slept < interval and self._running:
+                await asyncio.sleep(min(1.0, interval - slept))
+                slept += 1.0
 
     async def _platform_reconnect_watcher(self) -> None:
         """Background task that periodically retries connecting failed platforms.
@@ -3512,6 +3961,11 @@ class GatewayRunner:
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
         }
+        # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist (#4466).
+        platform_allow_bots_map = {
+            Platform.DISCORD: "DISCORD_ALLOW_BOTS",
+            Platform.FEISHU: "FEISHU_ALLOW_BOTS",
+        }
 
         # Plugin platforms: check the registry for auth env var names
         if source.platform not in platform_env_map:
@@ -3531,14 +3985,9 @@ class GatewayRunner:
         if platform_allow_all_var and os.getenv(platform_allow_all_var, "").lower() in ("true", "1", "yes"):
             return True
 
-        # Discord bot senders that passed the DISCORD_ALLOW_BOTS platform
-        # filter are already authorized at the platform level — skip the
-        # user allowlist. Without this, bot messages allowed by
-        # DISCORD_ALLOW_BOTS=mentions/all would be rejected here with
-        # "Unauthorized user" (fixes #4466).
-        if source.platform == Platform.DISCORD and getattr(source, "is_bot", False):
-            allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
-            if allow_bots in ("mentions", "all"):
+        if getattr(source, "is_bot", False):
+            allow_bots_var = platform_allow_bots_map.get(source.platform)
+            if allow_bots_var and os.getenv(allow_bots_var, "none").lower().strip() in ("mentions", "all"):
                 return True
 
         # Discord role-based access (DISCORD_ALLOWED_ROLES): the adapter's
@@ -3948,7 +4397,7 @@ class GatewayRunner:
         # wall-clock age alone isn't sufficient.  Evict only when the agent
         # has been *idle* beyond the inactivity threshold (or when the agent
         # object has no activity tracker and wall-clock age is extreme).
-        _raw_stale_timeout = float(os.getenv("HERMES_AGENT_TIMEOUT", 1800))
+        _raw_stale_timeout = _float_env("HERMES_AGENT_TIMEOUT", 1800)
         _stale_ts = self._running_agents_ts.get(_quick_key, 0)
         if _quick_key in self._running_agents and _stale_ts:
             _stale_age = time.time() - _stale_ts
@@ -4136,6 +4585,14 @@ class GatewayRunner:
             # name, so this branch handles both commands.
             if _cmd_def_inner and _cmd_def_inner.name == "background":
                 return await self._handle_background_command(event)
+
+            # /kanban must bypass the guard. It writes to a profile-agnostic
+            # DB (kanban.db), not to the running agent's state. In fact
+            # /kanban unblock is often the only way to free a worker that
+            # has blocked waiting for a peer — letting that be dispatched
+            # mid-run is the whole point of the board.
+            if _cmd_def_inner and _cmd_def_inner.name == "kanban":
+                return await self._handle_kanban_command(event)
 
             # Session-level toggles that are safe to run mid-agent —
             # /yolo can unblock a pending approval prompt, /verbose cycles
@@ -4384,6 +4841,9 @@ class GatewayRunner:
         if canonical == "personality":
             return await self._handle_personality_command(event)
 
+        if canonical == "kanban":
+            return await self._handle_kanban_command(event)
+
         if canonical == "retry":
             return await self._handle_retry_command(event)
         
@@ -4623,22 +5083,29 @@ class GatewayRunner:
         preprocessing pipeline so sender attribution, image enrichment, STT,
         document notes, reply context, and @ references all behave the same.
 
-        Side effect: writes ``self._pending_native_image_paths`` to a list of
-        local image paths when the active model supports native vision AND
-        the user has images attached. The caller consumes and clears this
-        attribute at the ``run_conversation`` site to build a multimodal user
-        turn. When the list is empty, the ``_enrich_message_with_vision``
-        text path has already run and images are represented in-text.
+        Side effect: buffers per-session native image paths when the active
+        model supports native vision AND the user has images attached. The
+        caller consumes and clears that session-scoped buffer at the
+        ``run_conversation`` site to build a multimodal user turn. When the
+        list is empty, the ``_enrich_message_with_vision`` text path has
+        already run and images are represented in-text.
         """
         history = history or []
         message_text = event.text or ""
-        # Reset per-call buffer; set only when native routing is chosen.
-        self._pending_native_image_paths = []
+        _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
+        _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
+        # Use the same helper every other call site uses so the write key here
+        # matches the consume key at the run_conversation site — even if the
+        # session store overrides build_session_key's default behavior.
+        session_key = self._session_key_for_source(source)
+        # Reset only this session's per-call buffer; other sessions may be
+        # concurrently preparing multimodal turns on the same runner.
+        self._consume_pending_native_image_paths(session_key)
 
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            group_sessions_per_user=_group_sessions_per_user,
+            thread_sessions_per_user=_thread_sessions_per_user,
         )
         if _is_shared_multi_user and source.user_name:
             message_text = f"[{source.user_name}] {message_text}"
@@ -4659,7 +5126,11 @@ class GatewayRunner:
                 _img_mode = self._decide_image_input_mode()
                 if _img_mode == "native":
                     # Defer attachment to the run_conversation call site.
-                    self._pending_native_image_paths = list(image_paths)
+                    pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
+                    if pending_native is None:
+                        pending_native = {}
+                        self._pending_native_image_paths_by_session = pending_native
+                    pending_native[session_key] = list(image_paths)
                     logger.info(
                         "Image routing: native (model supports vision). %d image(s) will be attached inline.",
                         len(image_paths),
@@ -4761,10 +5232,21 @@ class GatewayRunner:
 
                 _msg_cwd = os.environ.get("TERMINAL_CWD", os.path.expanduser("~"))
                 _msg_runtime = _resolve_runtime_agent_kwargs()
+                _msg_config_ctx = None
+                try:
+                    _msg_cfg = _load_gateway_config()
+                    _msg_model_cfg = _msg_cfg.get("model", {})
+                    if isinstance(_msg_model_cfg, dict):
+                        _msg_raw_ctx = _msg_model_cfg.get("context_length")
+                        if _msg_raw_ctx is not None:
+                            _msg_config_ctx = int(_msg_raw_ctx)
+                except Exception:
+                    pass
                 _msg_ctx_len = get_model_context_length(
                     self._model,
                     base_url=self._base_url or _msg_runtime.get("base_url") or "",
                     api_key=_msg_runtime.get("api_key") or "",
+                    config_context_length=_msg_config_ctx,
                 )
                 _ctx_result = await preprocess_context_references_async(
                     message_text,
@@ -4786,6 +5268,12 @@ class GatewayRunner:
                 logger.debug("@ context reference expansion failed: %s", exc)
 
         return message_text
+
+    def _consume_pending_native_image_paths(self, session_key: str) -> List[str]:
+        pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
+        if not pending_native:
+            return []
+        return list(pending_native.pop(session_key, []) or [])
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
@@ -4815,7 +5303,12 @@ class GatewayRunner:
         _is_new_session = (
             session_entry.created_at == session_entry.updated_at
             or getattr(session_entry, "was_auto_reset", False)
+            or getattr(session_entry, "is_fresh_reset", False)
         )
+        # Consume the is_fresh_reset flag immediately so it doesn't leak
+        # onto subsequent messages in the same session (issue #6508).
+        if getattr(session_entry, "is_fresh_reset", False):
+            session_entry.is_fresh_reset = False
         if _is_new_session:
             await self.hooks.emit("session:start", {
                 "platform": source.platform.value if source.platform else "",
@@ -5542,15 +6035,43 @@ class GatewayRunner:
             # intermediate reasoning) so sessions can be resumed with full context
             # and transcripts are useful for debugging and training data.
             #
-            # IMPORTANT: When the agent failed (e.g. context-overflow 400,
-            # compression exhausted), do NOT persist the user's message.
-            # Persisting it would make the session even larger, causing the
-            # same failure on the next attempt — an infinite loop. (#1630, #9893)
+            # IMPORTANT: For context-overflow failures (compression exhausted,
+            # generic 400 on large sessions) we must NOT persist the user's
+            # message — doing so would grow the session further and cause the
+            # same failure on the next attempt, an infinite loop. (#1630, #9893)
+            #
+            # Transient failures (429, timeout, connection error, provider 5xx)
+            # are different: the session is not oversized, and silently dropping
+            # the user message causes severe context loss on retry — the agent
+            # forgets what was just asked.  Persist the user turn so the
+            # conversation is preserved. (#7100)
             agent_failed_early = bool(agent_result.get("failed"))
-            if agent_failed_early:
+            _err_str_for_classify = str(agent_result.get("error", "")).lower()
+            # Use specific multi-word phrases (not bare "exceed" or "token")
+            # to avoid false positives on transient errors like "rate limit
+            # exceeded" or "invalid auth token". Matches run_agent.py's
+            # own context-length classifier.
+            is_context_overflow_failure = agent_failed_early and (
+                bool(agent_result.get("compression_exhausted"))
+                or any(p in _err_str_for_classify for p in (
+                    "context length", "context size", "context window",
+                    "maximum context", "token limit", "too many tokens",
+                    "reduce the length", "exceeds the limit",
+                    "request entity too large", "prompt is too long",
+                    "payload too large", "input is too long",
+                ))
+                or ("400" in _err_str_for_classify and len(history) > 50)
+            )
+            if is_context_overflow_failure:
                 logger.info(
-                    "Skipping transcript persistence for failed request in "
-                    "session %s to prevent session growth loop.",
+                    "Skipping transcript persistence for context-overflow "
+                    "failure in session %s to prevent session growth loop.",
+                    session_entry.session_id,
+                )
+            elif agent_failed_early:
+                logger.info(
+                    "Transient agent failure in session %s — persisting user "
+                    "message so conversation context is preserved on retry.",
                     session_entry.session_id,
                 )
 
@@ -5580,7 +6101,7 @@ class GatewayRunner:
             # If this is a fresh session (no history), write the full tool
             # definitions as the first entry so the transcript is self-describing
             # -- the same list of dicts sent as tools=[...] in the API request.
-            if agent_failed_early:
+            if is_context_overflow_failure:
                 pass  # Skip all transcript writes — don't grow a broken session
             elif not history:
                 tool_defs = agent_result.get("tools", [])
@@ -5599,10 +6120,21 @@ class GatewayRunner:
             # Use the filtered history length (history_offset) that was actually
             # passed to the agent, not len(history) which includes session_meta
             # entries that were stripped before the agent saw them.
-            if not agent_failed_early:
+            if is_context_overflow_failure:
+                pass  # handled above — skip all transcript writes
+            elif agent_failed_early:
+                # Transient failure (429/timeout/5xx): persist only the user
+                # message so the next message can load a transcript that
+                # reflects what was said.  Skip the assistant error text since
+                # it's a gateway-generated hint, not model output. (#7100)
+                self.session_store.append_to_transcript(
+                    session_entry.session_id,
+                    {"role": "user", "content": message_text, "timestamp": ts},
+                )
+            else:
                 history_len = agent_result.get("history_offset", len(history))
                 new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
-                
+
                 # If no new messages found (edge case), fall back to simple user/assistant
                 if not new_messages:
                     self.session_store.append_to_transcript(
@@ -5950,6 +6482,84 @@ class GatewayRunner:
 
         return "\n".join(lines)
 
+
+    async def _handle_kanban_command(self, event: MessageEvent) -> str:
+        """Handle /kanban — delegate to the shared kanban CLI.
+
+        Run the potentially-blocking DB work in a thread pool so the
+        gateway event loop stays responsive.  Read operations (list,
+        show, context, tail) are permitted while an agent is running;
+        mutations are allowed too because the board is profile-agnostic
+        and does not touch the running agent's state.
+
+        For ``/kanban create`` invocations we also auto-subscribe the
+        originating gateway source (platform + chat + thread) to the new
+        task's terminal events, so the user hears back when the worker
+        completes / blocks / auto-blocks / crashes without having to poll.
+        """
+        import asyncio
+        import re
+        from hermes_cli.kanban import run_slash
+
+        text = (event.text or "").strip()
+        # Strip the leading "/kanban" (with or without slash), leaving args.
+        if text.startswith("/"):
+            text = text.lstrip("/")
+        if text.startswith("kanban"):
+            text = text[len("kanban"):].lstrip()
+
+        is_create = text.split(None, 1)[:1] == ["create"]
+
+        try:
+            output = await asyncio.to_thread(run_slash, text)
+        except Exception as exc:  # pragma: no cover - defensive
+            return f"⚠ kanban error: {exc}"
+
+        # Auto-subscribe on create. Parse the task id from the CLI's standard
+        # success line ("Created t_abcd  (ready, assignee=...)"). If the user
+        # passed --json we don't subscribe; they're clearly scripting and
+        # can call /kanban notify-subscribe explicitly.
+        if is_create and output:
+            m = re.search(r"Created\s+(t_[0-9a-f]+)\b", output)
+            if m:
+                task_id = m.group(1)
+                try:
+                    source = event.source
+                    platform = getattr(source, "platform", None)
+                    platform_str = (
+                        platform.value if hasattr(platform, "value") else str(platform or "")
+                    ).lower()
+                    chat_id = str(getattr(source, "chat_id", "") or "")
+                    thread_id = str(getattr(source, "thread_id", "") or "")
+                    user_id = str(getattr(source, "user_id", "") or "") or None
+                    if platform_str and chat_id:
+                        def _sub():
+                            from hermes_cli import kanban_db as _kb
+                            conn = _kb.connect()
+                            try:
+                                _kb.add_notify_sub(
+                                    conn, task_id=task_id,
+                                    platform=platform_str, chat_id=chat_id,
+                                    thread_id=thread_id or None,
+                                    user_id=user_id,
+                                )
+                            finally:
+                                conn.close()
+                        await asyncio.to_thread(_sub)
+                        output = (
+                            output.rstrip()
+                            + f"\n(subscribed — you'll be notified when {task_id} "
+                              f"completes or blocks)"
+                        )
+                except Exception as exc:
+                    logger.warning("kanban create auto-subscribe failed: %s", exc)
+
+        # Gateway messages have practical length caps; truncate long
+        # listings to keep the UX reasonable.
+        if len(output) > 3800:
+            output = output[:3800] + "\n… (truncated; use `hermes kanban …` in your terminal for full output)"
+        return output or "(no output)"
+
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         source = event.source
@@ -5966,11 +6576,30 @@ class GatewayRunner:
         queue_depth = self._queue_depth(session_key, adapter=adapter)
 
         title = None
+        # Pull token totals from the SQLite session DB rather than the
+        # in-memory SessionStore.  The agent's per-turn token deltas are
+        # persisted into sessions_db (run_agent.py), not into SessionEntry,
+        # so session_entry.total_tokens is always 0.  SessionDB is the
+        # single source of truth; reading it here keeps /status accurate
+        # without duplicating token writes into two stores.
+        db_total_tokens = 0
         if self._session_db:
             try:
                 title = self._session_db.get_session_title(session_entry.session_id)
             except Exception:
                 title = None
+            try:
+                row = self._session_db.get_session(session_entry.session_id)
+                if row:
+                    db_total_tokens = (
+                        (row.get("input_tokens") or 0)
+                        + (row.get("output_tokens") or 0)
+                        + (row.get("cache_read_tokens") or 0)
+                        + (row.get("cache_write_tokens") or 0)
+                        + (row.get("reasoning_tokens") or 0)
+                    )
+            except Exception:
+                db_total_tokens = 0
 
         lines = [
             "📊 **Hermes Gateway Status**",
@@ -5982,7 +6611,7 @@ class GatewayRunner:
         lines.extend([
             f"**Created:** {session_entry.created_at.strftime('%Y-%m-%d %H:%M')}",
             f"**Last Activity:** {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}",
-            f"**Tokens:** {session_entry.total_tokens:,}",
+            f"**Tokens:** {db_total_tokens:,}",
             f"**Agent Running:** {'Yes ⚡' if is_running else 'No'}",
         ])
         if queue_depth:
@@ -6160,8 +6789,10 @@ class GatewayRunner:
             }
             if event.source.thread_id:
                 notify_data["thread_id"] = event.source.thread_id
-            (_hermes_home / ".restart_notify.json").write_text(
-                json.dumps(notify_data)
+            atomic_json_write(
+                _hermes_home / ".restart_notify.json",
+                notify_data,
+                indent=None,
             )
         except Exception as e:
             logger.debug("Failed to write restart notify file: %s", e)
@@ -6178,8 +6809,10 @@ class GatewayRunner:
             }
             if event.platform_update_id is not None:
                 dedup_data["update_id"] = event.platform_update_id
-            (_hermes_home / ".restart_last_processed.json").write_text(
-                json.dumps(dedup_data)
+            atomic_json_write(
+                _hermes_home / ".restart_last_processed.json",
+                dedup_data,
+                indent=None,
             )
         except Exception as e:
             logger.debug("Failed to write restart dedup marker: %s", e)
@@ -6477,6 +7110,16 @@ class GatewayRunner:
                         lines.append(f"Provider: {plabel}")
                         mi = result.model_info
                         from hermes_cli.model_switch import resolve_display_context_length
+                        _sw_config_ctx = None
+                        try:
+                            _sw_cfg = _load_gateway_config()
+                            _sw_model_cfg = _sw_cfg.get("model", {})
+                            if isinstance(_sw_model_cfg, dict):
+                                _sw_raw = _sw_model_cfg.get("context_length")
+                                if _sw_raw is not None:
+                                    _sw_config_ctx = int(_sw_raw)
+                        except Exception:
+                            pass
                         ctx = resolve_display_context_length(
                             result.new_model,
                             result.target_provider,
@@ -6484,6 +7127,7 @@ class GatewayRunner:
                             api_key=result.api_key or current_api_key or "",
                             model_info=mi,
                             custom_providers=custom_provs,
+                            config_context_length=_sw_config_ctx,
                         )
                         if ctx:
                             lines.append(f"Context: {ctx:,} tokens")
@@ -6626,6 +7270,16 @@ class GatewayRunner:
         # Copilot, and Nous-enforced caps win over the raw models.dev entry.
         mi = result.model_info
         from hermes_cli.model_switch import resolve_display_context_length
+        _sw2_config_ctx = None
+        try:
+            _sw2_cfg = _load_gateway_config()
+            _sw2_model_cfg = _sw2_cfg.get("model", {})
+            if isinstance(_sw2_model_cfg, dict):
+                _sw2_raw = _sw2_model_cfg.get("context_length")
+                if _sw2_raw is not None:
+                    _sw2_config_ctx = int(_sw2_raw)
+        except Exception:
+            pass
         ctx = resolve_display_context_length(
             result.new_model,
             result.target_provider,
@@ -6633,6 +7287,7 @@ class GatewayRunner:
             api_key=result.api_key or current_api_key or "",
             model_info=mi,
             custom_providers=custom_provs,
+            config_context_length=_sw2_config_ctx,
         )
         if ctx:
             lines.append(f"Context: {ctx:,} tokens")
@@ -7171,6 +7826,7 @@ class GatewayRunner:
         that the normal _process_message_background path would have caught.
         """
         from pathlib import Path
+        from urllib.parse import quote as _quote
 
         try:
             media_files, _ = adapter.extract_media(response)
@@ -7179,14 +7835,44 @@ class GatewayRunner:
 
             _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
 
-            _AUDIO_EXTS = {'.ogg', '.opus', '.mp3', '.wav', '.m4a'}
+            from gateway.platforms.base import should_send_media_as_audio
+
             _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
             _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 
+            # Partition out images so they can be sent as a single batch
+            # (e.g. Signal's multi-attachment RPC)
+            image_paths: list = []
+            non_image_media: list = []
             for media_path, is_voice in media_files:
+                ext = Path(media_path).suffix.lower()
+                if ext in _IMAGE_EXTS and not is_voice:
+                    image_paths.append(media_path)
+                else:
+                    non_image_media.append((media_path, is_voice))
+
+            non_image_local: list = []
+            for file_path in local_files:
+                if Path(file_path).suffix.lower() in _IMAGE_EXTS:
+                    image_paths.append(file_path)
+                else:
+                    non_image_local.append(file_path)
+
+            if image_paths:
+                try:
+                    images = [(f"file://{_quote(p)}", "") for p in image_paths]
+                    await adapter.send_multiple_images(
+                        chat_id=event.source.chat_id,
+                        images=images,
+                        metadata=_thread_meta,
+                    )
+                except Exception as e:
+                    logger.warning("[%s] Post-stream image batch delivery failed: %s", adapter.name, e)
+
+            for media_path, is_voice in non_image_media:
                 try:
                     ext = Path(media_path).suffix.lower()
-                    if ext in _AUDIO_EXTS:
+                    if should_send_media_as_audio(event.source.platform, ext, is_voice=is_voice):
                         await adapter.send_voice(
                             chat_id=event.source.chat_id,
                             audio_path=media_path,
@@ -7198,12 +7884,6 @@ class GatewayRunner:
                             video_path=media_path,
                             metadata=_thread_meta,
                         )
-                    elif ext in _IMAGE_EXTS:
-                        await adapter.send_image_file(
-                            chat_id=event.source.chat_id,
-                            image_path=media_path,
-                            metadata=_thread_meta,
-                        )
                     else:
                         await adapter.send_document(
                             chat_id=event.source.chat_id,
@@ -7213,13 +7893,13 @@ class GatewayRunner:
                 except Exception as e:
                     logger.warning("[%s] Post-stream media delivery failed: %s", adapter.name, e)
 
-            for file_path in local_files:
+            for file_path in non_image_local:
                 try:
                     ext = Path(file_path).suffix.lower()
-                    if ext in _IMAGE_EXTS:
-                        await adapter.send_image_file(
+                    if ext in _VIDEO_EXTS:
+                        await adapter.send_video(
                             chat_id=event.source.chat_id,
-                            image_path=file_path,
+                            video_path=file_path,
                             metadata=_thread_meta,
                         )
                     else:
@@ -7353,6 +8033,8 @@ class GatewayRunner:
 
             from hermes_cli.tools_config import _get_platform_tools
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            agent_cfg = user_config.get("agent") or {}
+            disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
             pr = self._provider_routing
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
@@ -7369,6 +8051,7 @@ class GatewayRunner:
                     quiet_mode=True,
                     verbose_logging=False,
                     enabled_toolsets=enabled_toolsets,
+                    disabled_toolsets=disabled_toolsets,
                     reasoning_config=reasoning_config,
                     service_tier=self._service_tier,
                     request_overrides=turn_route.get("request_overrides"),
@@ -7671,7 +8354,10 @@ class GatewayRunner:
         # --- check config gate ------------------------------------------------
         try:
             user_config = _load_gateway_config()
-            gate_enabled = cfg_get(user_config, "display", "tool_progress_command", default=False)
+            gate_enabled = is_truthy_value(
+                cfg_get(user_config, "display", "tool_progress_command"),
+                default=False,
+            )
         except Exception:
             gate_enabled = False
 
@@ -8114,11 +8800,13 @@ class GatewayRunner:
                     tool_name=msg.get("tool_name") or msg.get("name"),
                     tool_calls=msg.get("tool_calls"),
                     tool_call_id=msg.get("tool_call_id"),
+                    finish_reason=msg.get("finish_reason"),
                     reasoning=msg.get("reasoning"),
                     reasoning_content=msg.get("reasoning_content"),
                     gemini_content=msg.get("gemini_content"),
                     reasoning_details=msg.get("reasoning_details"),
                     codex_reasoning_items=msg.get("codex_reasoning_items"),
+                    codex_message_items=msg.get("codex_message_items"),
                 )
             except Exception:
                 pass  # Best-effort copy
@@ -8868,6 +9556,8 @@ class GatewayRunner:
             "session_key": session_key,
             "timestamp": datetime.now().isoformat(),
         }
+        if event.source.thread_id:
+            pending["thread_id"] = event.source.thread_id
         _tmp_pending = pending_path.with_suffix(".tmp")
         _tmp_pending.write_text(json.dumps(pending))
         _tmp_pending.replace(pending_path)
@@ -8953,6 +9643,7 @@ class GatewayRunner:
         adapter = None
         chat_id = None
         session_key = None
+        metadata = None
         for path in (claimed_path, pending_path):
             if path.exists():
                 try:
@@ -8960,6 +9651,8 @@ class GatewayRunner:
                     platform_str = pending.get("platform")
                     chat_id = pending.get("chat_id")
                     session_key = pending.get("session_key")
+                    thread_id = pending.get("thread_id")
+                    metadata = {"thread_id": thread_id} if thread_id else None
                     if platform_str and chat_id:
                         platform = Platform(platform_str)
                         adapter = self.adapters.get(platform)
@@ -9007,7 +9700,7 @@ class GatewayRunner:
             chunks = [clean[i:i + max_chunk] for i in range(0, len(clean), max_chunk)]
             for chunk in chunks:
                 try:
-                    await adapter.send(chat_id, f"```\n{chunk}\n```")
+                    await adapter.send(chat_id, f"```\n{chunk}\n```", metadata=metadata)
                 except Exception as e:
                     logger.debug("Update stream send failed: %s", e)
 
@@ -9030,9 +9723,13 @@ class GatewayRunner:
                     exit_code_raw = exit_code_path.read_text().strip() or "1"
                     exit_code = int(exit_code_raw)
                     if exit_code == 0:
-                        await adapter.send(chat_id, "✅ Hermes update finished.")
+                        await adapter.send(chat_id, "✅ Hermes update finished.", metadata=metadata)
                     else:
-                        await adapter.send(chat_id, "❌ Hermes update failed (exit code {}).".format(exit_code))
+                        await adapter.send(
+                            chat_id,
+                            "❌ Hermes update failed (exit code {}).".format(exit_code),
+                            metadata=metadata,
+                        )
                     logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
                 except Exception as e:
                     logger.warning("Update final notification failed: %s", e)
@@ -9082,6 +9779,7 @@ class GatewayRunner:
                                     prompt=prompt_text,
                                     default=default,
                                     session_key=session_key,
+                                    metadata=metadata,
                                 )
                                 sent_buttons = True
                             except Exception as btn_err:
@@ -9093,7 +9791,8 @@ class GatewayRunner:
                                 f"⚕ **Update needs your input:**\n\n"
                                 f"{prompt_text}{default_hint}\n\n"
                                 f"Reply `/approve` (yes) or `/deny` (no), "
-                                f"or type your answer directly."
+                                f"or type your answer directly.",
+                                metadata=metadata,
                             )
                         self._update_prompt_pending[session_key] = True
                         # Remove the prompt file so it isn't re-read on the
@@ -9113,7 +9812,11 @@ class GatewayRunner:
             exit_code_path.write_text("124")
             await _flush_buffer()
             try:
-                await adapter.send(chat_id, "❌ Hermes update timed out after 30 minutes.")
+                await adapter.send(
+                    chat_id,
+                    "❌ Hermes update timed out after 30 minutes.",
+                    metadata=metadata,
+                )
             except Exception:
                 pass
             for p in (pending_path, claimed_path, output_path,
@@ -9155,6 +9858,7 @@ class GatewayRunner:
             pending = json.loads(claimed_path.read_text())
             platform_str = pending.get("platform")
             chat_id = pending.get("chat_id")
+            thread_id = pending.get("thread_id")
 
             if not exit_code_path.exists():
                 logger.info("Update notification deferred: update still running")
@@ -9176,6 +9880,7 @@ class GatewayRunner:
             adapter = self.adapters.get(platform)
 
             if adapter and chat_id:
+                metadata = {"thread_id": thread_id} if thread_id else None
                 # Strip ANSI escape codes for clean display
                 output = re.sub(r'\x1b\[[0-9;]*m', '', output).strip()
                 if output:
@@ -9190,7 +9895,7 @@ class GatewayRunner:
                         msg = "✅ Hermes update finished successfully."
                     else:
                         msg = "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
-                await adapter.send(chat_id, msg)
+                await adapter.send(chat_id, msg, metadata=metadata)
                 logger.info(
                     "Sent post-update notification to %s:%s (exit=%s)",
                     platform_str,
@@ -9730,6 +10435,7 @@ class GatewayRunner:
         ("compression", "threshold"),
         ("compression", "target_ratio"),
         ("compression", "protect_last_n"),
+        ("agent", "disabled_toolsets"),
     )
 
     @classmethod
@@ -10513,6 +11219,8 @@ class GatewayRunner:
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        agent_cfg_local = user_config.get("agent") or {}
+        disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
@@ -10533,10 +11241,26 @@ class GatewayRunner:
 
         # Tool progress mode — resolved per-platform with env var fallback
         _resolved_tp = resolve_display_setting(user_config, platform_key, "tool_progress")
+        _env_tp = os.getenv("HERMES_TOOL_PROGRESS_MODE")
+        _display_cfg = display_config if isinstance(display_config, dict) else {}
+        _platforms_cfg = _display_cfg.get("platforms") or {}
+        _platform_cfg = _platforms_cfg.get(platform_key) or {}
+        _legacy_tp_overrides = _display_cfg.get("tool_progress_overrides") or {}
+        _tool_progress_configured = (
+            "tool_progress" in _display_cfg
+            or (
+                isinstance(_platform_cfg, dict)
+                and "tool_progress" in _platform_cfg
+            )
+            or (
+                isinstance(_legacy_tp_overrides, dict)
+                and platform_key in _legacy_tp_overrides
+            )
+        )
         progress_mode = (
-            _resolved_tp
-            or os.getenv("HERMES_TOOL_PROGRESS_MODE")
-            or "all"
+            _env_tp
+            if _env_tp and not _tool_progress_configured
+            else (_resolved_tp or _env_tp or "all")
         )
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
@@ -10585,7 +11309,10 @@ class GatewayRunner:
                             tool_progress_hint_gateway,
                         )
                         _cfg = _load_gateway_config()
-                        gate_on = bool(cfg_get(_cfg, "display", "tool_progress_command", default=False))
+                        gate_on = is_truthy_value(
+                            cfg_get(_cfg, "display", "tool_progress_command"),
+                            default=False,
+                        )
                         if gate_on and not is_seen(_cfg, TOOL_PROGRESS_FLAG):
                             long_tool_hint_fired[0] = True
                             progress_queue.put(tool_progress_hint_gateway())
@@ -11125,6 +11852,7 @@ class GatewayRunner:
                     quiet_mode=True,
                     verbose_logging=False,
                     enabled_toolsets=enabled_toolsets,
+                    disabled_toolsets=disabled_toolsets,
                     ephemeral_system_prompt=combined_ephemeral or None,
                     prefill_messages=self._prefill_messages or None,
                     reasoning_config=reasoning_config,
@@ -11465,8 +12193,7 @@ class GatewayRunner:
                 # attachment, wrap the user turn as an OpenAI-style multimodal
                 # content list. Consume-and-clear so subsequent turns on the same
                 # runner instance don't re-attach stale images.
-                _native_imgs = list(getattr(self, "_pending_native_image_paths", []) or [])
-                self._pending_native_image_paths = []
+                _native_imgs = self._consume_pending_native_image_paths(session_key)
                 if _native_imgs:
                     try:
                         from agent.image_routing import build_native_content_parts
@@ -11742,7 +12469,7 @@ class GatewayRunner:
         # Config: agent.gateway_notify_interval in config.yaml, or
         # HERMES_AGENT_NOTIFY_INTERVAL env var.  Default 180s (3 min).
         # 0 = disable notifications.
-        _NOTIFY_INTERVAL_RAW = float(os.getenv("HERMES_AGENT_NOTIFY_INTERVAL", 180))
+        _NOTIFY_INTERVAL_RAW = _float_env("HERMES_AGENT_NOTIFY_INTERVAL", 180)
         _NOTIFY_INTERVAL = _NOTIFY_INTERVAL_RAW if _NOTIFY_INTERVAL_RAW > 0 else None
         _notify_start = time.time()
 
@@ -11790,9 +12517,9 @@ class GatewayRunner:
             # Config: agent.gateway_timeout in config.yaml, or
             # HERMES_AGENT_TIMEOUT env var (env var takes precedence).
             # Default 1800s (30 min inactivity).  0 = unlimited.
-            _agent_timeout_raw = float(os.getenv("HERMES_AGENT_TIMEOUT", 1800))
+            _agent_timeout_raw = _float_env("HERMES_AGENT_TIMEOUT", 1800)
             _agent_timeout = _agent_timeout_raw if _agent_timeout_raw > 0 else None
-            _agent_warning_raw = float(os.getenv("HERMES_AGENT_TIMEOUT_WARNING", 900))
+            _agent_warning_raw = _float_env("HERMES_AGENT_TIMEOUT_WARNING", 900)
             _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
             _warning_fired = False
             _executor_task = asyncio.ensure_future(
@@ -12691,7 +13418,7 @@ def main():
     if args.config:
         import yaml
         with open(args.config, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = yaml.safe_load(f) or {}
             config = GatewayConfig.from_dict(data)
     
     # Run the gateway - exit with code 1 if no platforms connected,
