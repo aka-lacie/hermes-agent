@@ -400,7 +400,12 @@ DEFAULT_CONFIG = {
         # The gateway stops accepting new work, waits for running agents
         # to finish, then interrupts any remaining runs after the timeout.
         # 0 = no drain, interrupt immediately.
-        "restart_drain_timeout": 60,
+        #
+        # 180s is calibrated for realistic in-flight agent turns: a typical
+        # coding conversation mid-reasoning runs 60–150s per call, so a 60s
+        # budget routinely interrupted legitimate work on /restart. Raise
+        # further in config.yaml if you run very-long-reasoning models.
+        "restart_drain_timeout": 180,
         # Max app-level retry attempts for API errors (connection drops,
         # provider timeouts, 5xx, etc.) before the agent surfaces the
         # failure.  The OpenAI SDK already does its own low-level retries
@@ -644,6 +649,18 @@ DEFAULT_CONFIG = {
         "cache_ttl": "5m",
     },
 
+    # OpenRouter-specific settings.
+    # response_cache: enable OpenRouter response caching (X-OpenRouter-Cache header).
+    #   When enabled, identical requests return cached responses for free (zero billing).
+    #   This is separate from Anthropic prompt caching and works alongside it.
+    #   See: https://openrouter.ai/docs/guides/features/response-caching
+    # response_cache_ttl: how long cached responses remain valid, in seconds (1-86400).
+    #   Default 300 (5 minutes). Only used when response_cache is enabled.
+    "openrouter": {
+        "response_cache": True,
+        "response_cache_ttl": 300,
+    },
+
     # AWS Bedrock provider configuration.
     # Only used when model.provider is "bedrock".
     "bedrock": {
@@ -780,6 +797,14 @@ DEFAULT_CONFIG = {
         "tool_progress_command": False,  # Enable /verbose command in messaging gateway
         "tool_progress_overrides": {},  # DEPRECATED — use display.platforms instead
         "tool_preview_length": 0,  # Max chars for tool call previews (0 = no limit, show full paths/commands)
+        # Auto-delete system-notice replies (e.g. "✨ New session started!",
+        # "♻ Restarting gateway…", "⚡ Stopped…") after N seconds on platforms
+        # that support message deletion (currently Telegram; other platforms
+        # ignore and leave the message in place).  Only affects slash-command
+        # replies wrapped with gateway.platforms.base.EphemeralReply — agent
+        # responses and content messages are never touched.  Default 0
+        # (disabled) preserves prior behavior.
+        "ephemeral_system_ttl": 0,
         "platforms": {},  # Per-platform display overrides: {"telegram": {"tool_progress": "all"}, "slack": {"tool_progress": "off"}}
         # Gateway runtime-metadata footer appended to the FINAL message of a turn
         # (disabled by default to keep replies minimal). When enabled, renders
@@ -789,6 +814,7 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "fields": ["model", "context_pct", "cwd"],  # Order shown; drop any to hide
         },
+        "copy_shortcut": "auto",  # "auto" (platform default) | "ctrl_c" | "ctrl_shift_c" | "disabled"
     },
 
     # Web dashboard settings
@@ -822,7 +848,7 @@ DEFAULT_CONFIG = {
             # Voices: alloy, echo, fable, onyx, nova, shimmer
         },
         "xai": {
-            "voice_id": "eve",
+            "voice_id": "eve",  # or custom voice ID — see https://docs.x.ai/developers/model-capabilities/audio/custom-voices
             "language": "en",
             "sample_rate": 24000,
             "bit_rate": 128000,
@@ -949,7 +975,23 @@ DEFAULT_CONFIG = {
     # injected at the start of every API call for few-shot priming.
     # Never saved to sessions, logs, or trajectories.
     "prefill_messages_file": "",
-    
+
+    # Goals — persistent cross-turn goals (Ralph-style loop).
+    # After every turn, a lightweight judge call asks the auxiliary model
+    # whether the active /goal is satisfied by the assistant's last
+    # response. If not, Hermes feeds a continuation prompt back into the
+    # same session and keeps working until the goal is done, the turn
+    # budget is exhausted, or the user pauses/clears it. Judge failures
+    # fail OPEN (continue) so a flaky judge never wedges progress — the
+    # turn budget is the real backstop.
+    "goals": {
+        # Max continuation turns before Hermes auto-pauses the goal and
+        # asks the user to /goal resume. Protects against judge false
+        # negatives (goal actually done but judge says continue) and
+        # unbounded model spend on fuzzy / unachievable goals.
+        "max_turns": 20,
+    },
+
     # Skills — external skill directories for sharing skills across tools/agents.
     # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
     # always goes to ~/.hermes/skills/.
@@ -1003,6 +1045,14 @@ DEFAULT_CONFIG = {
         # Archive a skill (move to skills/.archive/) after this many days
         # without use. Archived skills are recoverable — no auto-deletion.
         "archive_after_days": 90,
+        # Pre-run backup: before every real curator pass (dry-run is
+        # skipped), snapshot ~/.hermes/skills/ into
+        # ~/.hermes/skills/.curator_backups/<utc-iso>/skills.tar.gz so the
+        # user can roll back with `hermes curator rollback`.
+        "backup": {
+            "enabled": True,
+            "keep": 5,  # retain last N regular snapshots
+        },
     },
 
     # Honcho AI-native memory -- reads ~/.honcho/config.json as single source of truth.
@@ -1254,7 +1304,10 @@ DEFAULT_CONFIG = {
         # for a single update run.
         "pre_update_backup": False,
         # How many pre-update backup zips to retain.  Older ones are pruned
-        # automatically after each successful backup.
+        # automatically after each successful backup.  Values below 1 are
+        # floored to 1 — the backup just created is always preserved.  To
+        # disable backups entirely, set ``pre_update_backup: false`` above
+        # rather than ``backup_keep: 0``.
         "backup_keep": 5,
     },
 
@@ -4643,7 +4696,9 @@ def set_config_value(key: str, value: str):
         "terminal.vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
         "terminal.docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
         "terminal.docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
-        "terminal.cwd": "TERMINAL_CWD",
+        # terminal.cwd intentionally excluded — CLI resolves at runtime,
+        # gateway bridges it in gateway/run.py. Persisting to .env causes
+        # stale values to poison child processes.
         "terminal.timeout": "TERMINAL_TIMEOUT",
         "terminal.sandbox_dir": "TERMINAL_SANDBOX_DIR",
         "terminal.persistent_shell": "TERMINAL_PERSISTENT_SHELL",

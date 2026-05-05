@@ -16,7 +16,7 @@ uv sync --extra local
 ```
 
 `local` is the canonical workstation bundle in `pyproject.toml` and currently
-expands to `dev`, `cli`, `messaging`, `cron`, `honcho`, `pty`, and `web`.
+expands to `dev`, `cli`, `messaging`, `cron`, `honcho`, `pty`, `google`, and `web`.
 If a new runtime-facing optional dependency is introduced (for example via a new
 configured plugin, gateway platform, cron path, terminal/runtime feature, or web
 dashboard path), add its extra to `local` so future `uv sync --extra local` runs
@@ -270,7 +270,16 @@ The dashboard embeds the real `hermes --tui` — **not** a rewrite.  See `hermes
 
 ## Adding New Tools
 
-Requires changes in **3 files**:
+For most custom or local-only tools, do **not** edit Hermes core. Use the plugin
+route instead: create `~/.hermes/plugins/<name>/plugin.yaml` and
+`~/.hermes/plugins/<name>/__init__.py`, then register tools with
+`ctx.register_tool(...)`. Plugin toolsets are discovered automatically and can be
+enabled or disabled without touching `tools/` or `toolsets.py`.
+
+Use the built-in route below only when the user is explicitly contributing a new
+core Hermes tool that should ship in the base system.
+
+Built-in/core tools require changes in **2 files**:
 
 **1. Create `tools/your_tool.py`:**
 ```python
@@ -293,9 +302,9 @@ registry.register(
 )
 ```
 
-**2. Add import** in `model_tools.py` `_discover_tools()` list.
+**2. Add to `toolsets.py`** — either `_HERMES_CORE_TOOLS` (all platforms) or a new toolset.
 
-**3. Add to `toolsets.py`** — either `_HERMES_CORE_TOOLS` (all platforms) or a new toolset.
+Auto-discovery: any `tools/*.py` file with a top-level `registry.register()` call is imported automatically — no manual import list to maintain.
 
 The registry handles schema collection, dispatch, availability checking, and error wrapping. All handlers MUST return a JSON string.
 
