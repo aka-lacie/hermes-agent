@@ -182,11 +182,7 @@ def _resolve_optional_float(*values: Any) -> float | None:
 
 
 _VALID_OBSERVATION_MODES = {"unified", "directional"}
-_OBSERVATION_MODE_ALIASES = {
-    "shared": "unified",
-    "separate": "directional",
-    "cross": "directional",
-}
+_OBSERVATION_MODE_ALIASES = {"shared": "unified", "separate": "directional", "cross": "directional"}
 
 
 def _normalize_observation_mode(val: str) -> str:
@@ -307,7 +303,7 @@ class HonchoClientConfig:
     init_on_session_start: bool = False
     # Observation mode: legacy string shorthand ("directional" or "unified").
     # Kept for backward compat; granular per-peer booleans below are preferred.
-    observation_mode: str = "unified"
+    observation_mode: str = "directional"
     # Per-peer observation booleans — maps 1:1 to Honcho's SessionPeerConfig.
     # Resolved from "observation" object in config, falling back to observation_mode preset.
     user_observe_me: bool = True

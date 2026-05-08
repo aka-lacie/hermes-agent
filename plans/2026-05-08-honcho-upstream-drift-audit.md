@@ -211,3 +211,17 @@ Focused verification after conflict resolution:
 - `python -m py_compile agent/auxiliary_client.py agent/transports/chat_completions.py plugins/memory/honcho/session.py run_agent.py tools/browser_tool.py`: passed
 - `git diff --check`: passed
 - `uv run pytest tests/agent/transports/test_chat_completions.py tests/agent/test_auxiliary_client.py tests/run_agent/test_message_sequence_repair.py tests/test_transform_llm_output_hook.py tests/tools/test_browser_lightpanda.py tests/honcho_plugin/test_session.py`: 311 passed
+
+## Additional Honcho Realignment - 2026-05-08
+
+After reviewing remaining drift from `origin/main`, the largest Honcho divergence was still in the plugin surface itself. The local branch had kept a simplified tool model and short-circuited per-turn plugin prefetch behavior, while upstream now has a richer plugin-native architecture:
+
+- separate `honcho_reasoning` for synthesized dialectic answers
+- `honcho_context` for raw/session context
+- peer-aware profile/search/context/reasoning/conclusion operations
+- plugin-managed prefetch cadence, stale-thread handling, and diagnostics
+
+Decision:
+
+- Restore upstream versions of `plugins/memory/honcho/__init__.py`, `README.md`, `cli.py`, `client.py`, `session.py`, and the corresponding Honcho plugin tests.
+- Do not preserve the local short-circuit behavior in code. If first-turn-only or quieter injection remains desired, use upstream configuration knobs such as `injectionFrequency` and cadence settings rather than bypassing plugin logic.
