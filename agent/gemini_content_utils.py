@@ -3,7 +3,58 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+
+def google_provider_data(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the Google/Gemini provider-data namespace for a stored message."""
+
+    provider_data = message.get("provider_data")
+    if isinstance(provider_data, dict):
+        google = provider_data.get("google")
+        if isinstance(google, dict):
+            return google
+    return {}
+
+
+def tool_call_extra_content(tool_call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return OpenAI-compatible ``extra_content`` for a Gemini tool call.
+
+    New messages store this under ``tool_call.provider_data.google``. Legacy
+    histories may still have a top-level ``extra_content`` field, so keep that
+    fallback at the adapter boundary.
+    """
+
+    provider_data = tool_call.get("provider_data")
+    if isinstance(provider_data, dict):
+        google = provider_data.get("google")
+        if isinstance(google, dict) and isinstance(google.get("extra_content"), dict):
+            return google["extra_content"]
+        if isinstance(provider_data.get("extra_content"), dict):
+            return provider_data["extra_content"]
+    extra = tool_call.get("extra_content")
+    return extra if isinstance(extra, dict) else None
+
+
+def clone_gemini_content(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return a sanitized clone of preserved native Gemini content parts."""
+
+    content = google_provider_data(message).get("gemini_content")
+    if not isinstance(content, dict):
+        # Legacy sessions persisted this as a top-level assistant field.
+        content = message.get("gemini_content")
+    if not isinstance(content, dict):
+        return None
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return None
+    cloned_parts = [copy.deepcopy(part) for part in parts if isinstance(part, dict)]
+    if not cloned_parts and parts:
+        return None
+    return {
+        "role": str(content.get("role") or ""),
+        "parts": cloned_parts,
+    }
 
 
 def coalesce_split_function_response_turns(

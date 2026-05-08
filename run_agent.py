@@ -4202,6 +4202,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    provider_data=msg.get("provider_data") if role == "assistant" else None,
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
@@ -8727,7 +8728,7 @@ class AIAgent:
         # native Anthropic ``{"type": "image", "source": ...}`` blocks. When
         # the active model supports vision we let the adapter do its job and
         # skip this legacy text-fallback preprocessor entirely.
-        if self._model_supports_vision():
+        if self._active_model_supports_vision():
             return api_messages
 
         # Non-vision Anthropic model (rare today, but keep the fallback for
@@ -8757,7 +8758,7 @@ class AIAgent:
         ):
             return api_messages
 
-        if self._model_supports_vision():
+        if self._active_model_supports_vision():
             return api_messages
 
         transformed = copy.deepcopy(api_messages)
@@ -9150,7 +9151,7 @@ class AIAgent:
                 supports_reasoning=self._supports_reasoning_extra_body(),
                 qwen_session_metadata=_qwen_meta,
                 native_gemini_protocol=self._uses_gemini_native_protocol(),
-                preserve_tool_call_extra_content=self._uses_gemini_native_protocol(),
+                preserve_provider_data=self._preserves_provider_data_for_route(),
                 provider_name=self.provider,
             )
 
@@ -9198,7 +9199,7 @@ class AIAgent:
             lmstudio_reasoning_options=self._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
             anthropic_max_output=_ant_max,
             native_gemini_protocol=self._uses_gemini_native_protocol(),
-            preserve_tool_call_extra_content=self._uses_gemini_native_protocol(),
+            preserve_provider_data=self._preserves_provider_data_for_route(),
             provider_name=self.provider,
         )
 
@@ -9342,54 +9343,51 @@ class AIAgent:
         except Exception:
             return False
 
-    def _preserve_gemini_content(self, assistant_message: Any) -> Optional[Dict[str, Any]]:
-        """Return a sanitized deep copy of a native Gemini ``content`` object."""
-        gemini_content = getattr(assistant_message, "gemini_content", None)
-        if gemini_content is None and hasattr(assistant_message, "model_extra"):
-            model_extra = getattr(assistant_message, "model_extra", None) or {}
+    def _preserves_provider_data_for_route(self) -> bool:
+        """Return True when the active route consumes stored provider metadata."""
+        return self._uses_gemini_native_protocol()
+
+    def _preserve_provider_data(self, source: Any) -> Optional[Dict[str, Any]]:
+        """Return a sanitized deep copy of opaque provider replay metadata."""
+        provider_data = source
+        if not isinstance(provider_data, dict):
+            provider_data = getattr(source, "provider_data", None)
+        if provider_data is None and hasattr(source, "model_extra"):
+            model_extra = getattr(source, "model_extra", None) or {}
             if isinstance(model_extra, dict):
-                gemini_content = model_extra.get("gemini_content")
-        if gemini_content is None and hasattr(assistant_message, "provider_data"):
-            provider_data = getattr(assistant_message, "provider_data", None) or {}
-            if isinstance(provider_data, dict):
-                gemini_content = provider_data.get("gemini_content")
-        if not isinstance(gemini_content, dict):
+                provider_data = model_extra.get("provider_data")
+        if not isinstance(provider_data, dict):
             return None
-        parts = gemini_content.get("parts")
-        if not isinstance(parts, list):
-            return None
-        preserved = copy.deepcopy(gemini_content)
+        preserved = copy.deepcopy(provider_data)
         _sanitize_structure_surrogates(preserved)
-        role = preserved.get("role")
-        if not isinstance(role, str) or not role.strip():
-            preserved["role"] = "model"
-        return preserved
+        return preserved or None
 
     def _prepare_api_message(
         self,
         msg: dict,
         *,
-        native_gemini_protocol: bool,
+        preserve_provider_data: bool,
         sanitize_tool_calls: bool,
     ) -> dict:
         """Convert an internal message dict to the API-facing payload shape."""
         api_msg = msg.copy()
         role = msg.get("role")
         if role == "assistant":
-            if native_gemini_protocol:
+            if preserve_provider_data:
                 api_msg.pop("reasoning_content", None)
-                if not isinstance(api_msg.get("gemini_content"), dict):
-                    api_msg.pop("gemini_content", None)
+                if not isinstance(api_msg.get("provider_data"), dict):
+                    api_msg.pop("provider_data", None)
             else:
                 self._copy_reasoning_content_for_api(msg, api_msg)
-                api_msg.pop("gemini_content", None)
+                api_msg.pop("provider_data", None)
         else:
-            api_msg.pop("gemini_content", None)
+            api_msg.pop("provider_data", None)
 
+        api_msg.pop("gemini_content", None)
         api_msg.pop("reasoning", None)
         api_msg.pop("finish_reason", None)
         api_msg.pop("_thinking_prefill", None)
-        if sanitize_tool_calls and not native_gemini_protocol:
+        if sanitize_tool_calls and not preserve_provider_data:
             self._sanitize_tool_calls_for_strict_api(api_msg)
         return api_msg
 
@@ -9505,9 +9503,9 @@ class AIAgent:
         if "reasoning_content" not in msg and reasoning_text:
             msg["reasoning_content"] = reasoning_text
 
-        gemini_content = self._preserve_gemini_content(assistant_message)
-        if gemini_content is not None:
-            msg["gemini_content"] = gemini_content
+        provider_data = self._preserve_provider_data(assistant_message)
+        if provider_data is not None:
+            msg["provider_data"] = provider_data
 
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
             # Pass reasoning_details back unmodified so providers (OpenRouter,
@@ -9577,14 +9575,11 @@ class AIAgent:
                         "arguments": tool_call.function.arguments
                     },
                 }
-                # Preserve extra_content (e.g. Gemini thought_signature) so it
-                # is sent back on subsequent API calls.  Without this, Gemini 3
-                # thinking models reject the request with a 400 error.
-                extra = getattr(tool_call, "extra_content", None)
-                if extra is not None:
-                    if hasattr(extra, "model_dump"):
-                        extra = extra.model_dump()
-                    tc_dict["extra_content"] = extra
+                tc_provider_data = self._preserve_provider_data(
+                    getattr(tool_call, "provider_data", None)
+                )
+                if tc_provider_data is not None:
+                    tc_dict["provider_data"] = tc_provider_data
                 tool_calls.append(tc_dict)
             msg["tool_calls"] = tool_calls
 
@@ -9716,12 +9711,12 @@ class AIAgent:
         Responses API compatibility (e.g. if the session falls back to a
         Codex provider later).
 
-        Fields stripped: call_id, response_item_id, extra_content
+        Fields stripped: call_id, response_item_id, extra_content, provider_data
         """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
-        _STRIP_KEYS = {"call_id", "response_item_id", "extra_content"}
+        _STRIP_KEYS = {"call_id", "response_item_id", "extra_content", "provider_data"}
         api_msg["tool_calls"] = [
             {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
             if isinstance(tc, dict) else tc
@@ -9891,12 +9886,12 @@ class AIAgent:
         try:
             # Build API messages for the flush call
             _needs_sanitize = self._should_sanitize_tool_calls()
-            _native_gemini_protocol = self._uses_gemini_native_protocol()
+            _preserve_provider_data = self._preserves_provider_data_for_route()
             api_messages = []
             for msg in messages:
                 api_msg = self._prepare_api_message(
                     msg,
-                    native_gemini_protocol=_native_gemini_protocol,
+                    preserve_provider_data=_preserve_provider_data,
                     sanitize_tool_calls=_needs_sanitize,
                 )
                 api_msg.pop("_flush_sentinel", None)
@@ -11256,13 +11251,13 @@ class AIAgent:
             # Build API messages, stripping internal-only fields
             # (finish_reason, reasoning) that strict APIs like Mistral reject with 422
             _needs_sanitize = self._should_sanitize_tool_calls()
-            _native_gemini_protocol = self._uses_gemini_native_protocol()
+            _preserve_provider_data = self._preserves_provider_data_for_route()
             api_messages = []
             for msg in messages:
                 api_messages.append(
                     self._prepare_api_message(
                         msg,
-                        native_gemini_protocol=_native_gemini_protocol,
+                        preserve_provider_data=_preserve_provider_data,
                         sanitize_tool_calls=_needs_sanitize,
                     )
                 )
@@ -11974,7 +11969,7 @@ class AIAgent:
                 )
 
             api_messages = []
-            native_gemini_protocol = self._uses_gemini_native_protocol()
+            preserve_provider_data = self._preserves_provider_data_for_route()
             sanitize_tool_calls = self._should_sanitize_tool_calls()
             tool_name_by_id = {}
             for _msg in messages:
@@ -11992,7 +11987,7 @@ class AIAgent:
             for idx, msg in enumerate(messages):
                 api_msg = self._prepare_api_message(
                     msg,
-                    native_gemini_protocol=native_gemini_protocol,
+                    preserve_provider_data=preserve_provider_data,
                     sanitize_tool_calls=sanitize_tool_calls,
                 )
 

@@ -1215,9 +1215,13 @@ class TestRewriteTranscriptPreservesReasoning:
             content="The answer is 42.",
             reasoning="I need to think step by step.",
             reasoning_content="provider scratchpad",
-            gemini_content={
-                "role": "model",
-                "parts": [{"thought": True, "text": "gemini scratchpad"}],
+            provider_data={
+                "google": {
+                    "gemini_content": {
+                        "role": "model",
+                        "parts": [{"thought": True, "text": "gemini scratchpad"}],
+                    }
+                }
             },
             reasoning_details=[{"type": "summary", "text": "step by step"}],
             codex_reasoning_items=[{"id": "r1", "type": "reasoning"}],
@@ -1227,9 +1231,13 @@ class TestRewriteTranscriptPreservesReasoning:
         before = db.get_messages_as_conversation(session_id)
         assert before[0].get("reasoning") == "I need to think step by step."
         assert before[0].get("reasoning_content") == "provider scratchpad"
-        assert before[0].get("gemini_content") == {
-            "role": "model",
-            "parts": [{"thought": True, "text": "gemini scratchpad"}],
+        assert before[0].get("provider_data") == {
+            "google": {
+                "gemini_content": {
+                    "role": "model",
+                    "parts": [{"thought": True, "text": "gemini scratchpad"}],
+                }
+            }
         }
         assert before[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert before[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
@@ -1248,9 +1256,13 @@ class TestRewriteTranscriptPreservesReasoning:
         after = db.get_messages_as_conversation(session_id)
         assert after[0].get("reasoning") == "I need to think step by step."
         assert after[0].get("reasoning_content") == "provider scratchpad"
-        assert after[0].get("gemini_content") == {
-            "role": "model",
-            "parts": [{"thought": True, "text": "gemini scratchpad"}],
+        assert after[0].get("provider_data") == {
+            "google": {
+                "gemini_content": {
+                    "role": "model",
+                    "parts": [{"thought": True, "text": "gemini scratchpad"}],
+                }
+            }
         }
         assert after[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]

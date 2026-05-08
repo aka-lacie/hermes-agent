@@ -10679,6 +10679,7 @@ class GatewayRunner:
                     reasoning_details=msg.get("reasoning_details"),
                     codex_reasoning_items=msg.get("codex_reasoning_items"),
                     codex_message_items=msg.get("codex_message_items"),
+                    provider_data=msg.get("provider_data"),
                 )
             except Exception:
                 pass  # Best-effort copy

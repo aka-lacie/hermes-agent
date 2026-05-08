@@ -29,7 +29,11 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
-from agent.gemini_content_utils import coalesce_split_function_response_turns
+from agent.gemini_content_utils import (
+    clone_gemini_content,
+    coalesce_split_function_response_turns,
+    tool_call_extra_content,
+)
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 
 logger = logging.getLogger(__name__)
@@ -228,7 +232,7 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
 
 
 def _tool_call_extra_signature(tool_call: Dict[str, Any]) -> Optional[str]:
-    extra = tool_call.get("extra_content") or {}
+    extra = tool_call_extra_content(tool_call) or {}
     if not isinstance(extra, dict):
         return None
     google = extra.get("google") or extra.get("thought_signature")
@@ -263,20 +267,7 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _clone_gemini_content(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    content = message.get("gemini_content")
-    if not isinstance(content, dict):
-        return None
-    parts = content.get("parts")
-    if not isinstance(parts, list):
-        return None
-    cloned_parts = [copy.deepcopy(part) for part in parts if isinstance(part, dict)]
-    if not cloned_parts and parts:
-        return None
-    cloned = {
-        "role": str(content.get("role") or ""),
-        "parts": cloned_parts,
-    }
-    return cloned
+    return clone_gemini_content(message)
 
 
 def _translate_tool_result_to_gemini(

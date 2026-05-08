@@ -39,7 +39,11 @@ from typing import Any, Dict, Iterator, List, Optional
 import httpx
 
 from agent import google_oauth
-from agent.gemini_content_utils import coalesce_split_function_response_turns
+from agent.gemini_content_utils import (
+    clone_gemini_content,
+    coalesce_split_function_response_turns,
+    tool_call_extra_content,
+)
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 from agent.google_code_assist import (
     CODE_ASSIST_ENDPOINT,
@@ -102,7 +106,7 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
         },
     }
     # Prefer the real signature when we have one from a prior Gemini turn.
-    extra = tool_call.get("extra_content") or {}
+    extra = tool_call_extra_content(tool_call) or {}
     if isinstance(extra, dict):
         google = extra.get("google") or extra.get("thought_signature")
         if isinstance(google, dict):
@@ -128,19 +132,7 @@ def _tool_call_extra_from_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
 
 def _clone_gemini_content(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    content = message.get("gemini_content")
-    if not isinstance(content, dict):
-        return None
-    parts = content.get("parts")
-    if not isinstance(parts, list):
-        return None
-    cloned_parts = [copy.deepcopy(part) for part in parts if isinstance(part, dict)]
-    if not cloned_parts and parts:
-        return None
-    return {
-        "role": str(content.get("role") or ""),
-        "parts": cloned_parts,
-    }
+    return clone_gemini_content(message)
 
 
 def _translate_tool_result_to_gemini(

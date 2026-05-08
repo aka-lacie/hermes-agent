@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS messages (
     gemini_content TEXT,
     reasoning_details TEXT,
     codex_reasoning_items TEXT,
-    codex_message_items TEXT
+    codex_message_items TEXT,
+    provider_data TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -1280,6 +1281,7 @@ class SessionDB:
         reasoning_details: Any = None,
         codex_reasoning_items: Any = None,
         codex_message_items: Any = None,
+        provider_data: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -1304,6 +1306,7 @@ class SessionDB:
             json.dumps(codex_message_items)
             if codex_message_items else None
         )
+        provider_data_json = json.dumps(provider_data) if provider_data else None
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
         # Multimodal content (list of parts) must be JSON-encoded: sqlite3
         # cannot bind list/dict parameters directly.
@@ -1320,8 +1323,8 @@ class SessionDB:
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, gemini_content,
                    reasoning_details, codex_reasoning_items,
-                   codex_message_items)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, provider_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -1338,6 +1341,7 @@ class SessionDB:
                     reasoning_details_json,
                     codex_items_json,
                     codex_message_items_json,
+                    provider_data_json,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -1388,6 +1392,7 @@ class SessionDB:
                 codex_message_items = (
                     msg.get("codex_message_items") if role == "assistant" else None
                 )
+                provider_data = msg.get("provider_data") if role == "assistant" else None
                 gemini_content = (
                     msg.get("gemini_content") if role == "assistant" else None
                 )
@@ -1404,6 +1409,7 @@ class SessionDB:
                 codex_message_items_json = (
                     json.dumps(codex_message_items) if codex_message_items else None
                 )
+                provider_data_json = json.dumps(provider_data) if provider_data else None
                 tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
                 conn.execute(
@@ -1411,8 +1417,8 @@ class SessionDB:
                        tool_calls, tool_name, timestamp, token_count, finish_reason,
                        reasoning, reasoning_content, gemini_content,
                        reasoning_details, codex_reasoning_items,
-                       codex_message_items)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       codex_message_items, provider_data)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         role,
@@ -1429,6 +1435,7 @@ class SessionDB:
                         reasoning_details_json,
                         codex_items_json,
                         codex_message_items_json,
+                        provider_data_json,
                     ),
                 )
                 total_messages += 1
@@ -1549,7 +1556,7 @@ class SessionDB:
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, gemini_content, "
                 "reasoning_details, codex_reasoning_items, "
-                "codex_message_items "
+                "codex_message_items, provider_data "
                 f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY timestamp, id",
                 tuple(session_ids),
             ).fetchall()
@@ -1574,6 +1581,15 @@ class SessionDB:
             # that replay reasoning (OpenRouter, OpenAI, Nous) receive
             # coherent multi-turn reasoning context.
             if row["role"] == "assistant":
+                provider_data = None
+                if row["provider_data"]:
+                    try:
+                        provider_data = json.loads(row["provider_data"])
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning("Failed to deserialize provider_data, falling back to None")
+                        provider_data = None
+                if isinstance(provider_data, dict) and provider_data:
+                    msg["provider_data"] = provider_data
                 if row["finish_reason"]:
                     msg["finish_reason"] = row["finish_reason"]
                 if row["reasoning"]:
@@ -1582,7 +1598,14 @@ class SessionDB:
                     msg["reasoning_content"] = row["reasoning_content"]
                 if row["gemini_content"]:
                     try:
-                        msg["gemini_content"] = json.loads(row["gemini_content"])
+                        gemini_content = json.loads(row["gemini_content"])
+                        msg["gemini_content"] = gemini_content
+                        provider_data = msg.setdefault("provider_data", {})
+                        if isinstance(provider_data, dict):
+                            provider_data.setdefault("google", {}).setdefault(
+                                "gemini_content",
+                                gemini_content,
+                            )
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize gemini_content, falling back to None")
                         msg["gemini_content"] = None

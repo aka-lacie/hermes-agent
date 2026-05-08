@@ -35,7 +35,7 @@ class TestChatCompletionsBasic:
             {"role": "assistant", "content": "ok", "codex_reasoning_items": [{"id": "rs_1"}],
              "codex_message_items": [{"id": "msg_1", "type": "message"}],
              "tool_calls": [{"id": "call_1", "call_id": "call_1", "response_item_id": "fc_1",
-                            "extra_content": {"google": {"thought_signature": "SIG"}},
+                            "provider_data": {"google": {"extra_content": {"google": {"thought_signature": "SIG"}}}},
                             "type": "function", "function": {"name": "t", "arguments": "{}"}}]},
         ]
         result = transport.convert_messages(msgs)
@@ -43,24 +43,26 @@ class TestChatCompletionsBasic:
         assert "codex_message_items" not in result[0]
         assert "call_id" not in result[0]["tool_calls"][0]
         assert "response_item_id" not in result[0]["tool_calls"][0]
-        assert "extra_content" not in result[0]["tool_calls"][0]
+        assert "provider_data" not in result[0]["tool_calls"][0]
         # Original list untouched (deepcopy-on-demand)
         assert "codex_reasoning_items" in msgs[0]
-        assert "extra_content" in msgs[0]["tool_calls"][0]
+        assert "provider_data" in msgs[0]["tool_calls"][0]
         assert "codex_message_items" in msgs[0]
 
-    def test_convert_messages_can_preserve_gemini_extra_content(self, transport):
+    def test_convert_messages_can_preserve_provider_data(self, transport):
         msgs = [
             {"role": "assistant", "content": "ok",
              "tool_calls": [{"id": "call_1", "call_id": "call_1", "response_item_id": "fc_1",
-                            "extra_content": {"google": {"thought_signature": "SIG"}},
+                            "provider_data": {"google": {"extra_content": {"google": {"thought_signature": "SIG"}}}},
                             "type": "function", "function": {"name": "t", "arguments": "{}"}}]},
         ]
-        result = transport.convert_messages(msgs, preserve_tool_call_extra_content=True)
+        result = transport.convert_messages(msgs, preserve_provider_data=True)
         tool_call = result[0]["tool_calls"][0]
         assert "call_id" not in tool_call
         assert "response_item_id" not in tool_call
-        assert tool_call["extra_content"] == {"google": {"thought_signature": "SIG"}}
+        assert tool_call["provider_data"] == {
+            "google": {"extra_content": {"google": {"thought_signature": "SIG"}}}
+        }
 
 
 class TestChatCompletionsBuildKwargs:
@@ -670,7 +672,7 @@ class TestChatCompletionsNormalize:
         )
         nr = transport.normalize_response(r)
         assert nr.tool_calls[0].provider_data == {
-            "extra_content": {"google": {"thought_signature": "SIG_ABC123"}}
+            "google": {"extra_content": {"google": {"thought_signature": "SIG_ABC123"}}}
         }
 
     def test_reasoning_content_preserved_separately(self, transport):
@@ -720,7 +722,7 @@ class TestChatCompletionsNormalize:
         nr = transport.normalize_response(r)
 
         assert nr.gemini_content == gemini_content
-        assert nr.provider_data["gemini_content"] == gemini_content
+        assert nr.provider_data["google"]["gemini_content"] == gemini_content
 
     def test_empty_reasoning_content_preserved(self, transport):
         """DeepSeek can require an explicit empty reasoning_content replay field."""

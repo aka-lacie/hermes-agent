@@ -114,22 +114,27 @@ class ChatCompletionsTransport(ProviderTransport):
     ) -> list[dict[str, Any]]:
         """Messages are already in OpenAI format — sanitize Codex leaks only.
 
-        Strips Codex Responses API fields (``codex_reasoning_items`` /
-        ``codex_message_items`` on the message, ``call_id``/``response_item_id``
-        on tool_calls) that strict chat-completions providers reject with 400/422.
-        Gemini-native ``extra_content`` is also stripped for strict replay unless
-        the caller explicitly preserves it for native Gemini routes.
+        Strips provider-only replay metadata that strict chat-completions
+        providers reject with 400/422. Native provider adapters can opt into
+        preserving opaque ``provider_data`` for their own replay logic.
         """
-        preserve_extra_content = bool(kwargs.get("preserve_tool_call_extra_content"))
+        preserve_provider_data = bool(
+            kwargs.get("preserve_provider_data")
+            or kwargs.get("preserve_tool_call_extra_content")
+        )
         strip_tool_call_keys = {"call_id", "response_item_id"}
-        if not preserve_extra_content:
-            strip_tool_call_keys.add("extra_content")
+        if not preserve_provider_data:
+            strip_tool_call_keys.update({"extra_content", "provider_data"})
 
         needs_sanitize = False
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
-            if "codex_reasoning_items" in msg or "codex_message_items" in msg:
+            if (
+                "codex_reasoning_items" in msg
+                or "codex_message_items" in msg
+                or (not preserve_provider_data and "provider_data" in msg)
+            ):
                 needs_sanitize = True
                 break
             tool_calls = msg.get("tool_calls")
@@ -150,6 +155,8 @@ class ChatCompletionsTransport(ProviderTransport):
                 continue
             msg.pop("codex_reasoning_items", None)
             msg.pop("codex_message_items", None)
+            if not preserve_provider_data:
+                msg.pop("provider_data", None)
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
@@ -218,6 +225,7 @@ class ChatCompletionsTransport(ProviderTransport):
         # tool call metadata unless the caller needs Gemini native replay data.
         sanitized = self.convert_messages(
             messages,
+            preserve_provider_data=params.get("preserve_provider_data", False),
             preserve_tool_call_extra_content=params.get("preserve_tool_call_extra_content", False),
         )
 
@@ -587,7 +595,7 @@ class ChatCompletionsTransport(ProviderTransport):
                             extra = extra.model_dump()
                         except Exception:
                             pass
-                    tc_provider_data["extra_content"] = extra
+                    tc_provider_data.setdefault("google", {})["extra_content"] = extra
                 tool_calls.append(
                     ToolCall(
                         id=tc.id,
@@ -629,7 +637,7 @@ class ChatCompletionsTransport(ProviderTransport):
             if isinstance(model_extra, dict):
                 gemini_content = model_extra.get("gemini_content")
         if isinstance(gemini_content, dict):
-            provider_data["gemini_content"] = copy.deepcopy(gemini_content)
+            provider_data.setdefault("google", {})["gemini_content"] = copy.deepcopy(gemini_content)
 
         return NormalizedResponse(
             content=msg.content,

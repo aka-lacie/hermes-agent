@@ -1553,25 +1553,26 @@ class TestBuildAssistantMessage:
         result = agent._build_assistant_message(msg, "stop")
         assert "reasoning_content" not in result
 
-    def test_tool_call_extra_content_preserved(self, agent):
-        """Gemini thinking models attach extra_content with thought_signature
-        to tool calls. This must be preserved so subsequent API calls include it."""
+    def test_tool_call_provider_data_preserved(self, agent):
+        """Provider replay metadata on tool calls must survive history storage."""
         tc = _mock_tool_call(
             name="get_weather", arguments='{"city":"NYC"}', call_id="c2"
         )
-        tc.extra_content = {"google": {"thought_signature": "abc123"}}
+        tc.provider_data = {
+            "google": {"extra_content": {"google": {"thought_signature": "abc123"}}}
+        }
         msg = _mock_assistant_msg(content="", tool_calls=[tc])
         result = agent._build_assistant_message(msg, "tool_calls")
-        assert result["tool_calls"][0]["extra_content"] == {
-            "google": {"thought_signature": "abc123"}
+        assert result["tool_calls"][0]["provider_data"] == {
+            "google": {"extra_content": {"google": {"thought_signature": "abc123"}}}
         }
 
-    def test_tool_call_without_extra_content(self, agent):
-        """Standard tool calls (no thinking model) should not have extra_content."""
+    def test_tool_call_without_provider_data(self, agent):
+        """Standard tool calls should not have replay metadata."""
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c3")
         msg = _mock_assistant_msg(content="", tool_calls=[tc])
         result = agent._build_assistant_message(msg, "tool_calls")
-        assert "extra_content" not in result["tool_calls"][0]
+        assert "provider_data" not in result["tool_calls"][0]
 
     def test_think_blocks_stripped_from_content(self, agent):
         """Inline <think> blocks are stripped from stored content (#8878, #9568).

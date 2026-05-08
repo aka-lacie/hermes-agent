@@ -453,26 +453,30 @@ class TestMessageStorage:
         assert "reasoning_content" in conv[0]
         assert conv[0]["reasoning_content"] == ""
 
-    def test_gemini_content_persisted_and_restored(self, db):
-        """Native Gemini thought parts must survive SQLite-backed session replay."""
+    def test_provider_data_persisted_and_restored(self, db):
+        """Opaque provider replay metadata must survive SQLite-backed replay."""
         db.create_session(session_id="s1", source="cli")
-        gemini_content = {
-            "role": "model",
-            "parts": [
-                {"thought": True, "text": "internal plan"},
-                {"text": "Visible answer", "thoughtSignature": "sig-answer"},
-            ],
+        provider_data = {
+            "google": {
+                "gemini_content": {
+                    "role": "model",
+                    "parts": [
+                        {"thought": True, "text": "internal plan"},
+                        {"text": "Visible answer", "thoughtSignature": "sig-answer"},
+                    ],
+                }
+            }
         }
         db.append_message(
             "s1",
             role="assistant",
             content="Visible answer",
-            gemini_content=gemini_content,
+            provider_data=provider_data,
         )
 
         conv = db.get_messages_as_conversation("s1")
         assert len(conv) == 1
-        assert conv[0]["gemini_content"] == gemini_content
+        assert conv[0]["provider_data"] == provider_data
 
     def test_codex_message_items_persisted_and_restored(self, db):
         """codex_message_items must round-trip through JSON serialization."""
@@ -1745,10 +1749,11 @@ class TestSchemaInit:
         )
         assert cursor.fetchone()[0] == 0
 
-        # Verify gemini_content column was added for native Gemini replay
+        # Verify provider replay columns were added
         cursor = migrated_db._conn.execute("PRAGMA table_info(messages)")
         message_columns = {row[1] for row in cursor.fetchall()}
         assert "gemini_content" in message_columns
+        assert "provider_data" in message_columns
 
         # Verify we can set title on migrated session
         assert migrated_db.set_session_title("existing", "Migrated Title") is True
