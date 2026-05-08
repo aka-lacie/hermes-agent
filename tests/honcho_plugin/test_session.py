@@ -4,7 +4,7 @@ import json
 import sys
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from plugins.memory.honcho.client import HonchoClientConfig
 from plugins.memory.honcho.session import (
@@ -242,11 +242,16 @@ class TestPeerLookupHelpers:
         assert result == {
             "observation_representation": "AI on user",
             "observation_card": "Name: Robert",
+            "representation": "AI on user",
+            "card": "Name: Robert",
+            "ai_representation": "AI on user",
+            "ai_card": "Name: Robert",
         }
-        mgr._fetch_peer_context.assert_called_once_with(
-            session.assistant_peer_id,
-            target_peer_id=session.user_peer_id,
-        )
+        mgr._fetch_peer_context.assert_has_calls([
+            call(session.assistant_peer_id, target_peer_id=session.user_peer_id),
+            call(session.user_peer_id, search_query=None, target=session.user_peer_id),
+            call(session.assistant_peer_id, target=session.assistant_peer_id),
+        ])
 
     def test_get_ai_representation_uses_peer_api(self):
         mgr, session = self._make_cached_manager()

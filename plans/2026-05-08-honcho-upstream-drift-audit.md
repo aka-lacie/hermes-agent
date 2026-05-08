@@ -192,3 +192,22 @@ Recommended sequence:
 ## Bottom Line
 
 Prefer upstream for the Honcho architecture and most plugin implementation. The local fork should keep only narrowly scoped behavior that affects actual usage: first-turn continuity policy, local gateway alias semantics, and possibly queue health diagnostics. Those should live in the Honcho plugin or gateway config path, not in `run_agent.py`.
+
+## Merge Follow-Up - 2026-05-08
+
+Integration branch `integrate/upstream-main-2026-05-08` merged `origin/main` after this audit.
+
+Conflict decisions:
+
+- `run_agent.py`: kept upstream message-sequence repair and `transform_llm_output` hook; retained local Gemini-native request preparation; no Honcho-specific core code reintroduced.
+- `agent/transports/chat_completions.py`: kept upstream provider-profile architecture; retained local strict replay sanitization and native-Gemini thinking support in the legacy fallback.
+- `agent/auxiliary_client.py`: kept upstream provider-profile default headers; retained local native-Gemini custom client routing.
+- `plugins/memory/honcho/session.py`: kept upstream broader context shape (`summary`, user context, AI self context); retained local observation keys and queue-health warning diagnostics for compatibility with the local first-turn prompt block.
+- `tools/browser_tool.py`: kept upstream Lightpanda-to-Chrome vision screenshot fallback; retained local standalone `browser_screenshot` tool.
+- `uv.lock`: accepted upstream lockfile shape and dropped the local `[options] exclude-newer` block.
+
+Focused verification after conflict resolution:
+
+- `python -m py_compile agent/auxiliary_client.py agent/transports/chat_completions.py plugins/memory/honcho/session.py run_agent.py tools/browser_tool.py`: passed
+- `git diff --check`: passed
+- `uv run pytest tests/agent/transports/test_chat_completions.py tests/agent/test_auxiliary_client.py tests/run_agent/test_message_sequence_repair.py tests/test_transform_llm_output_hook.py tests/tools/test_browser_lightpanda.py tests/honcho_plugin/test_session.py`: 311 passed

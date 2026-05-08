@@ -692,26 +692,39 @@ class HonchoSessionManager:
 
     def get_prefetch_context(self, session_key: str, user_message: str | None = None) -> dict[str, str]:
         """
-        Pre-fetch the AI peer's observation of the user from Honcho.
+        Pre-fetch relevant memory context from Honcho.
 
-        Fetches the user representation and peer card from the assistant peer's
-        perspective. search_query is intentionally omitted — it would only affect
-        additional excerpts that this code does not consume, and passing the raw
-        message exposes conversation content in server access logs.
+        Fetches peer_representation and peer_card for both peers, plus the
+        session summary when available. When user_message is provided, it is
+        passed as search_query to the peer context call so Honcho returns
+        conclusions relevant to the session topic rather than the full
+        observation dump.
 
         Args:
             session_key: The session key to get context for.
-            user_message: Unused; kept for call-site compatibility.
+            user_message: Optional first user message used as search_query for
+                          topic-relevant context retrieval.
 
         Returns:
-            Dictionary with 'observation_representation' and
-            'observation_card' keys.
+            Dictionary with 'representation', 'card', 'ai_representation',
+            'ai_card', upstream-compatible session context keys, and legacy
+            observation keys consumed by the local first-turn prompt block.
         """
         session = self._cache.get(session_key)
         if not session:
             return {}
 
         result: dict[str, str] = {}
+
+        try:
+            honcho_session = self._sessions_cache.get(session.honcho_session_id)
+            if honcho_session:
+                ctx = honcho_session.context(summary=True)
+                if ctx.summary and getattr(ctx.summary, "content", None):
+                    result["summary"] = ctx.summary.content
+        except Exception as e:
+            logger.debug("Failed to fetch session summary from Honcho: %s", e)
+
         try:
             observation_ctx = self._fetch_peer_context(
                 session.assistant_peer_id,
@@ -725,6 +738,28 @@ class HonchoSessionManager:
         warning = self.get_queue_health_warning(session_key)
         if warning:
             result["warning"] = warning
+
+        try:
+            user_ctx = self._fetch_peer_context(
+                session.user_peer_id,
+                search_query=user_message or None,
+                target=session.user_peer_id,
+            )
+            result["representation"] = user_ctx["representation"]
+            result["card"] = "\n".join(user_ctx["card"])
+        except Exception as e:
+            logger.warning("Failed to fetch user context from Honcho: %s", e)
+
+        # Also fetch AI peer's own representation so Hermes knows itself.
+        try:
+            ai_ctx = self._fetch_peer_context(
+                session.assistant_peer_id,
+                target=session.assistant_peer_id,
+            )
+            result["ai_representation"] = ai_ctx["representation"]
+            result["ai_card"] = "\n".join(ai_ctx["card"])
+        except Exception as e:
+            logger.debug("Failed to fetch AI peer context from Honcho: %s", e)
 
         return result
 
@@ -1003,21 +1038,32 @@ class HonchoSessionManager:
             return [str(item) for item in card if item]
         return [str(card)]
 
-    def _fetch_peer_card(self, peer_id: str) -> list[str]:
+    def _fetch_peer_card(
+        self,
+        peer_id: str,
+        *,
+        target: str | None = None,
+        target_peer_id: str | None = None,
+    ) -> list[str]:
         """Fetch a peer card directly from the peer object.
 
         This avoids relying on session.context(), which can return an empty
         peer_card for per-session messaging sessions even when the peer itself
         has a populated card.
         """
+        target_id = target if target is not None else target_peer_id
         peer = self._get_or_create_peer(peer_id)
         getter = getattr(peer, "get_card", None)
         if callable(getter):
-            return self._normalize_card(getter())
+            return self._normalize_card(
+                getter(target=target_id) if target_id is not None else getter()
+            )
 
         legacy_getter = getattr(peer, "card", None)
         if callable(legacy_getter):
-            return self._normalize_card(legacy_getter())
+            return self._normalize_card(
+                legacy_getter(target=target_id) if target_id is not None else legacy_getter()
+            )
 
         return []
 
@@ -1025,21 +1071,24 @@ class HonchoSessionManager:
         self,
         peer_id: str,
         search_query: str | None = None,
+        *,
+        target: str | None = None,
         target_peer_id: str | None = None,
     ) -> dict[str, Any]:
         """Fetch representation + peer card directly from a peer object."""
+        target_id = target if target is not None else target_peer_id
         peer = self._get_or_create_peer(peer_id)
         representation = ""
         card: list[str] = []
 
         try:
             if search_query:
-                if target_peer_id:
-                    ctx = peer.context(target=target_peer_id, search_query=search_query)
+                if target_id:
+                    ctx = peer.context(target=target_id, search_query=search_query)
                 else:
                     ctx = peer.context(search_query=search_query)
-            elif target_peer_id:
-                ctx = peer.context(target=target_peer_id)
+            elif target_id:
+                ctx = peer.context(target=target_id)
             else:
                 ctx = peer.context()
             representation = (
@@ -1053,8 +1102,8 @@ class HonchoSessionManager:
 
         if not representation:
             try:
-                if target_peer_id:
-                    representation = peer.representation(target=target_peer_id) or ""
+                if target_id:
+                    representation = peer.representation(target=target_id) or ""
                 else:
                     representation = peer.representation() or ""
             except Exception as e:
@@ -1062,7 +1111,7 @@ class HonchoSessionManager:
 
         if not card:
             try:
-                card = self._fetch_peer_card(peer_id, target_peer_id=target_peer_id)
+                card = self._fetch_peer_card(peer_id, target=target_id)
             except Exception as e:
                 logger.debug("Direct peer card fetch failed for '%s': %s", peer_id, e)
 

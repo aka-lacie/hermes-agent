@@ -23,10 +23,14 @@ Configuration in config.yaml:
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
 from typing import Any, Dict, Optional
+from urllib.parse import quote
+
+import httpx
 
 try:
     from aiohttp import web
@@ -93,6 +97,241 @@ _DEFAULT_PORT = 3978
 _WEBHOOK_PATH = "/api/messages"
 
 
+def _parse_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+class _StaticAccessTokenProvider:
+    """Minimal token-provider shim so outbound Graph delivery can reuse the shared client."""
+
+    def __init__(self, access_token: str):
+        self._access_token = str(access_token or "").strip()
+
+    async def get_access_token(self, *, force_refresh: bool = False) -> str:
+        del force_refresh
+        if not self._access_token:
+            raise ValueError("TEAMS_GRAPH_ACCESS_TOKEN is required for graph delivery mode.")
+        return self._access_token
+
+    def clear_cache(self) -> None:
+        return None
+
+
+class TeamsSummaryWriter:
+    """Pipeline-facing Teams outbound delivery surface.
+
+    This stays inside the existing Teams platform plugin so the meeting-pipeline
+    PR can reuse one Teams integration surface instead of introducing a second
+    adapter elsewhere in the gateway core.
+    """
+
+    def __init__(
+        self,
+        platform_config: PlatformConfig | None = None,
+        *,
+        graph_client: Any | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._platform_config = platform_config
+        self._graph_client = graph_client
+        self._transport = transport
+
+    async def write_summary(
+        self,
+        payload: Any,
+        config: dict[str, Any] | None,
+        existing_record: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        merged = self._resolve_delivery_config(config)
+        if existing_record and not _parse_bool(merged.get("force_resend"), default=False):
+            return dict(existing_record)
+
+        mode = str(merged.get("delivery_mode") or merged.get("mode") or "").strip().lower()
+        if not mode:
+            if merged.get("incoming_webhook_url"):
+                mode = "incoming_webhook"
+            elif merged.get("chat_id") or (
+                merged.get("team_id") and merged.get("channel_id")
+            ):
+                mode = "graph"
+        if mode == "incoming_webhook":
+            return await self._write_summary_via_incoming_webhook(payload, merged)
+        if mode == "graph":
+            return await self._write_summary_via_graph(payload, merged)
+        raise ValueError(
+            "Teams delivery_mode must be 'incoming_webhook' or 'graph'."
+        )
+
+    def _resolve_delivery_config(self, config: dict[str, Any] | None) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        platform_cfg = self._platform_config
+        if platform_cfg is not None:
+            merged.update(dict(platform_cfg.extra or {}))
+            if platform_cfg.token and "access_token" not in merged:
+                merged["access_token"] = platform_cfg.token
+            if platform_cfg.home_channel:
+                merged.setdefault("channel_id", platform_cfg.home_channel.chat_id)
+        merged.update(dict(config or {}))
+
+        env_defaults = {
+            "delivery_mode": os.getenv("TEAMS_DELIVERY_MODE", ""),
+            "incoming_webhook_url": os.getenv("TEAMS_INCOMING_WEBHOOK_URL", ""),
+            "access_token": os.getenv("TEAMS_GRAPH_ACCESS_TOKEN", ""),
+            "team_id": os.getenv("TEAMS_TEAM_ID", ""),
+            "channel_id": os.getenv("TEAMS_CHANNEL_ID", ""),
+            "chat_id": os.getenv("TEAMS_CHAT_ID", ""),
+        }
+        for key, value in env_defaults.items():
+            if value and not merged.get(key):
+                merged[key] = value
+        return merged
+
+    async def _write_summary_via_incoming_webhook(
+        self,
+        payload: Any,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        webhook_url = str(config.get("incoming_webhook_url") or "").strip()
+        if not webhook_url:
+            raise ValueError("TEAMS_INCOMING_WEBHOOK_URL is required for incoming_webhook mode.")
+        body = {"text": self._render_summary_markdown(payload)}
+        async with httpx.AsyncClient(timeout=20.0, transport=self._transport) as client:
+            response = await client.post(webhook_url, json=body)
+            response.raise_for_status()
+        return {
+            "delivery_mode": "incoming_webhook",
+            "webhook_url": webhook_url,
+            "status_code": response.status_code,
+            "delivered": True,
+        }
+
+    async def _write_summary_via_graph(
+        self,
+        payload: Any,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        graph_client = self._build_graph_client(config)
+        chat_id = str(config.get("chat_id") or "").strip()
+        if chat_id:
+            path = f"/chats/{quote(chat_id, safe='')}/messages"
+            response = await graph_client.post_json(
+                path,
+                json_body={"body": {"contentType": "html", "content": self._render_summary_html(payload)}},
+            )
+            return {
+                "delivery_mode": "graph",
+                "target_type": "chat",
+                "chat_id": chat_id,
+                "message_id": (response or {}).get("id"),
+                "web_url": (response or {}).get("webUrl"),
+            }
+
+        team_id = str(config.get("team_id") or "").strip()
+        channel_id = str(config.get("channel_id") or "").strip()
+        if not team_id or not channel_id:
+            raise ValueError(
+                "Graph delivery mode requires chat_id, or both team_id and channel_id."
+            )
+        path = (
+            f"/teams/{quote(team_id, safe='')}/channels/"
+            f"{quote(channel_id, safe='')}/messages"
+        )
+        response = await graph_client.post_json(
+            path,
+            json_body={"body": {"contentType": "html", "content": self._render_summary_html(payload)}},
+        )
+        return {
+            "delivery_mode": "graph",
+            "target_type": "channel",
+            "team_id": team_id,
+            "channel_id": channel_id,
+            "message_id": (response or {}).get("id"),
+            "web_url": (response or {}).get("webUrl"),
+        }
+
+    def _build_graph_client(self, config: dict[str, Any]) -> Any:
+        if self._graph_client is not None:
+            return self._graph_client
+
+        from tools.microsoft_graph_auth import MicrosoftGraphTokenProvider
+        from tools.microsoft_graph_client import MicrosoftGraphClient
+
+        access_token = str(config.get("access_token") or "").strip()
+        if access_token:
+            return MicrosoftGraphClient(
+                _StaticAccessTokenProvider(access_token),
+                transport=self._transport,
+            )
+        return MicrosoftGraphClient(
+            MicrosoftGraphTokenProvider.from_env(),
+            transport=self._transport,
+        )
+
+    def _render_summary_markdown(self, payload: Any) -> str:
+        lines = [
+            f"**{self._title(payload)}**",
+            "",
+            f"Summary: {self._text(getattr(payload, 'summary', None), 'No summary available.')}",
+            "",
+            "Key decisions:",
+            *self._bullet_lines(getattr(payload, "key_decisions", None)),
+            "",
+            "Action items:",
+            *self._bullet_lines(getattr(payload, "action_items", None)),
+            "",
+            "Risks:",
+            *self._bullet_lines(getattr(payload, "risks", None)),
+        ]
+        return "\n".join(lines)
+
+    def _render_summary_html(self, payload: Any) -> str:
+        sections = [
+            ("Summary", [self._text(getattr(payload, "summary", None), "No summary available.")]),
+            ("Key decisions", list(getattr(payload, "key_decisions", None) or [])),
+            ("Action items", list(getattr(payload, "action_items", None) or [])),
+            ("Risks", list(getattr(payload, "risks", None) or [])),
+        ]
+        blocks = [f"<h2>{html.escape(self._title(payload))}</h2>"]
+        for heading, items in sections:
+            blocks.append(f"<h3>{html.escape(heading)}</h3>")
+            if len(items) == 1 and heading == "Summary":
+                blocks.append(f"<p>{html.escape(str(items[0]))}</p>")
+                continue
+            if items:
+                rendered = "".join(f"<li>{html.escape(str(item))}</li>" for item in items if str(item).strip())
+                blocks.append(rendered and f"<ul>{rendered}</ul>" or "<p>None</p>")
+            else:
+                blocks.append("<p>None</p>")
+        return "".join(blocks)
+
+    @staticmethod
+    def _title(payload: Any) -> str:
+        title = getattr(payload, "title", None)
+        if title:
+            return str(title)
+        meeting_ref = getattr(payload, "meeting_ref", None)
+        meeting_id = getattr(meeting_ref, "meeting_id", None) if meeting_ref else None
+        return f"Meeting {meeting_id or 'summary'}"
+
+    @staticmethod
+    def _text(value: Any, default: str) -> str:
+        text = str(value or "").strip()
+        return text or default
+
+    @classmethod
+    def _bullet_lines(cls, values: Any) -> list[str]:
+        items = [str(item).strip() for item in (values or []) if str(item).strip()]
+        return [f"- {item}" for item in items] or ["- None"]
+
+
 class _AiohttpBridgeAdapter:
     """HttpServerAdapter that bridges the Teams SDK into an aiohttp server.
 
@@ -150,6 +389,42 @@ def validate_config(config) -> bool:
 def is_connected(config) -> bool:
     """Check whether Teams is configured (env or config.yaml)."""
     return validate_config(config)
+
+
+def _env_enablement() -> dict | None:
+    """Seed ``PlatformConfig.extra`` from env vars during gateway config load.
+
+    Called by the platform registry's env-enablement hook BEFORE adapter
+    construction, so ``gateway status`` and ``get_connected_platforms()``
+    reflect env-only configuration without instantiating the Teams SDK.
+    Returns ``None`` when Teams isn't minimally configured.
+
+    The special ``home_channel`` key in the returned dict becomes a proper
+    ``HomeChannel`` dataclass on the ``PlatformConfig`` via the core hook.
+    """
+    client_id = os.getenv("TEAMS_CLIENT_ID", "").strip()
+    client_secret = os.getenv("TEAMS_CLIENT_SECRET", "").strip()
+    tenant_id = os.getenv("TEAMS_TENANT_ID", "").strip()
+    if not (client_id and client_secret and tenant_id):
+        return None
+    seed: dict = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "tenant_id": tenant_id,
+    }
+    port = os.getenv("TEAMS_PORT", "").strip()
+    if port:
+        try:
+            seed["port"] = int(port)
+        except ValueError:
+            pass
+    home = os.getenv("TEAMS_HOME_CHANNEL", "").strip()
+    if home:
+        seed["home_channel"] = {
+            "chat_id": home,
+            "name": os.getenv("TEAMS_HOME_CHANNEL_NAME", "Home"),
+        }
+    return seed
 
 
 # Keep the old name as an alias so existing test imports don't break.
@@ -371,8 +646,25 @@ class TeamsAdapter(BasePlatformAdapter):
             )
 
         # Only authorized users may click approval buttons.
+        # Default-deny: require either TEAMS_ALLOWED_USERS or an explicit
+        # TEAMS_ALLOW_ALL_USERS=true opt-in. Without one of these set, the
+        # bot silently treated every clicker as authorized — meaning any
+        # Teams user who could message the bot could approve dangerous commands.
         allowed_csv = os.getenv("TEAMS_ALLOWED_USERS", "").strip()
-        if allowed_csv:
+        allow_all = os.getenv("TEAMS_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
+
+        if not allow_all:
+            if not allowed_csv:
+                logger.warning(
+                    "[teams] card action rejected: TEAMS_ALLOWED_USERS not configured "
+                    "and TEAMS_ALLOW_ALL_USERS not set — default deny"
+                )
+                return InvokeResponse(
+                    status=200,
+                    body=AdaptiveCardActionMessageResponse(
+                        value="⛔ Approval buttons require TEAMS_ALLOWED_USERS to be configured."
+                    ),
+                )
             from_account = ctx.activity.from_
             clicker_id = getattr(from_account, "aad_object_id", None) or getattr(from_account, "id", "")
             allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
@@ -685,6 +977,14 @@ def register(ctx) -> None:
         required_env=["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
         install_hint="pip install microsoft-teams-apps aiohttp",
         setup_fn=interactive_setup,
+        # Env-driven auto-configuration — seeds PlatformConfig.extra with
+        # client_id/secret/tenant + port + home_channel so env-only setups
+        # show up in gateway status without instantiating the Teams SDK.
+        env_enablement_fn=_env_enablement,
+        # Cron home-channel delivery support.  Lets deliver=teams cron
+        # jobs route to the configured Teams chat/channel without editing
+        # cron/scheduler.py's hardcoded sets.
+        cron_deliver_env_var="TEAMS_HOME_CHANNEL",
         # Auth env vars for _is_user_authorized() integration
         allowed_users_env="TEAMS_ALLOWED_USERS",
         allow_all_env="TEAMS_ALLOW_ALL_USERS",

@@ -74,6 +74,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord",         "💬 Discord (read/participate)", "fetch messages, search members, create thread"),
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
+    ("computer_use",     "🖱️  Computer Use (macOS)",     "background desktop control via cua-driver"),
 ]
 
 # Toolsets that are OFF by default for new installs.
@@ -299,6 +300,32 @@ TOOL_CATEGORIES = {
                     {"key": "FIRECRAWL_API_URL", "prompt": "Your Firecrawl instance URL (e.g., http://localhost:3002)"},
                 ],
             },
+            {
+                "name": "SearXNG",
+                "badge": "free · self-hosted · search only",
+                "tag": "Privacy-respecting metasearch engine — search only (pair with any extract provider)",
+                "web_backend": "searxng",
+                "env_vars": [
+                    {"key": "SEARXNG_URL", "prompt": "Your SearXNG instance URL (e.g., http://localhost:8080)", "url": "https://searxng.github.io/searxng/"},
+                ],
+            },
+            {
+                "name": "Brave Search (Free Tier)",
+                "badge": "free tier · search only",
+                "tag": "2,000 queries/mo free — search only (pair with any extract provider)",
+                "web_backend": "brave-free",
+                "env_vars": [
+                    {"key": "BRAVE_SEARCH_API_KEY", "prompt": "Brave Search subscription token", "url": "https://brave.com/search/api/"},
+                ],
+            },
+            {
+                "name": "DuckDuckGo (ddgs)",
+                "badge": "free · no key · search only",
+                "tag": "Search via the ddgs Python package — no API key (pair with any extract provider)",
+                "web_backend": "ddgs",
+                "env_vars": [],
+                "post_setup": "ddgs",
+            },
         ],
     },
     "image_gen": {
@@ -416,6 +443,27 @@ TOOL_CATEGORIES = {
                 "tag": "PKCE OAuth — opens the setup wizard",
                 "env_vars": [],
                 "post_setup": "spotify",
+            },
+        ],
+    },
+    "computer_use": {
+        "name": "Computer Use (macOS)",
+        "icon": "🖱️",
+        "platform_gate": "darwin",
+        "providers": [
+            {
+                "name": "cua-driver (background)",
+                "badge": "★ recommended · free · local",
+                "tag": (
+                    "macOS background computer-use via SkyLight SPIs — does "
+                    "NOT steal your cursor or focus. Works with any model."
+                ),
+                "env_vars": [
+                    # cua-driver reads HOME/TMPDIR from the process env, no
+                    # extra keys required. HERMES_CUA_DRIVER_VERSION is an
+                    # optional pin for reproducibility across macOS updates.
+                ],
+                "post_setup": "cua_driver",
             },
         ],
     },
@@ -603,6 +651,53 @@ def _run_post_setup(post_setup_key: str):
             _print_warning("    Node.js not found. Install Camofox via Docker:")
             _print_info("      docker run -p 9377:9377 -e CAMOFOX_PORT=9377 jo-inc/camofox-browser")
 
+    elif post_setup_key == "cua_driver":
+        # cua-driver provides macOS background computer-use (SkyLight SPIs).
+        # Install via upstream curl script if the binary isn't on $PATH yet.
+        import platform as _plat
+        import subprocess
+        if _plat.system() != "Darwin":
+            _print_warning("    Computer Use (cua-driver) is macOS-only; skipping.")
+            return
+        if shutil.which("cua-driver"):
+            try:
+                version = subprocess.run(
+                    ["cua-driver", "--version"],
+                    capture_output=True, text=True, timeout=5,
+                ).stdout.strip()
+                _print_success(f"    cua-driver already installed: {version or 'unknown version'}")
+            except Exception:
+                _print_success("    cua-driver already installed.")
+            _print_info("    Grant macOS permissions if not done yet:")
+            _print_info("      System Settings > Privacy & Security > Accessibility")
+            _print_info("      System Settings > Privacy & Security > Screen Recording")
+            return
+        if not shutil.which("curl"):
+            _print_warning("    curl not found — install manually:")
+            _print_info("      https://github.com/trycua/cua/blob/main/libs/cua-driver/README.md")
+            return
+        _print_info("    Installing cua-driver (macOS background computer-use)...")
+        try:
+            install_cmd = (
+                "/bin/bash -c \"$(curl -fsSL "
+                "https://raw.githubusercontent.com/trycua/cua/main/"
+                "libs/cua-driver/scripts/install.sh)\""
+            )
+            result = subprocess.run(install_cmd, shell=True, timeout=300)
+            if result.returncode == 0 and shutil.which("cua-driver"):
+                _print_success("    cua-driver installed.")
+                _print_info("    IMPORTANT — grant macOS permissions now:")
+                _print_info("      System Settings > Privacy & Security > Accessibility")
+                _print_info("      System Settings > Privacy & Security > Screen Recording")
+                _print_info("    Both must allow the terminal / Hermes process.")
+            else:
+                _print_warning("    cua-driver install did not complete. Re-run manually:")
+                _print_info(f"      {install_cmd}")
+        except subprocess.TimeoutExpired:
+            _print_warning("    cua-driver install timed out. Re-run manually.")
+        except Exception as e:
+            _print_warning(f"    cua-driver install failed: {e}")
+
     elif post_setup_key == "kittentts":
         try:
             __import__("kittentts")
@@ -659,6 +754,32 @@ def _run_post_setup(post_setup_key: str):
         _print_info("    Default voice: en_US-lessac-medium (downloaded on first TTS call)")
         _print_info("    Full voice list: https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/VOICES.md")
         _print_info("    Switch voices by setting tts.piper.voice in ~/.hermes/config.yaml")
+
+    elif post_setup_key == "ddgs":
+        try:
+            __import__("ddgs")
+            _print_success("    ddgs is already installed")
+        except ImportError:
+            import subprocess
+            _print_info("    Installing ddgs (DuckDuckGo search package)...")
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-U", "ddgs", "--quiet"],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if result.returncode == 0:
+                    _print_success("    ddgs installed")
+                else:
+                    _print_warning("    ddgs install failed:")
+                    _print_info(f"      {result.stderr.strip()[:300]}")
+                    _print_info("    Run manually: python -m pip install -U ddgs")
+                    return
+            except subprocess.TimeoutExpired:
+                _print_warning("    ddgs install timed out (>5min)")
+                _print_info("    Run manually: python -m pip install -U ddgs")
+                return
+        _print_info("    No API key required. DuckDuckGo enforces server-side rate limits.")
+        _print_info("    Pair with an extract provider if you also need web_extract.")
 
     elif post_setup_key == "spotify":
         # Run the full `hermes auth spotify` flow — if the user has no

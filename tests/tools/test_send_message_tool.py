@@ -246,6 +246,7 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+            force_document=False,
         )
 
     def test_display_label_target_resolves_via_channel_directory(self, tmp_path):
@@ -284,6 +285,7 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+            force_document=False,
         )
 
     def test_media_only_message_uses_placeholder_for_mirroring(self):
@@ -625,7 +627,7 @@ class TestSendToPlatformChunking:
 
         sent_calls = []
 
-        async def fake_send(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False):
+        async def fake_send(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
             sent_calls.append(media_files or [])
             return {"success": True, "platform": "telegram", "chat_id": chat_id, "message_id": str(len(sent_calls))}
 
