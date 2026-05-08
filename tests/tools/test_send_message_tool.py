@@ -148,6 +148,7 @@ class TestSendMessageTool:
             "hello",
             thread_id=None,
             media_files=[],
+            force_document=False,
         )
         mirror_mock.assert_called_once_with("telegram", "-1002", "hello", source_label="cli", thread_id=None, user_id=None)
 
@@ -187,6 +188,7 @@ class TestSendMessageTool:
             "hello",
             thread_id="99999",
             media_files=[],
+            force_document=False,
         )
         mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="99999", user_id=None)
 
@@ -216,6 +218,7 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+            force_document=False,
         )
         mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="17585", user_id=None)
 
@@ -314,6 +317,7 @@ class TestSendMessageTool:
             "",
             thread_id=None,
             media_files=[("/tmp/example.ogg", False)],
+            force_document=False,
         )
         mirror_mock.assert_called_once_with(
             "telegram",

@@ -9149,6 +9149,9 @@ class AIAgent:
                 anthropic_max_output=_ant_max,
                 supports_reasoning=self._supports_reasoning_extra_body(),
                 qwen_session_metadata=_qwen_meta,
+                native_gemini_protocol=self._uses_gemini_native_protocol(),
+                preserve_tool_call_extra_content=self._uses_gemini_native_protocol(),
+                provider_name=self.provider,
             )
 
         # ── Legacy flag path ────────────────────────────────────────────
