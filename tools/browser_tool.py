@@ -2343,7 +2343,7 @@ def _capture_browser_screenshot(
     """Capture a screenshot and return metadata without vision analysis."""
     import uuid as uuid_mod
 
-    effective_task_id = task_id or "default"
+    effective_task_id = _last_session_key(task_id or "default")
 
     from hermes_constants import get_hermes_dir
 
@@ -2978,6 +2978,10 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
                 "error": f"Failed to take screenshot ({mode} mode): {error_detail}"
             }
             return json.dumps(_copy_fallback_warning(error_response, result), ensure_ascii=False)
+
+        actual_screenshot_path = result.get("data", {}).get("path")
+        if actual_screenshot_path:
+            screenshot_path = Path(actual_screenshot_path)
 
         # Check if screenshot file was created
         if not screenshot_path.exists():
