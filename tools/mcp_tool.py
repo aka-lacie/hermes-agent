@@ -279,6 +279,11 @@ _CREDENTIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Pre-compiled pattern for ${VAR_NAME} style env-var interpolation.
+# Supports any non-} characters in the variable name (hyphens, dots, etc.)
+# so providers like MY-VAR or my.var work correctly.
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
 
 # ---------------------------------------------------------------------------
 # Security helpers
@@ -1251,9 +1256,10 @@ class MCPServerTask:
                     for _pid in new_pids:
                         _stdio_pids.pop(_pid, None)
                     for pid in new_pids:
-                        try:
-                            os.kill(pid, 0)  # signal 0: probe liveness only
-                        except (ProcessLookupError, PermissionError, OSError):
+                        # ``os.kill(pid, 0)`` is NOT a no-op on Windows
+                        # (bpo-14484). Use the cross-platform check.
+                        from gateway.status import _pid_exists
+                        if not _pid_exists(pid):
                             continue  # process already exited — nothing to do
                         _orphan_stdio_pids.add(pid)
 
@@ -1498,6 +1504,16 @@ class MCPServerTask:
                 # should not permanently kill the server.
                 # (Ported from Kilo Code's MCP resilience fix.)
                 if not self._ready.is_set():
+                    if _is_auth_error(exc):
+                        logger.warning(
+                            "MCP server '%s' failed initial OAuth authentication, "
+                            "not retrying automatically: %s",
+                            self.name, exc,
+                        )
+                        self._error = exc
+                        self._ready.set()
+                        return
+
                     initial_retries += 1
                     if initial_retries > _MAX_INITIAL_CONNECT_RETRIES:
                         logger.warning(
@@ -1992,7 +2008,7 @@ def _snapshot_child_pids() -> set:
     # Linux: read from /proc
     try:
         children_path = f"/proc/{my_pid}/task/{my_pid}/children"
-        with open(children_path) as f:
+        with open(children_path, encoding="utf-8") as f:
             return {int(p) for p in f.read().split() if p.strip()}
     except (FileNotFoundError, OSError, ValueError):
         pass
@@ -2093,7 +2109,7 @@ def _interpolate_env_vars(value):
     if isinstance(value, str):
         def _replace(m):
             return os.environ.get(m.group(1), m.group(0))
-        return re.sub(r"\$\{([^}]+)\}", _replace, value)
+        return _ENV_VAR_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: _interpolate_env_vars(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -3369,16 +3385,20 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
 
     # Phase 3: SIGKILL any survivors
     _sigkill = getattr(_signal, "SIGKILL", _signal.SIGTERM)
+    # ``os.kill(pid, 0)`` is NOT a no-op on Windows. Use the cross-platform
+    # existence check before escalating to SIGKILL.
+    from gateway.status import _pid_exists
     for pid, server_name in pids.items():
+        if not _pid_exists(pid):
+            continue  # Good — exited after SIGTERM
         try:
-            os.kill(pid, 0)  # Check if still alive
             os.kill(pid, _sigkill)
             logger.warning(
                 "Force-killed MCP process %d (%s) after SIGTERM timeout",
                 pid, server_name,
             )
         except (ProcessLookupError, PermissionError, OSError):
-            pass  # Good — exited after SIGTERM
+            pass
 
 
 def _stop_mcp_loop():

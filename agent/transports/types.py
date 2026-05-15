@@ -64,7 +64,12 @@ class ToolCall:
 
     @property
     def extra_content(self) -> dict[str, Any] | None:
-        """Provider-specific OpenAI-compatible extra_content replay payload."""
+        """Provider-specific OpenAI-compatible extra_content replay payload.
+
+        Gemini thinking models attach a thought signature in this payload, and
+        older provider paths may store it either at the top level or under the
+        Google namespace.
+        """
         pd = self.provider_data or {}
         google = pd.get("google") if isinstance(pd.get("google"), dict) else {}
         return google.get("extra_content") or pd.get("extra_content")
