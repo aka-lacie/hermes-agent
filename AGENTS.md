@@ -1,6 +1,10 @@
-# LOCAL FORK NOTE
+# DEV BRANCH NOTE
 
-If present locally, open [[plans/local-fork-notes]] before doing merge work, production sync, or anything involving private infrastructure. That file is intentionally local-only and may not exist in public clones.
+Open [`DEV_BRANCH_LOG.md`](DEV_BRANCH_LOG.md) before doing merge work,
+production sync, or anything involving the long-lived `dev` branch. It is the
+canonical tracked record of local `dev` changes, touched files, and conflict
+resolution rules for deciding when to preserve local behavior vs accept upstream
+replacement.
 
 # Hermes Agent - Development Guide
 
