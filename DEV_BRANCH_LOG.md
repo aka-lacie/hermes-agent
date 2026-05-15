@@ -207,9 +207,12 @@ Merge rule:
 Commits: `d330f5c88`, `369341adc`, `2df216078`
 
 Behavior:
-- Optional current-time injection into user turns.
-- Uses a `system_time` tag for injected context.
+- Agent receives current time context during conversations.
+- Local implementation injects current time into user turns with a `system_time`
+  tag.
 - Agent-facing timestamps use 24-hour time.
+- Stronger upstream behavior is acceptable, including always-on current time or
+  timestamps on all messages.
 
 Main files:
 - `run_agent.py`
@@ -218,9 +221,11 @@ Main files:
 - `tests/run_agent/test_run_agent.py`
 
 Merge rule:
-- Keep the `system_time` tag and 24-hour agent-facing timestamp behavior.
-- Accept upstream prompt-building/cache changes if injected time remains
-  optional and clearly tagged.
+- Preserve the guarantee that the agent has at least the current time.
+- Prefer upstream behavior if it provides always-on current time or timestamps
+  on all messages.
+- Keep 24-hour agent-facing timestamp formatting where local code controls the
+  presentation.
 
 ### TUI Profile Branding
 
