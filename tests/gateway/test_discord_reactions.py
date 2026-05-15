@@ -85,7 +85,7 @@ def _make_event(message_id: str, raw_message) -> MessageEvent:
 
 
 @pytest.mark.asyncio
-async def test_process_message_background_adds_and_swaps_reactions(adapter):
+async def test_process_message_background_suppresses_processing_reactions(adapter):
     raw_message = SimpleNamespace(
         add_reaction=AsyncMock(),
         remove_reaction=AsyncMock(),
@@ -105,9 +105,8 @@ async def test_process_message_background_adds_and_swaps_reactions(adapter):
     event = _make_event("1", raw_message)
     await adapter._process_message_background(event, build_session_key(event.source))
 
-    assert raw_message.add_reaction.await_args_list[0].args == ("👀",)
-    assert raw_message.remove_reaction.await_args_list[0].args == ("👀", adapter._client.user)
-    assert raw_message.add_reaction.await_args_list[1].args == ("✅",)
+    raw_message.add_reaction.assert_not_awaited()
+    raw_message.remove_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -219,8 +218,8 @@ async def test_reactions_disabled_via_env_zero(adapter, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reactions_enabled_by_default(adapter, monkeypatch):
-    """When DISCORD_REACTIONS is unset, reactions should still work (default: true)."""
+async def test_processing_reactions_disabled_by_default(adapter, monkeypatch):
+    """Automatic processing reactions are intentionally disabled."""
     monkeypatch.delenv("DISCORD_REACTIONS", raising=False)
 
     raw_message = SimpleNamespace(
@@ -231,11 +230,11 @@ async def test_reactions_enabled_by_default(adapter, monkeypatch):
     event = _make_event("6", raw_message)
     await adapter.on_processing_start(event)
 
-    raw_message.add_reaction.assert_awaited_once_with("👀")
+    raw_message.add_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_on_processing_complete_cancelled_removes_eyes_without_terminal_reaction(adapter):
+async def test_on_processing_complete_cancelled_suppresses_reactions(adapter):
     raw_message = SimpleNamespace(
         add_reaction=AsyncMock(),
         remove_reaction=AsyncMock(),
@@ -244,5 +243,5 @@ async def test_on_processing_complete_cancelled_removes_eyes_without_terminal_re
     event = _make_event("7", raw_message)
     await adapter.on_processing_complete(event, ProcessingOutcome.CANCELLED)
 
-    raw_message.remove_reaction.assert_awaited_once_with("👀", adapter._client.user)
+    raw_message.remove_reaction.assert_not_awaited()
     raw_message.add_reaction.assert_not_awaited()

@@ -1316,7 +1316,12 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
 
     def _reactions_enabled(self) -> bool:
-        """Check if message reactions are enabled via config/env."""
+        """Return whether automatic processing reactions are enabled.
+
+        Disabled intentionally for Discord gateway processing indicators.  The
+        user-facing ``discord`` tool still exposes ``add_reaction``; this only
+        suppresses the adapter's automatic 👀/✅/❌ reactions.
+        """
         return False
 
     async def on_processing_start(self, event: MessageEvent) -> None:
