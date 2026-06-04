@@ -99,6 +99,22 @@ def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
     return normalized.endswith("/openai")
 
 
+def _model_consumes_thought_signature(model: Any) -> bool:
+    """True when the outgoing model is a Gemini family model that requires
+    ``extra_content`` (thought_signature) to be replayed on tool calls.
+
+    Gemini 3 thinking models attach ``extra_content`` to each tool call and
+    reject subsequent requests with HTTP 400 if it is missing. Every other
+    strict OpenAI-compatible provider (Fireworks, Mistral, ...) rejects the
+    request with 400 if ``extra_content`` *is* present. So the field must be
+    kept only when the target model is itself Gemini-family, and stripped
+    otherwise — including when a non-Gemini model inherits stale Gemini
+    ``extra_content`` from earlier in a mixed-provider session.
+    """
+    m = str(model or "").lower()
+    return "gemini" in m or "gemma" in m
+
+
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'.
 
@@ -123,6 +139,14 @@ class ChatCompletionsTransport(ProviderTransport):
         - Codex Responses API fields: ``codex_reasoning_items`` /
           ``codex_message_items`` on the message, ``call_id`` /
           ``response_item_id`` on ``tool_calls`` entries.
+        - ``extra_content`` on ``tool_calls`` (Gemini thought_signature) —
+          stripped unless the outgoing ``model`` is itself Gemini-family.
+          Gemini 3 thinking models attach it for replay, but strict providers
+          (Fireworks, Mistral) reject any payload containing it with
+          ``Extra inputs are not permitted, field: 'messages[N].tool_calls[M].extra_content'``.
+          It must be kept for Gemini targets (replay required) and dropped for
+          everyone else, including non-Gemini models that inherited stale
+          Gemini ``extra_content`` earlier in a mixed-provider session.
         - ``tool_name`` on tool-result messages — written by
           ``make_tool_result_message()`` for the SQLite FTS index, but not
           part of the Chat Completions schema. Strict providers (Fireworks,
@@ -141,13 +165,16 @@ class ChatCompletionsTransport(ProviderTransport):
           ``Extra inputs are not permitted, field: 'messages[N]._empty_recovery_synthetic'``,
           which then poisons every subsequent request in the session.
         """
-        preserve_provider_data = bool(
-            kwargs.get("preserve_provider_data")
-            or kwargs.get("preserve_tool_call_extra_content")
+        preserve_provider_data = bool(kwargs.get("preserve_provider_data"))
+        preserve_tool_call_extra_content = bool(
+            kwargs.get("preserve_tool_call_extra_content")
+            or _model_consumes_thought_signature(kwargs.get("model"))
         )
         strip_tool_call_keys = {"call_id", "response_item_id"}
+        if not preserve_tool_call_extra_content:
+            strip_tool_call_keys.add("extra_content")
         if not preserve_provider_data:
-            strip_tool_call_keys.update({"extra_content", "provider_data"})
+            strip_tool_call_keys.add("provider_data")
 
         needs_sanitize = False
         for msg in messages:
@@ -254,10 +281,11 @@ class ChatCompletionsTransport(ProviderTransport):
             anthropic_max_output: int | None
             extra_body_additions: dict | None
         """
-        # Strict-provider sanitization: drop reasoning_items and provider-only
-        # tool call metadata unless the caller needs Gemini native replay data.
+        # Strict-provider sanitization: drop Codex/Responses-only fields and
+        # provider replay metadata unless the caller or target model needs it.
         sanitized = self.convert_messages(
             messages,
+            model=model,
             preserve_provider_data=params.get("preserve_provider_data", False),
             preserve_tool_call_extra_content=params.get("preserve_tool_call_extra_content", False),
         )

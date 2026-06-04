@@ -4109,6 +4109,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
 
             msg = await channel.send(embed=embed, view=view)
+            view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
 
         except Exception as e:
@@ -4148,6 +4149,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
 
             msg = await channel.send(embed=embed, view=view)
+            view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
         except Exception as e:
             return SendResult(success=False, error=str(e))
@@ -4225,6 +4227,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 view = None
 
             msg = await channel.send(embed=embed, view=view) if view else await channel.send(embed=embed)
+            if view:
+                view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
         except Exception as e:
             logger.warning("[%s] send_clarify failed: %s", self.name, e)
@@ -4260,6 +4264,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_role_ids=self._allowed_role_ids,
             )
             msg = await channel.send(embed=embed, view=view)
+            view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
         except Exception as e:
             return SendResult(success=False, error=str(e))
@@ -4319,6 +4324,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
 
             msg = await channel.send(embed=embed, view=view)
+            view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
 
         except Exception as e:
@@ -5149,6 +5155,17 @@ def _define_discord_view_classes() -> None:
             self.resolved = True
             for child in self.children:
                 child.disabled = True
+            # Visually update the Discord message so buttons appear disabled.
+            msg = getattr(self, '_message', None)
+            if msg:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else None
+                    if embed:
+                        embed.color = discord.Color.greyple()
+                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass  # message deleted or too old to edit
 
     class SlashConfirmView(discord.ui.View):
         """Three-button view for generic slash-command confirmations.
@@ -5253,6 +5270,17 @@ def _define_discord_view_classes() -> None:
             self.resolved = True
             for child in self.children:
                 child.disabled = True
+            # Visually update the Discord message so buttons appear disabled.
+            msg = getattr(self, '_message', None)
+            if msg:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else None
+                    if embed:
+                        embed.color = discord.Color.greyple()
+                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
 
     class UpdatePromptView(discord.ui.View):
         """Interactive Yes/No buttons for ``hermes update`` prompts.
@@ -5338,6 +5366,17 @@ def _define_discord_view_classes() -> None:
             self.resolved = True
             for child in self.children:
                 child.disabled = True
+            # Visually update the Discord message so buttons appear disabled.
+            msg = getattr(self, '_message', None)
+            if msg:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else None
+                    if embed:
+                        embed.color = discord.Color.greyple()
+                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
 
     class ModelPickerView(discord.ui.View):
         """Interactive select-menu view for model switching.
@@ -5563,6 +5602,18 @@ def _define_discord_view_classes() -> None:
         async def on_timeout(self):
             self.resolved = True
             self.clear_items()
+            # Visually update the Discord message so it appears expired.
+            msg = getattr(self, '_message', None)
+            if msg:
+                try:
+                    embed = discord.Embed(
+                        title="⚙ Model Configuration",
+                        description="⏱ Selection expired — no model change.",
+                        color=discord.Color.greyple(),
+                    )
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
 
 
     class ClarifyChoiceView(discord.ui.View):
@@ -5748,6 +5799,17 @@ def _define_discord_view_classes() -> None:
             self.resolved = True
             for child in self.children:
                 child.disabled = True
+            # Visually update the Discord message so buttons appear disabled.
+            msg = getattr(self, '_message', None)
+            if msg:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else None
+                    if embed:
+                        embed.color = discord.Color.greyple()
+                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
 if DISCORD_AVAILABLE:
     _define_discord_view_classes()
 
