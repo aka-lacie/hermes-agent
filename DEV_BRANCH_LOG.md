@@ -8,25 +8,35 @@ The default rule is: keep upstream changes unless they remove one of the local
 behaviors listed here. When a conflict touches a listed file, preserve the local
 behavior and adapt it to the upstream structure.
 
-## Current Upstream Update
+## Current Branch Audit
 
-Merged into `dev` on 2026-05-15:
+Audited on 2026-06-04 after merging upstream `main` commit `d29caf382` into
+`dev` as `a6b35159a`.
 
-- `9fb40e6a3` upstream: restrict TUI fast-echo bypass to ASCII so
-  Vietnamese/CJK/IME input renders correctly.
-- `d5416284f` upstream: add autonomous background process completion
-  notifications in the TUI.
-- `bcba91253` local merge: merge refreshed `main` into `dev`.
+Current branch shape:
+- `dev` is current with `origin/main` but carries local integration history.
+- Live fork footprint versus upstream is roughly 61 files and 4.4k added lines.
+- Highest-conflict surface remains core runtime/provider files, especially
+  `run_agent.py`, `agent/conversation_loop.py`,
+  `agent/transports/chat_completions.py`, `hermes_state.py`, and gateway config.
+- `git rerere` is enabled locally so repeated conflict resolutions can be
+  remembered on future merges.
 
-The larger integration branch also brought in upstream work around provider
-plugins, Teams/MS Graph/Google Chat messaging, web search providers, computer
-use, profile distributions, TUI/session improvements, kanban updates, skills
-reorganization, and docs/site updates. Treat those as upstream unless they
-overlap with the local entries below.
+Prune/isolate status:
+- `keep-isolate`: feature is still useful but should be moved out of hot core
+  files or kept in a small module/tool boundary where practical.
+- `audit`: upstream now carries part of the behavior; compare exact semantics
+  before preserving all local code.
+- `keep`: small local workstation behavior that is still required.
+- `prune-candidate`: likely obsolete or mostly upstreamed; avoid preserving old
+  conflict rules unless tests or runtime config prove the behavior is still
+  missing upstream.
 
-## Local Features To Preserve
+## Local Features To Preserve Or Prune
 
 ### Discord Reaction Tool Support
+
+Status: `keep-isolate`
 
 Commits: `ba911ac75`
 
@@ -46,6 +56,12 @@ Main files:
 - `tests/tools/test_discord_tool.py`
 - `tests/gateway/test_discord_reactions.py`
 
+Current audit note:
+- Still fork-only in `tools/discord_tool.py`; upstream Discord adapter has
+  internal reaction helpers, but not the user-facing tool action.
+- Prefer extracting this behind a small tool/plugin boundary before rebuilding
+  `dev-v2`.
+
 Merge rule:
 - Keep local `discord.add_reaction` action, session defaulting, and tests.
 - Keep `_reactions_enabled()` disabled for automatic gateway processing
@@ -55,6 +71,8 @@ Merge rule:
   processing reactions or remove the explicit reaction tool.
 
 ### Discord And Cron Media Delivery
+
+Status: `keep-isolate`
 
 Commits: `465d6fc9b`, `f54b8a9a9`
 
@@ -71,12 +89,20 @@ Main files:
 - `tests/tools/test_send_message_tool.py`
 - `tests/cron/test_scheduler.py`
 
+Current audit note:
+- Still a live fork delta, concentrated in `tools/send_message_tool.py` plus
+  delivery tests.
+- Keep for now, but isolate behind media-delivery helpers if this continues to
+  conflict with upstream send-message refactors.
+
 Merge rule:
 - Keep local Discord voice-first media sending and standalone media delivery.
 - Accept upstream send-message refactors if the voice-first and fallback
   semantics stay covered by tests.
 
 ### Honcho Memory And Observation Behavior
+
+Status: `prune-candidate`
 
 Commits: `467f2e8fa`, `28220aa5f`, `8197fa6a1`, `790a3c109`, `dd17afaae`,
 `544d624c9`, `4096e3a46`
@@ -104,8 +130,15 @@ Main files:
 - `tests/gateway/test_config.py`
 - `tests/gateway/test_platform_base.py`
 
+Current audit note:
+- The listed `plugins/memory/honcho/*` files are no longer in the live fork
+  diff, and upstream now has bidirectional-observation compatibility comments.
+- Treat this as mostly upstreamed. Preserve only the remaining `user_aliases`
+  behavior if runtime config still depends on it.
+
 Merge rule:
-- Keep the local no-per-turn-injection default.
+- Keep the local no-per-turn-injection default only if upstream no longer
+  provides the same default.
 - Keep bidirectional observation mode and user-alias observation context.
 - Accept upstream Honcho API/client/session refactors when the local defaults
   and tests are preserved.
@@ -113,6 +146,8 @@ Merge rule:
   but keep local config compatibility.
 
 ### Provider Replay And Gemini Reasoning
+
+Status: `audit`
 
 Commits: `800f84615`, `422b49c57`, `e206176fb`, `2ea753369`, `672da089b`
 
@@ -147,6 +182,14 @@ Main files:
 - `tests/run_agent/test_streaming.py`
 - `tests/test_hermes_state.py`
 
+Current audit note:
+- Upstream now has first-class `provider_data` in transport types and provider
+  adapters. Local code still adds namespaced Google/Codex compatibility,
+  `gemini_content` persistence, and route-specific preservation.
+- This is the highest-conflict area. Audit exact tests before deciding whether
+  to keep all local DB/runtime changes or reduce to upstream behavior plus a
+  small compatibility shim.
+
 Merge rule:
 - Keep reasoning/replay fidelity fields unless upstream has an exact
   replacement with tests for the same providers.
@@ -156,6 +199,8 @@ Merge rule:
   tests.
 
 ### Native Browser Screenshot Tool Path
+
+Status: `keep-isolate`
 
 Commits: `bfd57f467`, `71c281e00`
 
@@ -173,6 +218,13 @@ Main files:
 - `tests/run_agent/test_run_agent.py`
 - `tests/tools/test_browser_console.py`
 
+Current audit note:
+- Upstream already stores browser screenshots under Hermes cache paths. The
+  remaining fork value is the separate `browser_screenshot` tool and the
+  vision-capable auto-follow-up path in `run_agent.py`.
+- Prefer extracting the tool path and minimizing the `run_agent.py` hook before
+  rebuilding the branch.
+
 Merge rule:
 - Keep the native screenshot path unless upstream fully replaces it with a
   tested equivalent.
@@ -180,6 +232,8 @@ Merge rule:
   correct.
 
 ### Local Workstation Runtime Extra
+
+Status: `keep`
 
 Commits: `4cda99fbf`, `fb23b2b41`
 
@@ -204,6 +258,8 @@ Merge rule:
 
 ### Agent-Facing Time Context
 
+Status: `keep-isolate`
+
 Commits: `d330f5c88`, `369341adc`, `2df216078`
 
 Behavior:
@@ -220,6 +276,10 @@ Main files:
 - `cli-config.yaml.example`
 - `tests/run_agent/test_run_agent.py`
 
+Current audit note:
+- Still a live config/runtime delta. If pre-LLM hooks can inject this reliably,
+  move it there to avoid touching `run_agent.py` and conversation assembly.
+
 Merge rule:
 - Preserve the guarantee that the agent has at least the current time.
 - Prefer upstream behavior if it provides always-on current time or timestamps
@@ -228,6 +288,8 @@ Merge rule:
   presentation.
 
 ### TUI Profile Branding
+
+Status: `keep`
 
 Commits: `6d5388a79`
 
@@ -239,20 +301,38 @@ Main files:
 - `ui-tui/src/theme.ts`
 - `ui-tui/packages/hermes-ink/src/ink/dom.ts`
 
+Current audit note:
+- Tiny live delta in `ui-tui/src/theme.ts`; low update cost. Keep unless
+  upstream adds equivalent branding fields.
+
 Merge rule:
 - Keep profile-branded banner support.
 - Accept upstream TUI layout/rendering changes when profile branding remains
   wired.
 
+## Pruning Plan
+
+1. Mark each status above as final: `keep`, `isolate`, or `remove`.
+2. For `audit` items, compare upstream tests and runtime behavior before
+   preserving local code.
+3. Build a fresh `dev-v2` from `origin/main` by cherry-picking only final
+   `keep` items and extracting `keep-isolate` items behind smaller boundaries.
+4. Keep the current `dev` branch intact until `dev-v2` has passed runtime sync,
+   focused tests, and gateway/dashboard restart checks.
+5. Once `dev-v2` is proven, move `fork/dev` to it intentionally.
+
 ## Merge Checklist
 
-1. Update clean `main` from `origin/main` and push `fork/main`.
-2. Merge any integration branch into `dev` before bringing in fresh `main`
+1. Confirm `git config rerere.enabled` is `true` in the Hermes worktrees.
+2. Update clean `main` from `origin/main` and push `fork/main`.
+3. Merge any integration branch into `dev` before bringing in fresh `main`
    updates, if that integration branch contains unfinished local work.
-3. Merge `main` into `dev`.
-4. For conflicts, consult the entries above before choosing either side.
-5. Regenerate dependencies with `uv sync --extra local`.
-6. Run focused tests for any listed local feature touched by the merge.
-7. Commit and push `dev` to `fork/dev`.
-8. Restart Hermes gateways and dashboards from the updated `hermes-dev`
-   environment.
+4. Merge `main` into `dev`.
+5. For conflicts, consult the entries above before choosing either side.
+6. If `rerere` applies a resolution, still inspect the hunk and run focused
+   tests before committing.
+7. Regenerate dependencies with `uv sync --extra local`.
+8. Run focused tests for any listed local feature touched by the merge.
+9. Commit and push `dev` to `fork/dev`.
+10. Restart Hermes gateways and dashboards from the updated `hermes-dev`
+    environment.
