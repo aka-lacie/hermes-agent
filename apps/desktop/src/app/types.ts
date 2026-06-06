@@ -25,6 +25,21 @@ export interface SlashExecResponse {
   warning?: string
 }
 
+export interface SessionSteerResponse {
+  // 'queued' == accepted into the live turn's steer slot (injected at the next
+  // tool-result boundary); 'rejected' == no live tool window, caller queues.
+  status?: 'queued' | 'rejected'
+  text?: string
+}
+
+export interface SessionTitleResponse {
+  title?: string
+  // True when the session row isn't persisted yet and the title was queued
+  // to be applied on the first turn (see tui_gateway session.title handler).
+  pending?: boolean
+  session_key?: string
+}
+
 export interface ExecCommandDispatchResponse {
   type: 'exec' | 'plugin'
   output?: string
