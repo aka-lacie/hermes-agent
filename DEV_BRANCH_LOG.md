@@ -256,6 +256,60 @@ Merge rule:
 - Regenerate `uv.lock` with `uv sync --extra local` after conflicts rather
   than hand-editing lockfile entries.
 
+### Kanban Gateway Orchestration Wakeups
+
+Status: `keep-isolate`
+
+Commits: `535976a01`, `b7933e81b`
+
+Behavior:
+- Gateway-created kanban tasks are stamped with the originating gateway
+  `session_id` from task-local session context.
+- Terminal kanban task events for session-stamped tasks wake the parent
+  gateway agent with a synthetic internal message, instead of only sending a
+  human-facing platform notification.
+- Worker handoff text surfaced into gateway agent context is quoted and
+  labelled as untrusted data so child summaries cannot become parent-system
+  instructions.
+- Session-stamped `kanban_create`, `kanban_unblock`, and `kanban_link`
+  nudge the embedded gateway dispatcher immediately instead of waiting for the
+  next `dispatch_interval_seconds` poll.
+- Gateway-origin follow-up mutations subscribe the active chat to future
+  terminal events. Follow-up subscriptions start at the current event cursor
+  to avoid replaying old completed/blocked events.
+- `kanban_comment` attaches the current session/chat for future notification
+  context but remains passive: it does not make a task runnable or wake the
+  dispatcher by itself.
+
+Main files:
+- `gateway/run.py`
+- `gateway/session_context.py`
+- `gateway/kanban_dispatch_signal.py`
+- `tools/kanban_tools.py`
+- `tests/gateway/test_kanban_notifier.py`
+- `tests/gateway/test_kanban_dispatch_signal.py`
+- `tests/tools/test_kanban_tools.py`
+
+Current audit note:
+- The dispatcher nudge is intentionally process-local. It wakes the embedded
+  dispatcher when the kanban tool call runs in the gateway process, while still
+  routing all actual claiming/spawning through `kanban_db.dispatch_once`.
+- The preferred follow-up model for already-done work is a new
+  `kanban_create` card with `parents=[old_task_id]`, not reopening the done
+  card.
+
+Merge rule:
+- Preserve session-id stamping through `gateway.session_context`; do not fall
+  back to process-global env-only session routing for concurrent gateway turns.
+- Preserve synthetic parent-agent wakeups for session-stamped terminal kanban
+  events, including untrusted-data quoting for worker handoffs.
+- Preserve immediate dispatcher nudges for session-stamped create/unblock/link
+  mutations, but keep task execution inside the normal dispatcher path.
+- Preserve "from now" notification cursors for follow-up subscriptions so old
+  terminal events are not replayed.
+- Accept upstream kanban dispatcher or notifier refactors when these semantics
+  stay covered by focused tests.
+
 ### Agent-Facing Time Context
 
 Status: `keep-isolate`
