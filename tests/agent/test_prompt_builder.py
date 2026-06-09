@@ -18,6 +18,7 @@ from agent.prompt_builder import (
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
+    load_identity_md,
     CONTEXT_FILE_MAX_CHARS,
     DEFAULT_AGENT_IDENTITY,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
@@ -34,6 +35,7 @@ from hermes_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatu
 # =========================================================================
 # Guidance constants
 # =========================================================================
+
 
 
 class TestGuidanceConstants:
@@ -540,6 +542,17 @@ class TestBuildContextFilesPrompt:
         (hermes_home / "SOUL.md").write_text("\n\n", encoding="utf-8")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert result == ""
+
+    def test_loads_identity_md_from_hermes_home_only(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        (hermes_home / "IDENTITY.md").write_text("Durable profile overlay.", encoding="utf-8")
+        (tmp_path / "IDENTITY.md").write_text("cwd identity should be ignored", encoding="utf-8")
+
+        result = load_identity_md()
+
+        assert result == "Durable profile overlay."
 
     def test_blocks_injection_in_agents_md(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text(
@@ -1268,5 +1281,3 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-

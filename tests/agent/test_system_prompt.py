@@ -37,6 +37,7 @@ def _captured_context_cwd(agent):
 
     with (
         patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.load_identity_md", return_value=""),
         patch("run_agent.build_nous_subscription_prompt", return_value=""),
         patch("run_agent.build_environment_hints", return_value=""),
         patch("run_agent.build_context_files_prompt", side_effect=fake_context_files),
@@ -55,3 +56,19 @@ class TestContextFileCwd:
     def test_configured_dir_when_terminal_cwd_set(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         assert _captured_context_cwd(_make_agent()) == tmp_path
+
+
+class TestIdentityMd:
+    def test_identity_md_is_stable_after_soul(self):
+        agent = _make_agent(load_soul_identity=True)
+
+        with (
+            patch("run_agent.load_soul_md", return_value="SOUL BLOCK"),
+            patch("run_agent.load_identity_md", return_value="IDENTITY BLOCK"),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        assert parts["stable"].index("SOUL BLOCK") < parts["stable"].index("IDENTITY BLOCK")

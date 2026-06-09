@@ -1384,7 +1384,7 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
 
 
 # =========================================================================
-# Context files (SOUL.md, AGENTS.md, .cursorrules)
+# Context files (SOUL.md, IDENTITY.md, AGENTS.md, .cursorrules)
 # =========================================================================
 
 def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE_MAX_CHARS) -> str:
@@ -1424,6 +1424,27 @@ def load_soul_md() -> Optional[str]:
         return content
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
+        return None
+
+
+def load_identity_md() -> Optional[str]:
+    """Load optional profile-root IDENTITY.md, or None.
+
+    SOUL.md stays the primary identity slot. IDENTITY.md is an additive,
+    profile-local instruction/reference file for durable guidance that should
+    not depend on workspace context discovery.
+    """
+    identity_path = get_hermes_home() / "IDENTITY.md"
+    if not identity_path.exists():
+        return None
+    try:
+        content = identity_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        content = _scan_context_content(content, "IDENTITY.md")
+        return _truncate_content(content, "IDENTITY.md")
+    except Exception as e:
+        logger.debug("Could not read IDENTITY.md from %s: %s", identity_path, e)
         return None
 
 
