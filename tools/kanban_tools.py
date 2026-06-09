@@ -245,6 +245,33 @@ def _attach_gateway_followup(
             exc_info=True,
         )
 
+    max_event_id = 0
+    if notify_from_now:
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) AS max_id "
+                "FROM task_events WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            max_event_id = int(row["max_id"] if row else 0)
+        except Exception:
+            max_event_id = 0
+
+    try:
+        kb.add_agent_notify_cursor(
+            conn,
+            session_id=session_id,
+            task_id=task_id,
+            notifier_profile=os.environ.get("HERMES_PROFILE") or None,
+            last_event_id=max_event_id if notify_from_now else 0,
+        )
+    except Exception:
+        logger.debug(
+            "kanban follow-up: agent notify cursor failed for %s",
+            task_id,
+            exc_info=True,
+        )
+
     platform, chat_id, thread_id, user_id = _current_gateway_notify_context()
     if platform and chat_id and platform not in {"local", "api_server", "webhook"}:
         try:
@@ -258,12 +285,6 @@ def _attach_gateway_followup(
                 notifier_profile=os.environ.get("HERMES_PROFILE") or None,
             )
             if notify_from_now:
-                row = conn.execute(
-                    "SELECT COALESCE(MAX(id), 0) AS max_id "
-                    "FROM task_events WHERE task_id = ?",
-                    (task_id,),
-                ).fetchone()
-                max_event_id = int(row["max_id"] if row else 0)
                 with kb.write_txn(conn):
                     conn.execute(
                         """

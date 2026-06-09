@@ -5676,12 +5676,96 @@ class GatewayRunner:
                                     "task": task,
                                     "board": slug,
                                 })
+                            try:
+                                agent_deliveries = _kb.claim_unseen_events_for_agent_cursors(
+                                    conn,
+                                    kinds=TERMINAL_KINDS,
+                                    notifier_profile=notifier_profile,
+                                )
+                            except Exception as exc:
+                                logger.debug(
+                                    "kanban notifier: cannot claim agent wakeups on board %s: %s",
+                                    slug, exc,
+                                )
+                                agent_deliveries = []
+                            for delivery in agent_deliveries:
+                                delivery["agent_wakeup"] = True
+                                delivery["board"] = slug
+                                deliveries.append(delivery)
                         finally:
                             conn.close()
                     return deliveries
 
                 deliveries = await asyncio.to_thread(_collect)
                 for d in deliveries:
+                    if d.get("agent_wakeup"):
+                        task = d["task"]
+                        sub = {
+                            "task_id": d.get("task_id") or getattr(task, "id", ""),
+                            "platform": "",
+                            "chat_id": "",
+                            "thread_id": "",
+                            "user_id": "",
+                        }
+                        board_slug = d.get("board")
+                        source = self._kanban_event_source_for_task(task, sub)
+                        if not source:
+                            logger.debug(
+                                "kanban notifier: no source for agent wakeup %s session=%s; rewinding claim",
+                                sub["task_id"], d.get("session_id") or getattr(task, "session_id", ""),
+                            )
+                            await asyncio.to_thread(
+                                self._kanban_rewind_agent,
+                                d.get("session_id") or getattr(task, "session_id", ""),
+                                sub["task_id"],
+                                d["cursor"],
+                                d.get("old_cursor", 0),
+                                board_slug,
+                            )
+                            continue
+                        adapter = self.adapters.get(source.platform)
+                        if adapter is None:
+                            logger.debug(
+                                "kanban notifier: adapter %s disconnected before agent wakeup for %s; rewinding claim",
+                                getattr(source.platform, "value", source.platform), sub["task_id"],
+                            )
+                            await asyncio.to_thread(
+                                self._kanban_rewind_agent,
+                                d.get("session_id") or getattr(task, "session_id", ""),
+                                sub["task_id"],
+                                d["cursor"],
+                                d.get("old_cursor", 0),
+                                board_slug,
+                            )
+                            continue
+                        try:
+                            for ev in d["events"]:
+                                await self._inject_kanban_agent_notification(
+                                    adapter=adapter,
+                                    task=task,
+                                    sub=sub,
+                                    event=ev,
+                                    board=board_slug,
+                                )
+                            logger.debug(
+                                "kanban notifier: delivered %d agent wakeup event(s) for %s on board %s",
+                                len(d["events"]), sub["task_id"], board_slug,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "kanban notifier: agent wakeup failed for %s; rewinding claim: %s",
+                                sub["task_id"], exc,
+                            )
+                            await asyncio.to_thread(
+                                self._kanban_rewind_agent,
+                                d.get("session_id") or getattr(task, "session_id", ""),
+                                sub["task_id"],
+                                d["cursor"],
+                                d.get("old_cursor", 0),
+                                board_slug,
+                            )
+                        continue
+
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
@@ -5710,6 +5794,7 @@ class GatewayRunner:
                         )
                         continue
                     title = (task.title if task else sub["task_id"])[:120]
+                    agent_wakeup_delivered = False
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -5786,6 +5871,7 @@ class GatewayRunner:
                                     event=ev,
                                     board=board_slug,
                                 )
+                                agent_wakeup_delivered = True
                             else:
                                 await adapter.send(
                                     sub["chat_id"], msg, metadata=metadata,
@@ -5856,6 +5942,14 @@ class GatewayRunner:
                         await asyncio.to_thread(
                             self._kanban_advance, sub, d["cursor"], board_slug,
                         )
+                        if agent_wakeup_delivered and task:
+                            await asyncio.to_thread(
+                                self._kanban_advance_agent,
+                                getattr(task, "session_id", "") or "",
+                                sub["task_id"],
+                                d["cursor"],
+                                board_slug,
+                            )
                         # Unsubscribe only when the task has reached a truly
                         # final status (done / archived). For blocked /
                         # gave_up / crashed / timed_out the subscription is
@@ -5912,6 +6006,26 @@ class GatewayRunner:
         finally:
             conn.close()
 
+    def _kanban_advance_agent(
+        self,
+        session_id: str,
+        task_id: str,
+        cursor: int,
+        board: Optional[str] = None,
+    ) -> None:
+        """Sync helper: advance a parent-agent wakeup cursor."""
+        from hermes_cli import kanban_db as _kb
+        conn = _kb.connect(board=board)
+        try:
+            _kb.add_agent_notify_cursor(
+                conn,
+                session_id=session_id,
+                task_id=task_id,
+                last_event_id=cursor,
+            )
+        finally:
+            conn.close()
+
     def _kanban_rewind(
         self,
         sub: dict,
@@ -5929,6 +6043,28 @@ class GatewayRunner:
                 platform=sub["platform"],
                 chat_id=sub["chat_id"],
                 thread_id=sub.get("thread_id") or "",
+                claimed_cursor=claimed_cursor,
+                old_cursor=old_cursor,
+            )
+        finally:
+            conn.close()
+
+    def _kanban_rewind_agent(
+        self,
+        session_id: str,
+        task_id: str,
+        claimed_cursor: int,
+        old_cursor: int,
+        board: Optional[str] = None,
+    ) -> None:
+        """Sync helper: undo a claimed parent-agent wakeup cursor."""
+        from hermes_cli import kanban_db as _kb
+        conn = _kb.connect(board=board)
+        try:
+            _kb.rewind_agent_notify_cursor(
+                conn,
+                session_id=session_id,
+                task_id=task_id,
                 claimed_cursor=claimed_cursor,
                 old_cursor=old_cursor,
             )

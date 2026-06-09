@@ -1041,6 +1041,7 @@ def test_create_auto_subscribes_gateway_chat_context(monkeypatch, worker_env):
     conn = kb.connect()
     try:
         subs = kb.list_notify_subs(conn, d["task_id"])
+        cursors = kb.list_agent_notify_cursors(conn, d["task_id"])
     finally:
         conn.close()
     assert len(subs) == 1
@@ -1049,6 +1050,44 @@ def test_create_auto_subscribes_gateway_chat_context(monkeypatch, worker_env):
     assert subs[0]["thread_id"] == "thread-9"
     assert subs[0]["user_id"] == "user-7"
     assert subs[0]["notifier_profile"] == "yuri"
+    assert len(cursors) == 1
+    assert cursors[0]["session_id"] == "gateway-sess-sub"
+    assert cursors[0]["last_event_id"] == 0
+
+
+def test_create_registers_agent_wakeup_cursor_without_chat_context(
+    monkeypatch, worker_env
+):
+    """A stamped gateway task should wake its parent even when there is no
+    human-facing notify subscription."""
+    monkeypatch.setenv("HERMES_PROFILE", "yuri")
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    tokens = set_session_vars(session_id="gateway-sess-agent-only")
+    try:
+        out = kt._handle_create({
+            "title": "agent-only child",
+            "assignee": "peer",
+            "parents": [worker_env],
+        })
+    finally:
+        clear_session_vars(tokens)
+
+    d = json.loads(out)
+    assert d["ok"] is True
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, d["task_id"])
+        cursors = kb.list_agent_notify_cursors(conn, d["task_id"])
+    finally:
+        conn.close()
+    assert subs == []
+    assert len(cursors) == 1
+    assert cursors[0]["session_id"] == "gateway-sess-agent-only"
+    assert cursors[0]["notifier_profile"] == "yuri"
+    assert cursors[0]["last_event_id"] == 0
 
 
 def test_create_session_id_arg_overrides_env(monkeypatch, worker_env):
