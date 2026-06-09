@@ -3426,6 +3426,40 @@ class TestRunConversation:
         assert persisted_messages[0]["content"] == "hello"
         assert result["messages"][0]["content"] == "hello"
 
+    def test_prior_user_turn_time_tags_are_reconstructed_from_metadata(self, agent):
+        self._setup_agent(agent)
+        agent._inject_current_time_in_user_turn = True
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Final answer", finish_reason="stop"
+        )
+        tz = timezone(timedelta(hours=-7), "PDT")
+        prior_ts = datetime(2026, 4, 8, 23, 5, tzinfo=tz).timestamp()
+        fake_now = datetime(2026, 4, 9, 1, 39, tzinfo=tz)
+        history = [
+            {"role": "user", "content": "earlier", "_timestamp": prior_ts},
+            {"role": "assistant", "content": "prior answer"},
+        ]
+
+        with (
+            patch("hermes_time.get_timezone", return_value=tz),
+            patch("hermes_time.now", return_value=fake_now),
+            patch.object(agent, "_persist_session") as mock_persist,
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello", conversation_history=history)
+
+        api_messages = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        api_users = [msg for msg in api_messages if msg.get("role") == "user"]
+        assert api_users[0]["content"] == "[2026-04-08 Wed 23:05 PDT] earlier"
+        assert api_users[1]["content"] == "[2026-04-09 Thu 01:39 PDT] hello"
+        assert all("_timestamp" not in msg and "timestamp" not in msg for msg in api_users)
+
+        persisted_messages = mock_persist.call_args.args[0]
+        assert persisted_messages[0]["content"] == "earlier"
+        assert persisted_messages[-2]["content"] == "hello"
+        assert result["messages"][-2]["content"] == "hello"
+
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

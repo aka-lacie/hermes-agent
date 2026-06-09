@@ -1309,7 +1309,9 @@ class APIServerAdapter(BasePlatformAdapter):
         if db is None:
             return []
         try:
-            return db.get_messages_as_conversation(session_id)
+            return db.get_messages_as_conversation(
+                session_id, include_timestamps=True
+            )
         except Exception as exc:
             logger.warning("Failed to load session history for %s: %s", session_id, exc)
             return []
@@ -1777,7 +1779,9 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 db = self._ensure_session_db()
                 if db is not None:
-                    history = db.get_messages_as_conversation(session_id)
+                    history = db.get_messages_as_conversation(
+                        session_id, include_timestamps=True
+                    )
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []

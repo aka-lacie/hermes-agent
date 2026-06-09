@@ -21,6 +21,7 @@ import re
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -34,6 +35,32 @@ T = TypeVar("T")
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
 SCHEMA_VERSION = 14
+
+
+def _coerce_message_timestamp(value: Any) -> Optional[float]:
+    """Coerce persisted/cached message timestamp metadata to epoch seconds."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            ts = float(raw)
+        except ValueError:
+            try:
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                return None
+    else:
+        return None
+    if ts > 10_000_000_000:
+        ts /= 1000.0
+    if ts <= 0:
+        return None
+    return ts
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -1947,6 +1974,7 @@ class SessionDB:
         provider_data: Any = None,
         platform_message_id: str = None,
         observed: bool = False,
+        timestamp: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -1987,6 +2015,7 @@ class SessionDB:
         num_tool_calls = 0
         if tool_calls is not None:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
+        message_timestamp = _coerce_message_timestamp(timestamp) or time.time()
 
         def _do(conn):
             cursor = conn.execute(
@@ -2003,7 +2032,7 @@ class SessionDB:
                     tool_call_id,
                     tool_calls_json,
                     tool_name,
-                    time.time(),
+                    message_timestamp,
                     token_count,
                     finish_reason,
                     reasoning,
@@ -2089,6 +2118,12 @@ class SessionDB:
                 platform_msg_id = (
                     msg.get("platform_message_id") or msg.get("message_id")
                 )
+                msg_ts = (
+                    _coerce_message_timestamp(
+                        msg.get("_timestamp", msg.get("timestamp"))
+                    )
+                    or now_ts
+                )
 
                 conn.execute(
                     """INSERT INTO messages (session_id, role, content, tool_call_id,
@@ -2104,7 +2139,7 @@ class SessionDB:
                         msg.get("tool_call_id"),
                         tool_calls_json,
                         msg.get("tool_name"),
-                        now_ts,
+                        msg_ts,
                         msg.get("token_count"),
                         msg.get("finish_reason"),
                         msg.get("reasoning") if role == "assistant" else None,
@@ -2123,7 +2158,7 @@ class SessionDB:
                     total_tool_calls += (
                         len(tool_calls) if isinstance(tool_calls, list) else 1
                     )
-                now_ts += 1e-6
+                now_ts = max(now_ts + 1e-6, msg_ts + 1e-6)
 
             conn.execute(
                 "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
@@ -2435,6 +2470,7 @@ class SessionDB:
         session_id: str,
         include_ancestors: bool = False,
         include_inactive: bool = False,
+        include_timestamps: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
@@ -2455,7 +2491,8 @@ class SessionDB:
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, gemini_content, "
                 "reasoning_details, codex_reasoning_items, "
-                "codex_message_items, provider_data, platform_message_id, observed "
+                "codex_message_items, provider_data, platform_message_id, "
+                "observed, timestamp "
                 f"FROM messages WHERE session_id IN ({placeholders})"
                 f"{active_clause} ORDER BY id",
                 tuple(session_ids),
@@ -2486,6 +2523,8 @@ class SessionDB:
                 msg["message_id"] = row["platform_message_id"]
             if row["observed"]:
                 msg["observed"] = True
+            if include_timestamps and row["role"] == "user":
+                msg["_timestamp"] = row["timestamp"]
             # Restore reasoning fields on assistant messages so providers
             # that replay reasoning (OpenRouter, OpenAI, Nous) receive
             # coherent multi-turn reasoning context.

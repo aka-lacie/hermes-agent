@@ -1280,6 +1280,7 @@ class SessionStore:
                         message.get("platform_message_id") or message.get("message_id")
                     ),
                     observed=bool(message.get("observed")),
+                    timestamp=message.get("_timestamp", message.get("timestamp")),
                 )
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
@@ -1306,7 +1307,9 @@ class SessionStore:
         if not self._db:
             return []
         try:
-            return self._db.get_messages_as_conversation(session_id)
+            return self._db.get_messages_as_conversation(
+                session_id, include_timestamps=True
+            )
         except Exception as e:
             logger.debug("Could not load messages from DB: %s", e)
             return []

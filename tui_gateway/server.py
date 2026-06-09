@@ -458,6 +458,28 @@ def _get_db():
     return _db
 
 
+def _get_conversation_history(
+    db,
+    session_id: str,
+    *,
+    include_ancestors: bool = False,
+    include_timestamps: bool = False,
+):
+    try:
+        return db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=include_ancestors,
+            include_timestamps=include_timestamps,
+        )
+    except TypeError as exc:
+        if "include_timestamps" not in str(exc):
+            raise
+        return db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=include_ancestors,
+        )
+
+
 def _db_unavailable_error(rid, *, code: int):
     detail = _db_error or "state.db unavailable"
     return _err(rid, code, f"state.db unavailable: {detail}")
@@ -3260,7 +3282,9 @@ def _(rid, params: dict) -> dict:
     )
     try:
         db.reopen_session(target)
-        history = db.get_messages_as_conversation(target)
+        history = _get_conversation_history(
+            db, target, include_timestamps=True
+        )
         display_history = db.get_messages_as_conversation(
             target, include_ancestors=True
         )
@@ -3966,6 +3990,7 @@ def _(rid, params: dict) -> dict:
                 session_id=new_key,
                 role=msg.get("role", "user"),
                 content=msg.get("content"),
+                timestamp=msg.get("_timestamp", msg.get("timestamp")),
             )
         db.set_session_title(new_key, title)
     except Exception as e:
@@ -6529,7 +6554,9 @@ def _(rid, params: dict) -> dict:
         # Reload the active-only transcript into the in-memory session
         # history so subsequent turns see the truncated view.
         try:
-            active = db.get_messages_as_conversation(session_key)
+            active = _get_conversation_history(
+                db, session_key, include_timestamps=True
+            )
         except Exception:
             active = []
         with session["history_lock"]:

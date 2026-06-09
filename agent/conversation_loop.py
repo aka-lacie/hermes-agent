@@ -25,6 +25,7 @@ import ssl
 import threading
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
@@ -329,16 +330,64 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                 agent.session_id, exc,
             )
 
-def _build_current_time_user_context(agent) -> str:
-    """Return an ephemeral timestamp prefix for the active user turn."""
+def _coerce_turn_timestamp(value: Any) -> Optional[float]:
+    """Return a Unix timestamp in seconds, or None for invalid metadata."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            ts = float(raw)
+        except ValueError:
+            try:
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                return None
+    else:
+        return None
+    if ts > 10_000_000_000:
+        ts /= 1000.0
+    if ts <= 0:
+        return None
+    return ts
+
+
+def _datetime_from_turn_timestamp(value: Any) -> Optional[datetime]:
+    ts = _coerce_turn_timestamp(value)
+    if ts is None:
+        return None
+    try:
+        from hermes_time import get_timezone
+
+        tz = get_timezone()
+        if tz is not None:
+            return datetime.fromtimestamp(ts, tz)
+        return datetime.fromtimestamp(ts).astimezone()
+    except Exception:
+        logger.debug("Current-time user context timestamp conversion failed", exc_info=True)
+        return None
+
+
+def _format_user_turn_time_context(dt: datetime) -> str:
+    stamp = dt.strftime("%Y-%m-%d %a %H:%M %Z").strip()
+    return f"[{stamp}]" if stamp else ""
+
+
+def _build_current_time_user_context(agent, timestamp: Any = None) -> str:
+    """Return an ephemeral timestamp prefix for a user turn."""
     if not getattr(agent, "_inject_current_time_in_user_turn", False):
         return ""
     try:
+        if timestamp is not None:
+            dt = _datetime_from_turn_timestamp(timestamp)
+            return _format_user_turn_time_context(dt) if dt is not None else ""
         from hermes_time import now as _hermes_now
 
-        stamp = _hermes_now().strftime("%Y-%m-%d %a %H:%M %Z").strip()
-        if stamp:
-            return f"[{stamp}]"
+        return _format_user_turn_time_context(_hermes_now())
     except Exception:
         logger.debug("Current-time user context injection failed", exc_info=True)
     return ""
@@ -588,8 +637,28 @@ def run_conversation(
             _should_review_memory = True
             agent._turns_since_memory = 0
 
-    # Add user message
-    user_msg = {"role": "user", "content": user_message}
+    # Add user message. Store a numeric timestamp as metadata so API-time
+    # prefixes can be reconstructed without saving plaintext prefixes in
+    # message content.
+    current_turn_timestamp = time.time()
+    current_turn_time_context = ""
+    if getattr(agent, "_inject_current_time_in_user_turn", False):
+        try:
+            from hermes_time import now as _hermes_now
+
+            current_turn_dt = _hermes_now()
+            current_turn_timestamp = current_turn_dt.timestamp()
+            current_turn_time_context = _format_user_turn_time_context(current_turn_dt)
+        except Exception:
+            logger.debug("Current user-turn timestamp capture failed", exc_info=True)
+            current_turn_time_context = _build_current_time_user_context(
+                agent, current_turn_timestamp
+            )
+    user_msg = {
+        "role": "user",
+        "content": user_message,
+        "_timestamp": current_turn_timestamp,
+    }
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
@@ -752,7 +821,10 @@ def run_conversation(
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
 
-    _current_time_user_context = _build_current_time_user_context(agent)
+    _current_time_user_context = (
+        current_turn_time_context
+        or _build_current_time_user_context(agent, current_turn_timestamp)
+    )
 
     # Main conversation loop
     api_call_count = 0
@@ -1000,16 +1072,23 @@ def run_conversation(
             # with target="user_message" (the default).  Both are
             # API-call-time only — the original message in `messages` is
             # never mutated, so nothing leaks into session persistence.
-            if idx == current_turn_user_idx and msg.get("role") == "user":
+            if msg.get("role") == "user":
                 _prefix_injections = []
                 _suffix_injections = []
-                if _current_time_user_context:
-                    _prefix_injections.append(_current_time_user_context)
-                if _ext_prefetch_cache:
+                _turn_time_context = (
+                    _current_time_user_context
+                    if idx == current_turn_user_idx
+                    else _build_current_time_user_context(
+                        agent, msg.get("_timestamp", msg.get("timestamp"))
+                    )
+                )
+                if _turn_time_context:
+                    _prefix_injections.append(_turn_time_context)
+                if idx == current_turn_user_idx and _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
                         _suffix_injections.append(_fenced)
-                if _plugin_user_context:
+                if idx == current_turn_user_idx and _plugin_user_context:
                     _suffix_injections.append(_plugin_user_context)
                 if _prefix_injections or _suffix_injections:
                     _base = api_msg.get("content", "")

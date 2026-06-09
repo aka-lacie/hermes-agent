@@ -532,6 +532,46 @@ class TestMessageStorage:
         assert conv[0] == {"role": "user", "content": "Hello"}
         assert conv[1] == {"role": "assistant", "content": "Hi!"}
 
+    def test_get_messages_as_conversation_can_include_user_timestamps(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(
+            "s1",
+            role="user",
+            content="Hello",
+            timestamp=1_775_700_300.0,
+        )
+        db.append_message("s1", role="assistant", content="Hi!")
+
+        default_conv = db.get_messages_as_conversation("s1")
+        timed_conv = db.get_messages_as_conversation("s1", include_timestamps=True)
+
+        assert default_conv[0] == {"role": "user", "content": "Hello"}
+        assert "_timestamp" not in default_conv[0]
+        assert timed_conv[0] == {
+            "role": "user",
+            "content": "Hello",
+            "_timestamp": 1_775_700_300.0,
+        }
+        assert "_timestamp" not in timed_conv[1]
+
+    def test_replace_messages_preserves_timestamp_metadata(self, db):
+        db.create_session(session_id="s1", source="cli")
+
+        db.replace_messages(
+            "s1",
+            [
+                {
+                    "role": "user",
+                    "content": "Hello",
+                    "_timestamp": 1_775_700_300.0,
+                },
+                {"role": "assistant", "content": "Hi!"},
+            ],
+        )
+
+        messages = db.get_messages("s1")
+        assert messages[0]["timestamp"] == 1_775_700_300.0
+
     def test_platform_message_id_round_trips(self, db):
         """Platform-side message ids (yuanbao msg_id, telegram update_id, …)
         survive append → get_messages_as_conversation under the
