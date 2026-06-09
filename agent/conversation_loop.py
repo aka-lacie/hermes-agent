@@ -1078,10 +1078,14 @@ def run_conversation(
                 _turn_time_context = (
                     _current_time_user_context
                     if idx == current_turn_user_idx
-                    else _build_current_time_user_context(
-                        agent, msg.get("_timestamp", msg.get("timestamp"))
-                    )
+                    else ""
                 )
+                if idx != current_turn_user_idx:
+                    _msg_timestamp = msg.get("_timestamp", msg.get("timestamp"))
+                    if _msg_timestamp is not None:
+                        _turn_time_context = _build_current_time_user_context(
+                            agent, _msg_timestamp
+                        )
                 if _turn_time_context:
                     _prefix_injections.append(_turn_time_context)
                 if idx == current_turn_user_idx and _ext_prefetch_cache:

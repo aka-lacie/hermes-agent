@@ -543,6 +543,10 @@ def _build_replay_entry(role: str, content: Any, msg: Dict[str, Any]) -> Dict[st
     providers.
     """
     entry: Dict[str, Any] = {"role": role, "content": content}
+    if role == "user":
+        _timestamp = msg.get("_timestamp", msg.get("timestamp"))
+        if _timestamp is not None:
+            entry["_timestamp"] = _timestamp
     if role == "assistant":
         for _rkey in _ASSISTANT_REPLAY_FIELDS:
             if _rkey not in msg:
@@ -667,7 +671,8 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
     Skips metadata-only rows (``session_meta``, system injections) that are
     dropped before being handed to the agent.  Returns ``None`` when no
     usable row carries a timestamp — callers should treat that as "fresh"
-    for backward compatibility.
+    for backward compatibility. Some replay paths only annotate user turns, so
+    timestamp-less assistant/tool rows are skipped while scanning backward.
     """
     if not history:
         return None
@@ -677,12 +682,13 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
         role = msg.get("role")
         if not role or role in {"session_meta", "system"}:
             continue
-        ts = msg.get("timestamp")
+        ts = msg.get("timestamp", msg.get("_timestamp"))
         if ts is not None:
             return ts
-        # First non-meta row without a timestamp — legacy transcript row.
-        # Returning None lets the caller fall through to the legacy-fresh path.
-        return None
+        # Timestamp metadata is optional per row; DB replay currently carries it
+        # on user turns. Keep scanning backward before falling through to the
+        # legacy-fresh path.
+        continue
     return None
 
 

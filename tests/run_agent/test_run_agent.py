@@ -3460,6 +3460,31 @@ class TestRunConversation:
         assert persisted_messages[-2]["content"] == "hello"
         assert result["messages"][-2]["content"] == "hello"
 
+    def test_prior_user_turn_without_timestamp_does_not_get_current_time(self, agent):
+        self._setup_agent(agent)
+        agent._inject_current_time_in_user_turn = True
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Final answer", finish_reason="stop"
+        )
+        fake_now = datetime(2026, 4, 9, 1, 39, tzinfo=timezone(timedelta(hours=-7), "PDT"))
+        history = [
+            {"role": "user", "content": "earlier"},
+            {"role": "assistant", "content": "prior answer"},
+        ]
+
+        with (
+            patch("hermes_time.now", return_value=fake_now),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            agent.run_conversation("hello", conversation_history=history)
+
+        api_messages = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        api_users = [msg for msg in api_messages if msg.get("role") == "user"]
+        assert api_users[0]["content"] == "earlier"
+        assert api_users[1]["content"] == "[2026-04-09 Thu 01:39 PDT] hello"
+
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
