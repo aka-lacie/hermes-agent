@@ -260,7 +260,7 @@ Merge rule:
 
 Status: `keep-isolate`
 
-Commits: `535976a01`, `b7933e81b`
+Commits: `535976a01`, `b7933e81b`, `b1c8d8e19`
 
 Behavior:
 - Gateway-created kanban tasks are stamped with the originating gateway
@@ -268,6 +268,10 @@ Behavior:
 - Terminal kanban task events for session-stamped tasks wake the parent
   gateway agent with a synthetic internal message, instead of only sending a
   human-facing platform notification.
+- Session-id wakeups are also tracked through `kanban_agent_notify_cursors`
+  for tasks without a human-facing chat subscription. Chat-backed task
+  deliveries advance the agent cursor too, so terminal events are not replayed
+  after the chat subscription is removed.
 - Worker handoff text surfaced into gateway agent context is quoted and
   labelled as untrusted data so child summaries cannot become parent-system
   instructions.
@@ -283,6 +287,7 @@ Behavior:
 
 Main files:
 - `gateway/run.py`
+- `hermes_cli/kanban_db.py`
 - `gateway/session_context.py`
 - `gateway/kanban_dispatch_signal.py`
 - `tools/kanban_tools.py`
@@ -302,13 +307,59 @@ Merge rule:
 - Preserve session-id stamping through `gateway.session_context`; do not fall
   back to process-global env-only session routing for concurrent gateway turns.
 - Preserve synthetic parent-agent wakeups for session-stamped terminal kanban
-  events, including untrusted-data quoting for worker handoffs.
+  events, including agent-only cursors and untrusted-data quoting for worker
+  handoffs.
 - Preserve immediate dispatcher nudges for session-stamped create/unblock/link
   mutations, but keep task execution inside the normal dispatcher path.
 - Preserve "from now" notification cursors for follow-up subscriptions so old
   terminal events are not replayed.
 - Accept upstream kanban dispatcher or notifier refactors when these semantics
   stay covered by focused tests.
+
+### Profile Identity Prompt Overlay
+
+Status: `keep-isolate`
+
+Commits: `6558e16ec`
+
+Behavior:
+- Profiles may carry a root-level `IDENTITY.md` in addition to `SOUL.md`.
+- `IDENTITY.md` is loaded only from the active Hermes profile root, not from
+  the current workspace, and is appended to the stable system prompt after the
+  SOUL/default identity block.
+- Profile cloning copies `IDENTITY.md` alongside `config.yaml`, `.env`, and
+  `SOUL.md`.
+
+Main files:
+- `agent/prompt_builder.py`
+- `agent/system_prompt.py`
+- `hermes_cli/profiles.py`
+- `run_agent.py`
+- `tests/agent/test_prompt_builder.py`
+- `tests/agent/test_system_prompt.py`
+
+Merge rule:
+- Preserve `IDENTITY.md` as a profile-root-only stable prompt overlay.
+- Do not let workspace-local `IDENTITY.md` files become context files unless a
+  separate explicit feature adds that behavior.
+- Keep `SOUL.md` as the primary identity slot; `IDENTITY.md` is additive.
+
+### Chat Completion Streaming Gemini Replay Fix
+
+Status: `keep`
+
+Commits: `b12b177f4`
+
+Behavior:
+- Imports `copy` for the chat-completion streaming path that deep-copies
+  Gemini provider parts before mutating accumulated tool-call state.
+
+Main files:
+- `agent/chat_completion_helpers.py`
+
+Merge rule:
+- Preserve the `copy.deepcopy` import/use when keeping the Gemini provider
+  replay accumulation path.
 
 ### Agent-Facing Time Context
 
