@@ -15,6 +15,7 @@ sites unchanged.  Symbols that tests patch on ``run_agent`` (e.g.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
