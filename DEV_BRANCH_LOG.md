@@ -320,7 +320,7 @@ Merge rule:
 
 Status: `keep-isolate`
 
-Commits: `72b272689`
+Commits: `c5fa84d32`
 
 Behavior:
 - Adds `hermes kanban worker --profile <profile>`, a headless non-gateway
