@@ -354,7 +354,11 @@ def test_is_native_gemini_base_url_accepts_provider_pinned_proxy_route():
 
     assert is_native_gemini_base_url("http://127.0.0.1:8080/api/provider/gemini/v1beta")
     assert is_native_gemini_base_url("http://127.0.0.1:8080/api/provider/google/v1beta")
+    assert is_native_gemini_base_url("http://localhost:8080/v1beta")
+    assert is_native_gemini_base_url("http://127.0.0.1:8080/v1beta")
+    assert is_native_gemini_base_url("http://[::1]:8080/v1beta")
     assert not is_native_gemini_base_url("http://127.0.0.1:8080/v1/chat/completions")
+    assert not is_native_gemini_base_url("https://example.com/v1beta")
 
 
 def test_native_client_rejects_empty_api_key_with_actionable_message():

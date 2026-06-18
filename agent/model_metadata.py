@@ -546,6 +546,13 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     import httpx
 
     normalized = _normalize_base_url(base_url)
+    try:
+        from agent.gemini_native_adapter import is_native_gemini_base_url
+
+        if is_native_gemini_base_url(normalized):
+            return None
+    except Exception:
+        pass
     server_url = normalized
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]

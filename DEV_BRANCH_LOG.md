@@ -158,6 +158,9 @@ Behavior:
   Gemini content, Codex reasoning/message items, reasoning details, and
   OpenAI-compatible extra content.
 - Native Gemini profile defaults are preserved.
+- Loopback native Gemini proxy endpoints exposing `/v1beta` are treated as
+  native Gemini, not generic OpenAI-compatible local servers, so local
+  context-length probing is skipped for those URLs.
 
 Main files:
 - `agent/gemini_native_adapter.py`
@@ -195,6 +198,8 @@ Merge rule:
   replacement with tests for the same providers.
 - Preserve `provider_data` namespace compatibility; do not collapse local
   Google/Codex replay metadata back into one-off top-level fields only.
+- Preserve native Gemini base URL detection for loopback `/v1beta` proxy
+  endpoints and skip generic local-server probes for those endpoints.
 - For conflicts, prefer upstream structure but re-add local replay fields and
   tests.
 

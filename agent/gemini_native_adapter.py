@@ -26,6 +26,7 @@ import time
 import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _NATIVE_GEMINI_PROXY_PATH_RE = re.compile(r"/api/provider/(?:gemini|google)/v\d+(?:alpha|beta)?(?:/|$)")
 _NATIVE_GEMINI_VERSION_PATH_RE = re.compile(r"/v\d+(?:alpha|beta)(?:/|$)")
+_LOOPBACK_NATIVE_GEMINI_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 # Published max output-token ceiling shared by every current Gemini text model
 # (2.5 + 3.x: flash, flash-lite, pro). Used as the default when the caller
@@ -74,6 +76,12 @@ def is_native_gemini_base_url(base_url: str) -> bool:
     if "generativelanguage.googleapis.com" in normalized:
         return True
     if _NATIVE_GEMINI_PROXY_PATH_RE.search(normalized):
+        return True
+    parsed = urlparse(normalized)
+    if (
+        (parsed.hostname or "") in _LOOPBACK_NATIVE_GEMINI_HOSTS
+        and _NATIVE_GEMINI_VERSION_PATH_RE.search(parsed.path)
+    ):
         return True
     if "gemini" in normalized and _NATIVE_GEMINI_VERSION_PATH_RE.search(normalized):
         return True
