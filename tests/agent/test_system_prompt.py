@@ -31,7 +31,7 @@ def _captured_context_cwd(agent):
     """The cwd build_system_prompt_parts hands to build_context_files_prompt."""
     captured = {}
 
-    def fake_context_files(cwd=None, skip_soul=False):
+    def fake_context_files(cwd=None, skip_soul=False, context_length=None):
         captured["cwd"] = cwd
         return ""
 
@@ -72,3 +72,45 @@ class TestIdentityMd:
             parts = build_system_prompt_parts(agent)
 
         assert parts["stable"].index("SOUL BLOCK") < parts["stable"].index("IDENTITY BLOCK")
+
+
+def _stable_prompt(agent):
+    with (
+        patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.load_identity_md", return_value=""),
+        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch("run_agent.build_environment_hints", return_value=""),
+        patch("run_agent.build_context_files_prompt", return_value=""),
+    ):
+        return build_system_prompt_parts(agent)["stable"]
+
+
+class TestCodingContextBlock:
+    def test_injected_when_active(self, monkeypatch, tmp_path):
+        import subprocess
+
+        subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+        monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+        agent = _make_agent(valid_tool_names=["read_file"], platform="cli")
+        stable = _stable_prompt(agent)
+        assert "coding agent" in stable
+        assert "Workspace" in stable
+
+    def test_absent_when_off(self, monkeypatch, tmp_path):
+        import subprocess
+
+        subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+        monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+        agent = _make_agent(valid_tool_names=["read_file"], platform="cli")
+        # Drive the real path: force the resolved mode to "off" via config.
+        with patch("agent.coding_context._coding_mode", return_value="off"):
+            stable = _stable_prompt(agent)
+        assert "coding agent" not in stable
+
+    def test_absent_without_tools(self, monkeypatch, tmp_path):
+        import subprocess
+
+        subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+        monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+        agent = _make_agent(valid_tool_names=[], platform="cli")
+        assert "coding agent" not in _stable_prompt(agent)
