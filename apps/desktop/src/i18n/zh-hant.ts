@@ -142,6 +142,11 @@ export const zhHant = defineLocale({
     }
   },
 
+  remoteDisplayBanner: {
+    message: reason => `軟體繪圖已啟用 — 偵測到遠端顯示（${reason}）。為防止畫面閃爍，已停用 GPU 加速。`,
+    dismiss: '關閉'
+  },
+
   titlebar: {
     hideSidebar: '隱藏側邊欄',
     showSidebar: '顯示側邊欄',
@@ -489,6 +494,7 @@ export const zhHant = defineLocale({
       checkNow: '立即檢查',
       checking: '檢查中…',
       seeWhatsNew: '查看新增內容',
+      updateNow: '立即更新',
       releaseNotes: '發行說明',
       onLatest: '你已是最新版本。',
       installing: '正在安裝更新。',

@@ -159,6 +159,11 @@ export interface Translations {
     }
   }
 
+  remoteDisplayBanner: {
+    message: (reason: string) => string
+    dismiss: string
+  }
+
   titlebar: {
     hideSidebar: string
     showSidebar: string
@@ -276,6 +281,7 @@ export interface Translations {
       checkNow: string
       checking: string
       seeWhatsNew: string
+      updateNow: string
       releaseNotes: string
       onLatest: string
       installing: string

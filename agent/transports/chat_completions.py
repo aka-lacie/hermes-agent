@@ -185,6 +185,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 or "codex_message_items" in msg
                 or (not preserve_provider_data and "provider_data" in msg)
                 or "tool_name" in msg
+                or "timestamp" in msg  # #47868 — strict providers reject this
             ):
                 needs_sanitize = True
                 break
@@ -212,6 +213,7 @@ class ChatCompletionsTransport(ProviderTransport):
             if not preserve_provider_data:
                 msg.pop("provider_data", None)
             msg.pop("tool_name", None)
+            msg.pop("timestamp", None)  # #47868 — leak into strict providers
             # Drop all Hermes-internal scaffolding markers (``_``-prefixed).
             # OpenAI's message schema has no ``_``-prefixed fields, so this
             # is safe and future-proofs against new markers being added.

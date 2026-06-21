@@ -142,6 +142,11 @@ export const zh: Translations = {
     }
   },
 
+  remoteDisplayBanner: {
+    message: reason => `软件渲染已启用 — 检测到远程显示（${reason}）。为防止画面闪烁，已禁用 GPU 加速。`,
+    dismiss: '关闭'
+  },
+
   titlebar: {
     hideSidebar: '隐藏侧边栏',
     showSidebar: '显示侧边栏',
@@ -577,6 +582,7 @@ export const zh: Translations = {
       checkNow: '立即检查',
       checking: '检查中…',
       seeWhatsNew: '查看新增内容',
+      updateNow: '立即更新',
       releaseNotes: '发行说明',
       onLatest: '你已是最新版本。',
       installing: '正在安装更新。',

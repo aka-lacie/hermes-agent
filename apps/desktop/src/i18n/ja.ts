@@ -147,6 +147,12 @@ export const ja = defineLocale({
     }
   },
 
+  remoteDisplayBanner: {
+    message: reason =>
+      `ソフトウェアレンダリングが有効です — リモートディスプレイを検出しました（${reason}）。ちらつきを防ぐため GPU アクセラレーションは無効化されています。`,
+    dismiss: '閉じる'
+  },
+
   titlebar: {
     hideSidebar: 'サイドバーを非表示',
     showSidebar: 'サイドバーを表示',
@@ -500,6 +506,7 @@ export const ja = defineLocale({
       checkNow: '今すぐ確認',
       checking: '確認中…',
       seeWhatsNew: '新機能を見る',
+      updateNow: '今すぐ更新',
       releaseNotes: 'リリースノート',
       onLatest: '最新バージョンです。',
       installing: '更新をインストール中です。',

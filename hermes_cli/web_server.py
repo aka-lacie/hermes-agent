@@ -48,6 +48,7 @@ from hermes_cli.config import (
     cfg_get,
     DEFAULT_CONFIG,
     OPTIONAL_ENV_VARS,
+    clear_model_endpoint_credentials,
     get_config_path,
     get_env_path,
     get_hermes_home,
@@ -68,8 +69,11 @@ from hermes_cli.memory_providers import (
     get_memory_provider,
 )
 from gateway.status import (
+    derive_gateway_busy,
+    derive_gateway_drainable,
     get_running_pid,
     get_runtime_status_running_pid,
+    parse_active_agents,
     read_runtime_status,
 )
 from utils import env_var_enabled
@@ -901,8 +905,11 @@ def _apply_main_model_assignment(
     # same-provider re-pick so re-selecting a model doesn't wipe the key.
     if api_key.strip():
         model_cfg["api_key"] = api_key.strip()
+        model_cfg.pop("api", None)
     elif model_cfg.get("api_key") and new_provider != prev_provider:
-        model_cfg["api_key"] = ""
+        clear_model_endpoint_credentials(model_cfg, clear_api_mode=False)
+    if new_provider != prev_provider:
+        clear_model_endpoint_credentials(model_cfg, clear_api_key=False)
     model_cfg.pop("context_length", None)
     return model_cfg
 
@@ -1831,6 +1838,37 @@ async def get_status(profile: Optional[str] = None):
         except Exception:
             pass
 
+        # Busy/drainable readout (NAS lifecycle-safety gate).  active_agents is
+        # the in-flight gateway-turn count the gateway now persists at every
+        # turn boundary; gateway_busy/gateway_drainable are derived from it +
+        # liveness via the single shared contract in gateway.status.  Liveness
+        # keys off gateway_running (a live PID/health probe), NEVER
+        # gateway_updated_at — a healthy idle gateway never advances that.
+        active_agents = parse_active_agents((runtime or {}).get("active_agents", 0))
+        gateway_busy = derive_gateway_busy(
+            gateway_running=gateway_running,
+            gateway_state=gateway_state,
+            active_agents=active_agents,
+        )
+        gateway_drainable = derive_gateway_drainable(
+            gateway_running=gateway_running,
+            gateway_state=gateway_state,
+        )
+        # Resolved drain timeout (seconds) so NAS can size its poll deadline
+        # without out-of-band knowledge.  Reuse the single resolver
+        # (HERMES_RESTART_DRAIN_TIMEOUT env → config agent.restart_drain_timeout
+        # → default) rather than re-deriving the precedence chain here.
+        try:
+            from hermes_cli.gateway import _get_restart_drain_timeout
+
+            restart_drain_timeout = _get_restart_drain_timeout()
+        except ImportError:
+            # Resolver moved/renamed — fall back to the real default so the
+            # field stays a numeric poll-deadline hint, never None.
+            from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+
+            restart_drain_timeout = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+
         # Dashboard auth gate (Phase 7): surface whether the gate is engaged
         # and which providers are registered so ``hermes status`` and the
         # SPA's StatusPage can show "OAuth gate ON via Nous Research" or
@@ -1859,6 +1897,10 @@ async def get_status(profile: Optional[str] = None):
             "gateway_platforms": gateway_platforms,
             "gateway_exit_reason": gateway_exit_reason,
             "gateway_updated_at": gateway_updated_at,
+            "active_agents": active_agents,
+            "gateway_busy": gateway_busy,
+            "gateway_drainable": gateway_drainable,
+            "restart_drain_timeout": restart_drain_timeout,
             "active_sessions": active_sessions,
             "auth_required": auth_required,
             "auth_providers": auth_providers,
@@ -3871,6 +3913,8 @@ def _apply_model_assignment_sync(
                 slot_cfg = {}
             slot_cfg["provider"] = "auto"
             slot_cfg["model"] = ""
+            slot_cfg.pop("base_url", None)
+            clear_model_endpoint_credentials(slot_cfg)
             aux[slot] = slot_cfg
         cfg["auxiliary"] = aux
         save_config(cfg)
@@ -3886,8 +3930,13 @@ def _apply_model_assignment_sync(
         slot_cfg = aux.get(slot)
         if not isinstance(slot_cfg, dict):
             slot_cfg = {}
+        prev_provider = str(slot_cfg.get("provider") or "").strip().lower()
+        new_provider = provider.strip().lower()
         slot_cfg["provider"] = provider
         slot_cfg["model"] = model
+        if new_provider != prev_provider and new_provider != "custom":
+            slot_cfg.pop("base_url", None)
+            clear_model_endpoint_credentials(slot_cfg)
         aux[slot] = slot_cfg
 
     cfg["auxiliary"] = aux
