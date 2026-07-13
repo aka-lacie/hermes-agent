@@ -4093,7 +4093,7 @@ class DiscordAdapter(BasePlatformAdapter):
             await self._run_simple_slash(interaction, f"/model {name}".strip())
 
         @tree.command(name="reasoning", description="Show or change reasoning effort")
-        @discord.app_commands.describe(effort="Reasoning effort: none, minimal, low, medium, high, or xhigh.")
+        @discord.app_commands.describe(effort="Effort: none, minimal, low, medium, high, xhigh, max, or ultra.")
         async def slash_reasoning(interaction: discord.Interaction, effort: str = ""):
             await self._run_simple_slash(interaction, f"/reasoning {effort}".strip())
 
@@ -7950,6 +7950,7 @@ async def _standalone_send(
     thread_id: Optional[str] = None,
     media_files: Optional[list] = None,
     force_document: bool = False,
+    caption: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send via Discord REST API without a live gateway adapter.
 
@@ -8050,7 +8051,7 @@ async def _standalone_send(
                             {"id": str(idx), "filename": os.path.basename(path)}
                             for idx, path in enumerate(valid_media)
                         ]
-                        starter_message = {"content": message, "attachments": attachments_meta}
+                        starter_message = {"content": (caption or message), "attachments": attachments_meta}
                         payload_json = json.dumps({"name": thread_name, "message": starter_message})
 
                         form = aiohttp.FormData()
@@ -8132,13 +8133,28 @@ async def _standalone_send(
 
             # Send each media file as a separate multipart upload. Voice media
             # gets a first chance at Discord's voice path, then falls back to a
-            # normal attachment when that path is unavailable.
+            # normal attachment. A MEDIA:<path> caption rides on the first
+            # attachment, with a plain-message fallback if the file is missing.
             target_channel_id = thread_id or chat_id
+            caption_pending = bool(caption)
             for media_path, _is_voice in media_files:
                 if not os.path.exists(media_path):
                     warning = f"Media file not found, skipping: {media_path}"
                     logger.warning(warning)
                     warnings.append(warning)
+                    if caption_pending:
+                        try:
+                            async with session.post(
+                                url, headers=json_headers,
+                                json={"content": caption}, **_req_kw,
+                            ) as resp:
+                                if resp.status in {200, 201}:
+                                    last_data = await _standalone_read_json_limited(
+                                        resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES,
+                                    )
+                                    caption_pending = False
+                        except Exception:
+                            logger.warning("Discord caption-fallback send failed for missing media")
                     continue
                 if _is_voice:
                     voice_result = await _send_discord_voice_message(token, target_channel_id, media_path)
@@ -8148,6 +8164,13 @@ async def _standalone_send(
                 try:
                     form = aiohttp.FormData()
                     filename = os.path.basename(media_path)
+                    if caption_pending:
+                        form.add_field(
+                            "payload_json",
+                            json.dumps({"content": caption}),
+                            content_type="application/json",
+                        )
+                        caption_pending = False
                     with open(media_path, "rb") as f:
                         form.add_field("files[0]", f, filename=filename)
                         async with session.post(url, headers=auth_headers, data=form, **_req_kw) as resp:
