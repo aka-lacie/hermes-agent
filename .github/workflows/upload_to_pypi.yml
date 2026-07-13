@@ -55,6 +55,8 @@ jobs:
         with:
           node-version: "22"
 
+      - uses: ./.github/actions/pin-npm
+
       - name: Build web dashboard
         run: cd web && npm ci && npm run build
 

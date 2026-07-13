@@ -9,6 +9,7 @@
     "ui-tui/packages/*",
     "web"
   ],
+  "packageManager": "npm@10.9.4",
   "scripts": {
     "postinstall": "echo '✅ Browser tools ready. Run: python run_agent.py --help'",
     "install:root": "npm install --workspaces=false",
@@ -42,5 +43,12 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": "10.9.4",
+      "onFail": "error"
+    }
   }
 }

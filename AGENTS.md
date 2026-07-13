@@ -483,7 +483,7 @@ Newline-delimited JSON-RPC over stdio. Requests from Ink, events from Python. Se
 
 ```bash
 cd ui-tui
-npm install       # first time
+npm ci            # first time; preserves the committed lockfile exactly
 npm run dev       # watch mode (rebuilds hermes-ink + tsx --watch)
 npm start         # production
 npm run build     # full build (hermes-ink + tsc)

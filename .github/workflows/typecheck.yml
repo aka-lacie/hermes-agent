@@ -19,6 +19,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/pin-npm
       # --ignore-scripts: typecheck only needs the TS sources + type defs, not
       # native builds. Skipping install scripts drops node-pty's node-gyp
       # header fetch — the transient flake that killed this job pre-`tsc` — and
@@ -43,6 +44,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/pin-npm
       # Keep install scripts here: the production build may need node-pty's
       # native binary. retry handles the transient install-time fetch flakes.
       - uses: ./.github/actions/retry
