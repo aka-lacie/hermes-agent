@@ -287,10 +287,10 @@ def build_turn_context(
     install_safe_stdio,
     sanitize_surrogates,
     summarize_user_message_for_log,
-    build_current_time_user_context,
     set_session_context,
     set_current_write_origin,
     ra,
+    build_current_time_user_context=None,
     moa_active: bool = False,
 ) -> TurnContext:
     """Run the once-per-turn setup and return the loop's input context.
@@ -487,7 +487,10 @@ def build_turn_context(
             current_turn_timestamp = time.time()
     user_msg["_timestamp"] = current_turn_timestamp
     current_time_user_context = ""
-    if getattr(agent, "_inject_current_time_in_user_turn", False):
+    if (
+        getattr(agent, "_inject_current_time_in_user_turn", False)
+        and callable(build_current_time_user_context)
+    ):
         current_time_user_context = build_current_time_user_context(
             agent, current_turn_timestamp
         )
