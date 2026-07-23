@@ -1037,6 +1037,7 @@ class DiscordAdapter(BasePlatformAdapter):
         """Connect to Discord and start receiving events."""
         if not DISCORD_AVAILABLE:
             logger.error("[%s] discord.py not installed. Run: pip install discord.py", self.name)
+            self._set_fatal_error("missing_dependency", "discord.py not installed", retryable=False)
             return False
 
         # Load opus codec for voice channel support
@@ -1073,6 +1074,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         if not self.config.token:
             logger.error("[%s] No bot token configured", self.name)
+            self._set_fatal_error("missing_credentials", "No bot token configured", retryable=False)
             return False
 
         try:
@@ -2781,13 +2783,8 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
 
     def _reactions_enabled(self) -> bool:
-        """Return whether automatic processing reactions are enabled.
-
-        Disabled intentionally for Discord gateway processing indicators.  The
-        user-facing ``discord`` tool still exposes ``add_reaction``; this only
-        suppresses the adapter's automatic 👀/✅/❌ reactions.
-        """
-        return False
+        """Check if message reactions are enabled via config/env."""
+        return os.getenv("DISCORD_REACTIONS", "true").lower() not in {"false", "0", "no"}
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Add an in-progress reaction and record durable handling state."""
@@ -2817,6 +2814,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 await self._add_reaction(message, "✅")
             elif outcome == ProcessingOutcome.FAILURE:
                 await self._add_reaction(message, "❌")
+
     async def send(
         self,
         chat_id: str,
@@ -2873,11 +2871,7 @@ class DiscordAdapter(BasePlatformAdapter):
             # Format and split message if needed
             formatted = self.format_message(content)
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-            if len(chunks) > 1:
-                chunks = [
-                    re.sub(r" \((\d+)/(\d+)\)$", "", chunk)
-                    for chunk in chunks
-                ]
+
             message_ids = []
             reference = None
 
@@ -6462,6 +6456,7 @@ class DiscordAdapter(BasePlatformAdapter):
         description: str = "dangerous command",
         metadata: Optional[dict] = None,
         allow_permanent: bool = True,
+        allow_session: bool = True,
         smart_denied: bool = False,
     ) -> SendResult:
         """
@@ -6537,6 +6532,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 require_admin=require_admin,
                 admin_user_ids=admin_user_ids,
                 allow_permanent=allow_permanent,
+                allow_session=allow_session,
                 smart_denied=smart_denied,
             )
 
@@ -7801,6 +7797,7 @@ def _define_discord_view_classes() -> None:
             require_admin: bool = False,
             admin_user_ids: Optional[set] = None,
             allow_permanent: bool = True,
+            allow_session: bool = True,
             smart_denied: bool = False,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
@@ -7815,7 +7812,7 @@ def _define_discord_view_classes() -> None:
                 str(a).strip() for a in (admin_user_ids or set()) if str(a).strip()
             }
             self.resolved = False
-            if smart_denied:
+            if smart_denied or not allow_session:
                 self.remove_item(self.allow_session)
                 self.remove_item(self.allow_always)
             elif not allow_permanent:
@@ -7873,19 +7870,9 @@ def _define_discord_view_classes() -> None:
 
             self.resolved = True
 
-            # Update the embed with the decision
-            embed = interaction.message.embeds[0] if interaction.message.embeds else None
-            if embed:
-                embed.color = color
-                embed.set_footer(text=f"{label} by {interaction.user.display_name}")
-
-            # Disable all buttons
-            for child in self.children:
-                child.disabled = True
-
-            await interaction.response.edit_message(embed=embed, view=self)
-
-            # Unblock the waiting agent thread via the gateway approval queue
+            # Unblock the waiting agent thread FIRST, then render the outcome.
+            # A click that lands after the approval wait timed out (count == 0)
+            # must not claim "Approved" — the command was already denied.
             try:
                 from tools.approval import resolve_gateway_approval
                 count = resolve_gateway_approval(self.session_key, choice)
@@ -7895,6 +7882,24 @@ def _define_discord_view_classes() -> None:
                 )
             except Exception as exc:
                 logger.error("Failed to resolve gateway approval from button: %s", exc)
+                count = 0
+
+            if not count:
+                color = discord.Color.dark_grey()
+                label = "⌛ Approval expired — command was not run (already timed out or resolved elsewhere)"
+
+            # Update the embed with the decision
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            if embed:
+                embed.color = color
+                footer = f"{label} by {interaction.user.display_name}" if count else label
+                embed.set_footer(text=footer)
+
+            # Disable all buttons
+            for child in self.children:
+                child.disabled = True
+
+            await interaction.response.edit_message(embed=embed, view=self)
 
         @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
         async def allow_once(
@@ -8859,67 +8864,6 @@ def _standalone_sanitize_error(text) -> str:
     )
 
 
-async def _send_discord_voice_message(token: str, chat_id: str, media_path: str) -> Dict[str, Any]:
-    """Attempt Discord voice-message delivery for standalone sends.
-
-    The REST-only sender cannot join or play into voice channels on its own, so
-    the default path reports unavailability and lets callers fall back to a
-    standard attachment. Tests can patch this hook to verify voice-first flow.
-    """
-    return {"error": "Discord voice message delivery requires a live gateway adapter"}
-
-
-async def _send_discord_attachments(
-    token: str,
-    chat_id: str,
-    message: str,
-    media_paths: list[str],
-) -> Dict[str, Any]:
-    """Upload one or more files to a Discord channel/thread via REST."""
-    try:
-        import aiohttp
-    except ImportError:
-        return {"error": "aiohttp not installed. Run: pip install aiohttp"}
-    try:
-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
-
-        _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
-        _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-        url = f"https://discord.com/api/v10/channels/{chat_id}/messages"
-        headers = {"Authorization": f"Bot {token}"}
-        last_data = None
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
-            for media_path in media_paths:
-                try:
-                    form = aiohttp.FormData()
-                    payload = {"content": message} if message else {}
-                    if payload:
-                        form.add_field("payload_json", json.dumps(payload), content_type="application/json")
-                    with open(media_path, "rb") as f:
-                        form.add_field("files[0]", f, filename=os.path.basename(media_path))
-                        async with session.post(url, headers=headers, data=form, **_req_kw) as resp:
-                            if resp.status not in (200, 201):
-                                body = await resp.text()
-                                return {
-                                    "error": _standalone_sanitize_error(
-                                        f"Discord attachment upload error ({resp.status}): {body}"
-                                    )
-                                }
-                            last_data = await resp.json()
-                except Exception as e:
-                    return {"error": _standalone_sanitize_error(f"Discord attachment upload failed: {e}")}
-        if last_data is None:
-            return {"error": "No Discord attachments to upload"}
-        return {
-            "success": True,
-            "platform": "discord",
-            "chat_id": chat_id,
-            "message_id": last_data.get("id"),
-        }
-    except Exception as e:
-        return {"error": _standalone_sanitize_error(f"Discord attachment upload failed: {e}")}
-
-
 def _standalone_close_response(resp: Any) -> None:
     close = getattr(resp, "close", None)
     if callable(close):
@@ -9185,11 +9129,12 @@ async def _standalone_send(
                         _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES,
                     )
 
-            # Send each media file as a separate multipart upload. Voice media
-            # gets a first chance at Discord's voice path, then falls back to a
-            # normal attachment. A MEDIA:<path> caption rides on the first
-            # attachment, with a plain-message fallback if the file is missing.
-            target_channel_id = thread_id or chat_id
+            # Send each media file as a separate multipart upload. When a
+            # MEDIA:<path> caption was supplied, ride it as the message content
+            # on the attachment so it appears under the media bubble instead of
+            # as a separate message. caption_pending tracks whether the caption
+            # still needs delivering, so a missing file falls back to a plain
+            # message rather than silently dropping the text.
             caption_pending = bool(caption)
             for media_path, _is_voice in media_files:
                 if not os.path.exists(media_path):
@@ -9210,11 +9155,6 @@ async def _standalone_send(
                         except Exception:
                             logger.warning("Discord caption-fallback send failed for missing media")
                     continue
-                if _is_voice:
-                    voice_result = await _send_discord_voice_message(token, target_channel_id, media_path)
-                    if isinstance(voice_result, dict) and voice_result.get("success"):
-                        last_data = {"id": voice_result.get("message_id")}
-                        continue
                 try:
                     form = aiohttp.FormData()
                     filename = os.path.basename(media_path)
@@ -9534,7 +9474,7 @@ def register(ctx) -> None:
         check_fn=check_discord_requirements,
         is_connected=_is_connected,
         required_env=["DISCORD_BOT_TOKEN"],
-        install_hint="pip install 'hermes-agent[messaging]'",
+        install_hint="Run `hermes setup` to install Discord support.",
         # Interactive setup wizard — replaces the central
         # hermes_cli/setup.py::_setup_discord function.  Same shape as Teams.
         setup_fn=interactive_setup,

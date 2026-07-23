@@ -21,6 +21,22 @@ from gateway.platforms.base import (
 )
 
 
+def test_media_delivery_denies_encrypted_bitwarden_cache(tmp_path, monkeypatch):
+    """Encrypted Bitwarden cache is covered by the media credential guard."""
+    import gateway.platforms.base as base
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    monkeypatch.setattr(base, "_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(base, "_HERMES_ROOT", hermes_home)
+    path = hermes_home / "cache" / "bws_cache.enc.json"
+    path.parent.mkdir()
+    path.write_text("encrypted-secret-cache")
+
+    assert path in base._media_delivery_denied_paths()
+    assert base.validate_media_delivery_path(str(path)) is None
+
+
 class TestInboundMediaSizeCap:
     """gateway.max_inbound_media_bytes caps inbound media buffered into RAM (#13145)."""
 
@@ -1714,61 +1730,6 @@ class TestTruncateMessage:
             assert len(chunk) <= max_len + 20, (
                 f"Chunk {i} too long: {len(chunk)} > {max_len}"
             )
-
-
-class TestBuildSourceUserAliases:
-    def _adapter(self, aliases=None):
-        class StubAdapter(BasePlatformAdapter):
-            async def connect(self):
-                return True
-
-            async def disconnect(self):
-                pass
-
-            async def send(self, *a, **kw):
-                pass
-
-            async def get_chat_info(self, *a):
-                return {}
-
-        from gateway.config import Platform, PlatformConfig
-
-        config = PlatformConfig(
-            enabled=True,
-            token="test",
-            extra={"user_aliases": aliases or {}},
-        )
-        return StubAdapter(config=config, platform=Platform.DISCORD)
-
-    def test_build_source_maps_known_alias_to_canonical_name(self):
-        adapter = self._adapter({"alias-user": "canonical-user"})
-        source = adapter.build_source(
-            chat_id="123",
-            chat_type="dm",
-            user_id="42",
-            user_name="alias-user",
-        )
-        assert source.user_name == "canonical-user"
-
-    def test_build_source_alias_mapping_is_case_insensitive(self):
-        adapter = self._adapter({"alias-user": "canonical-user"})
-        source = adapter.build_source(
-            chat_id="123",
-            chat_type="dm",
-            user_id="42",
-            user_name="ALIAS-USER",
-        )
-        assert source.user_name == "canonical-user"
-
-    def test_build_source_leaves_unknown_user_name_unchanged(self):
-        adapter = self._adapter({"alias-user": "canonical-user"})
-        source = adapter.build_source(
-            chat_id="123",
-            chat_type="dm",
-            user_id="42",
-            user_name="someone-else",
-        )
-        assert source.user_name == "someone-else"
 
 
 # ---------------------------------------------------------------------------

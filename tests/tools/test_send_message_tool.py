@@ -354,115 +354,6 @@ class TestSendMessageTool:
         send_mock.assert_not_awaited()
         mirror_mock.assert_not_called()
 
-    def test_cron_different_target_still_sends(self):
-        config, telegram_cfg = _make_config()
-
-        with patch.dict(
-            os.environ,
-            {
-                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
-                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "-1001",
-            },
-            clear=False,
-        ), \
-             patch("gateway.config.load_gateway_config", return_value=config), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
-             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
-            result = json.loads(
-                send_message_tool(
-                    {
-                        "action": "send",
-                        "target": "telegram:-1002",
-                        "message": "hello",
-                    }
-                )
-            )
-
-        assert result["success"] is True
-        assert result.get("skipped") is not True
-        send_mock.assert_awaited_once_with(
-            Platform.TELEGRAM,
-            telegram_cfg,
-            "-1002",
-            "hello",
-            thread_id=None,
-            media_files=[],
-            force_document=False,
-        )
-        mirror_mock.assert_called_once_with("telegram", "-1002", "hello", source_label="cli", thread_id=None, user_id=None)
-
-    def test_cron_same_chat_different_thread_still_sends(self):
-        config, telegram_cfg = _make_config()
-
-        with patch.dict(
-            os.environ,
-            {
-                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
-                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "-1001",
-                "HERMES_CRON_AUTO_DELIVER_THREAD_ID": "17585",
-            },
-            clear=False,
-        ), \
-             patch("gateway.config.load_gateway_config", return_value=config), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
-             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
-            result = json.loads(
-                send_message_tool(
-                    {
-                        "action": "send",
-                        "target": "telegram:-1001:99999",
-                        "message": "hello",
-                    }
-                )
-            )
-
-        assert result["success"] is True
-        assert result.get("skipped") is not True
-        send_mock.assert_awaited_once_with(
-            Platform.TELEGRAM,
-            telegram_cfg,
-            "-1001",
-            "hello",
-            thread_id="99999",
-            media_files=[],
-            force_document=False,
-        )
-        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="99999", user_id=None)
-
-    def test_sends_to_explicit_telegram_topic_target(self):
-        config, telegram_cfg = _make_config()
-
-        with patch("gateway.config.load_gateway_config", return_value=config), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
-             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
-            result = json.loads(
-                send_message_tool(
-                    {
-                        "action": "send",
-                        "target": "telegram:-1001:17585",
-                        "message": "hello",
-                    }
-                )
-            )
-
-        assert result["success"] is True
-        send_mock.assert_awaited_once_with(
-            Platform.TELEGRAM,
-            telegram_cfg,
-            "-1001",
-            "hello",
-            thread_id="17585",
-            media_files=[],
-            force_document=False,
-        )
-        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="17585", user_id=None)
-
     def test_resolved_telegram_topic_name_preserves_thread_id(self):
         config, telegram_cfg = _make_config()
 
@@ -530,46 +421,6 @@ class TestSendMessageTool:
             thread_id="17585",
             media_files=[],
             force_document=False,
-        )
-
-    def test_media_only_message_uses_placeholder_for_mirroring(self, tmp_path, monkeypatch):
-        config, telegram_cfg = _make_config()
-        media_path = tmp_path / "example.ogg"
-        media_path.write_bytes(b"audio")
-        monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(tmp_path))
-
-        with patch("gateway.config.load_gateway_config", return_value=config), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
-             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
-            result = json.loads(
-                send_message_tool(
-                    {
-                        "action": "send",
-                        "target": "telegram:-1001",
-                        "message": f"MEDIA:{media_path}",
-                    }
-                )
-            )
-
-        assert result["success"] is True
-        send_mock.assert_awaited_once_with(
-            Platform.TELEGRAM,
-            telegram_cfg,
-            "-1001",
-            "",
-            thread_id=None,
-            media_files=[(str(media_path), False)],
-            force_document=False,
-        )
-        mirror_mock.assert_called_once_with(
-            "telegram",
-            "-1001",
-            "[Sent audio attachment]",
-            source_label="cli",
-            thread_id=None,
-            user_id=None,
         )
 
     def test_resolved_slack_thread_name_preserves_thread_id(self):
@@ -1082,31 +933,6 @@ class TestSendToPlatformChunking:
         finally:
             doc_path.unlink(missing_ok=True)
 
-    def test_discord_sends_text_first_then_media_individually(self):
-        """Discord standalone path mirrors gateway text-first media delivery."""
-        sent_calls = []
-
-        async def fake_send(token, chat_id, message, media_files=None, thread_id=None):
-            sent_calls.append((message, media_files or []))
-            return {"success": True, "platform": "discord", "chat_id": chat_id, "message_id": str(len(sent_calls))}
-
-        long_msg = "word " * 1000  # forces multiple Discord chunks
-        media = [("/tmp/voice.ogg", True), ("/tmp/photo.png", False)]
-        with _patch_discord_sender(fake_send):
-            asyncio.run(
-                _send_to_platform(
-                    Platform.DISCORD,
-                    SimpleNamespace(enabled=True, token="tok", extra={}),
-                    "123",
-                    long_msg,
-                    media_files=media,
-                )
-            )
-
-        assert len(sent_calls) >= 3
-        assert all(call[1] == [] for call in sent_calls[:-1])
-        assert sent_calls[-1][1] == [("/tmp/voice.ogg", True), ("/tmp/photo.png", False)]
-
     def test_matrix_text_only_uses_adapter_path(self):
         """Text-only Matrix sends must go through the E2EE-capable adapter.
 
@@ -1190,28 +1016,6 @@ class TestSendToPlatformChunking:
             ("send_document", "!room:example.com", str(file_path), None),
             ("disconnect",),
         ]
-
-
-class TestSendDiscordMediaDelivery:
-    def test_audio_voice_success_skips_attachment_upload(self):
-        with patch(
-            "plugins.platforms.discord.adapter._send_discord_voice_message",
-            new=AsyncMock(return_value={"success": True, "platform": "discord", "chat_id": "123", "message_id": "7"}),
-        ) as voice_mock, patch(
-            "plugins.platforms.discord.adapter._probe_is_forum_cached",
-            return_value=False,
-        ), patch("os.path.exists", return_value=True):
-            result = asyncio.run(
-                _send_discord(
-                    "tok",
-                    "123",
-                    "",
-                    media_files=[("/tmp/voice.ogg", True)],
-                )
-            )
-
-        assert result["success"] is True
-        voice_mock.assert_awaited_once_with("tok", "123", "/tmp/voice.ogg")
 
 
 class TestMatrixMediaLiveAdapterReuse:
@@ -1431,6 +1235,17 @@ class TestSendTelegramHtmlDetection:
         kwargs = bot.send_message.await_args.kwargs
         assert kwargs["parse_mode"] == "MarkdownV2"
 
+    def test_disable_link_previews_sets_disable_web_page_preview(self, monkeypatch):
+        bot = self._make_bot()
+        _install_telegram_mock(monkeypatch, bot)
+
+        asyncio.run(
+            _send_telegram("tok", "123", "https://example.com", disable_link_previews=True)
+        )
+
+        kwargs = bot.send_message.await_args.kwargs
+        assert kwargs["disable_web_page_preview"] is True
+
     def test_html_with_code_and_pre_tags(self, monkeypatch):
         bot = self._make_bot()
         _install_telegram_mock(monkeypatch, bot)
@@ -1479,6 +1294,23 @@ class TestSendTelegramHtmlDetection:
         assert bot.send_message.await_count == 2
         second_call = bot.send_message.await_args_list[1].kwargs
         assert second_call["parse_mode"] is None
+
+    def test_transient_bad_gateway_retries_text_send(self, monkeypatch):
+        bot = self._make_bot()
+        bot.send_message = AsyncMock(
+            side_effect=[
+                Exception("502 Bad Gateway"),
+                SimpleNamespace(message_id=2),
+            ]
+        )
+        _install_telegram_mock(monkeypatch, bot)
+
+        with patch("asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            result = asyncio.run(_send_telegram("tok", "123", "hello"))
+
+        assert result["success"] is True
+        assert bot.send_message.await_count == 2
+        sleep_mock.assert_awaited_once()
 
 
 class TestSendTelegramThreadIdMapping:
