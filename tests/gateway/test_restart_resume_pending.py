@@ -892,13 +892,6 @@ class TestFreshnessHelpers:
         ]
         assert _last_transcript_timestamp(history) == 200.0
 
-    def test_last_transcript_timestamp_accepts_replay_timestamp_metadata(self):
-        history = [
-            {"role": "user", "content": "hi", "_timestamp": 100.0},
-            {"role": "assistant", "content": "hey"},
-        ]
-        assert _last_transcript_timestamp(history) == 100.0
-
     def test_last_transcript_timestamp_empty(self):
         assert _last_transcript_timestamp([]) is None
         assert _last_transcript_timestamp(None) is None

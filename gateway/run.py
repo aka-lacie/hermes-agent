@@ -851,10 +851,6 @@ def _build_replay_entry(
     providers.
     """
     entry: Dict[str, Any] = {"role": role, "content": content}
-    if role == "user":
-        _timestamp = msg.get("_timestamp", msg.get("timestamp"))
-        if _timestamp is not None:
-            entry["_timestamp"] = _timestamp
     # api_content sidecar (persist-what-you-send, prompt-cache stability):
     # forward the exact bytes previously sent to the API for this message so
     # the agent's api_messages build can substitute them and keep the request
@@ -1089,8 +1085,7 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
     Skips metadata-only rows (``session_meta``, system injections) that are
     dropped before being handed to the agent.  Returns ``None`` when no
     usable row carries a timestamp — callers should treat that as "fresh"
-    for backward compatibility. Some replay paths only annotate user turns, so
-    timestamp-less assistant/tool rows are skipped while scanning backward.
+    for backward compatibility.
     """
     if not history:
         return None
@@ -1100,13 +1095,12 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
         role = msg.get("role")
         if not role or role in {"session_meta", "system"}:
             continue
-        ts = msg.get("timestamp", msg.get("_timestamp"))
+        ts = msg.get("timestamp")
         if ts is not None:
             return ts
-        # Timestamp metadata is optional per row; DB replay currently carries it
-        # on user turns. Keep scanning backward before falling through to the
-        # legacy-fresh path.
-        continue
+        # First non-meta row without a timestamp — legacy transcript row.
+        # Returning None lets the caller fall through to the legacy-fresh path.
+        return None
     return None
 
 

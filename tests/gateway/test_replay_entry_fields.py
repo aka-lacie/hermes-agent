@@ -29,23 +29,6 @@ class TestBuildReplayEntry:
         )
         assert entry == {"role": "user", "content": "hello"}
 
-    def test_user_message_preserves_timestamp_metadata(self):
-        entry = _build_replay_entry(
-            "user",
-            "hello",
-            {
-                "role": "user",
-                "content": "hello",
-                "_timestamp": 1_775_700_300.0,
-                "extra": "drop",
-            },
-        )
-        assert entry == {
-            "role": "user",
-            "content": "hello",
-            "_timestamp": 1_775_700_300.0,
-        }
-
     def test_tool_message_has_only_role_and_content(self):
         # Tool messages aren't routed through this helper in production
         # (they take the rich-passthrough branch), but the helper itself

@@ -956,9 +956,10 @@ def run_conversation(
             _api_content = api_msg.pop("api_content", None)
 
             # Inject ephemeral context into the current turn's user message.
-            # The original message is never mutated beyond the api_content
-            # stamp, so clean transcript content remains unchanged.
-            # into the clean transcript content.
+            # Sources: memory manager prefetch + plugin pre_llm_call hooks
+            # with target="user_message" (the default). Both are API-call-time
+            # only — the original message in `messages` is never mutated beyond
+            # the api_content stamp, so nothing leaks into transcript content.
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 if isinstance(_api_content, str) and _api_content:
                     # Stamped by the prologue from the same composition —
@@ -973,7 +974,6 @@ def run_conversation(
                         api_msg.get("content", ""),
                         _ext_prefetch_cache,
                         _plugin_user_context,
-                        _current_time_user_context,
                     )
                     if _composed is not None:
                         api_msg["content"] = _composed
@@ -992,18 +992,6 @@ def run_conversation(
                 # would rewrite on reload — see the capture in
                 # ``_flush_messages_to_session_db``).
                 api_msg["content"] = _api_content
-            elif msg.get("role") == "user":
-                # Rows created before the api_content sidecar existed still
-                # need their stable timestamp prefix reconstructed on replay.
-                _msg_timestamp = msg.get("_timestamp", msg.get("timestamp"))
-                if _msg_timestamp is not None:
-                    _turn_time_context = _build_current_time_user_context(
-                        agent, _msg_timestamp
-                    )
-                    if _turn_time_context and isinstance(api_msg.get("content"), str):
-                        api_msg["content"] = (
-                            f"{_turn_time_context} {api_msg['content']}".strip()
-                        )
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
