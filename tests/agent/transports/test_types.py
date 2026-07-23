@@ -32,10 +32,10 @@ class TestToolCall:
             id="call_x",
             name="t",
             arguments="{}",
-            provider_data={"openai_codex": {"call_id": "call_x", "response_item_id": "fc_x"}},
+            provider_data={"call_id": "call_x", "response_item_id": "fc_x"},
         )
-        assert tc.provider_data["openai_codex"]["call_id"] == "call_x"
-        assert tc.provider_data["openai_codex"]["response_item_id"] == "fc_x"
+        assert tc.provider_data["call_id"] == "call_x"
+        assert tc.provider_data["response_item_id"] == "fc_x"
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ class TestToolCallBackwardCompat:
         assert tc.function.arguments == tc.arguments
 
     def test_call_id_from_provider_data(self):
-        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"openai_codex": {"call_id": "c1"}})
+        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"call_id": "c1"})
         assert tc.call_id == "c1"
 
     def test_call_id_none_when_no_provider_data(self):
@@ -185,12 +185,7 @@ class TestToolCallBackwardCompat:
         assert tc.call_id is None
 
     def test_response_item_id_from_provider_data(self):
-        tc = ToolCall(
-            id="1",
-            name="fn",
-            arguments="{}",
-            provider_data={"openai_codex": {"response_item_id": "r1"}},
-        )
+        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"response_item_id": "r1"})
         assert tc.response_item_id == "r1"
 
     def test_response_item_id_none_when_missing(self):
@@ -199,7 +194,7 @@ class TestToolCallBackwardCompat:
 
     def test_getattr_pattern_matches_agent_loop(self):
         """run_agent.py uses getattr(tool_call, 'call_id', None) — verify it works."""
-        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"openai_codex": {"call_id": "c1"}})
+        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"call_id": "c1"})
         assert getattr(tc, "call_id", None) == "c1"
         tc_no_pd = ToolCall(id="1", name="fn", arguments="{}")
         assert getattr(tc_no_pd, "call_id", None) is None
@@ -207,7 +202,7 @@ class TestToolCallBackwardCompat:
     def test_extra_content_from_provider_data(self):
         """Gemini thought_signature stored in provider_data is exposed via property."""
         ec = {"google": {"thought_signature": "SIG_ABC123"}}
-        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"google": {"extra_content": ec}})
+        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"extra_content": ec})
         assert tc.extra_content == ec
 
     def test_extra_content_none_when_no_provider_data(self):
@@ -227,7 +222,7 @@ class TestToolCallBackwardCompat:
         causing HTTP 400 on subsequent turns (issue #14488).
         """
         ec = {"google": {"thought_signature": "SIG_ABC123"}}
-        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"google": {"extra_content": ec}})
+        tc = ToolCall(id="1", name="fn", arguments="{}", provider_data={"extra_content": ec})
         assert getattr(tc, "extra_content", None) == ec
 
         tc_no_extra = ToolCall(id="1", name="fn", arguments="{}")
@@ -267,7 +262,7 @@ class TestNormalizedResponseBackwardCompat:
         items = ["item1", "item2"]
         nr = NormalizedResponse(
             content="hi", tool_calls=None, finish_reason="stop",
-            provider_data={"openai_codex": {"codex_reasoning_items": items}},
+            provider_data={"codex_reasoning_items": items},
         )
         assert nr.codex_reasoning_items == items
 
@@ -279,7 +274,7 @@ class TestNormalizedResponseBackwardCompat:
         items = [{"id": "msg_1", "type": "message"}]
         nr = NormalizedResponse(
             content="hi", tool_calls=None, finish_reason="stop",
-            provider_data={"openai_codex": {"codex_message_items": items}},
+            provider_data={"codex_message_items": items},
         )
         assert nr.codex_message_items == items
 

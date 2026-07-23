@@ -9,8 +9,6 @@ which has provider-specific conditionals for max_tokens defaults,
 reasoning configuration, temperature handling, and extra_body assembly.
 """
 
-import copy
-
 from typing import Any, Dict
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
@@ -147,10 +145,6 @@ class ChatCompletionsTransport(ProviderTransport):
         that strict chat-completions providers reject with HTTP 400/422
         (or, in the case of some OpenAI-compatible gateways, 5xx):
 
-        Strips provider-only replay metadata that strict chat-completions
-        providers reject with 400/422. Native provider adapters can opt into
-        preserving opaque ``provider_data`` for their own replay logic.
-        Also strips:
         - Codex Responses API fields: ``codex_reasoning_items`` /
           ``codex_message_items`` on the message, ``call_id`` /
           ``response_item_id`` on ``tool_calls`` entries.
@@ -180,17 +174,9 @@ class ChatCompletionsTransport(ProviderTransport):
           ``Extra inputs are not permitted, field: 'messages[N]._empty_recovery_synthetic'``,
           which then poisons every subsequent request in the session.
         """
-        preserve_provider_data = bool(kwargs.get("preserve_provider_data"))
-        preserve_tool_call_extra_content = bool(
-            kwargs.get("preserve_tool_call_extra_content")
-            or _model_consumes_thought_signature(kwargs.get("model"))
+        strip_extra_content = not _model_consumes_thought_signature(
+            kwargs.get("model")
         )
-        strip_tool_call_keys = {"call_id", "response_item_id"}
-        if not preserve_tool_call_extra_content:
-            strip_tool_call_keys.add("extra_content")
-        if not preserve_provider_data:
-            strip_tool_call_keys.add("provider_data")
-
         needs_sanitize = False
         for msg in messages:
             if not isinstance(msg, dict):
@@ -198,7 +184,6 @@ class ChatCompletionsTransport(ProviderTransport):
             if (
                 "codex_reasoning_items" in msg
                 or "codex_message_items" in msg
-                or (not preserve_provider_data and "provider_data" in msg)
                 or "tool_name" in msg
                 or "effect_disposition" in msg
                 or "timestamp" in msg  # #47868 — strict providers reject this
@@ -212,7 +197,11 @@ class ChatCompletionsTransport(ProviderTransport):
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
-                    if isinstance(tc, dict) and any(key in tc for key in strip_tool_call_keys):
+                    if isinstance(tc, dict) and (
+                        "call_id" in tc
+                        or "response_item_id" in tc
+                        or (strip_extra_content and "extra_content" in tc)
+                    ):
                         needs_sanitize = True
                         break
                 if needs_sanitize:
@@ -238,7 +227,6 @@ class ChatCompletionsTransport(ProviderTransport):
             if (
                 "codex_reasoning_items" in msg
                 or "codex_message_items" in msg
-                or (not preserve_provider_data and "provider_data" in msg)
                 or "tool_name" in msg
                 or "effect_disposition" in msg
                 or "timestamp" in msg  # #47868 — leak into strict providers
@@ -247,8 +235,6 @@ class ChatCompletionsTransport(ProviderTransport):
                 out_msg = mutable_msg()
                 out_msg.pop("codex_reasoning_items", None)
                 out_msg.pop("codex_message_items", None)
-                if not preserve_provider_data:
-                    out_msg.pop("provider_data", None)
                 out_msg.pop("tool_name", None)
                 out_msg.pop("effect_disposition", None)
                 out_msg.pop("timestamp", None)  # #47868 — leak into strict providers
@@ -269,13 +255,19 @@ class ChatCompletionsTransport(ProviderTransport):
                 copied_tool_calls: list[Any] | None = None
                 for tc_idx, tc in enumerate(tool_calls):
                     if isinstance(tc, dict):
-                        should_copy_tc = any(key in tc for key in strip_tool_call_keys)
+                        should_copy_tc = (
+                            "call_id" in tc
+                            or "response_item_id" in tc
+                            or (strip_extra_content and "extra_content" in tc)
+                        )
                         if should_copy_tc:
                             if copied_tool_calls is None:
                                 copied_tool_calls = list(tool_calls)
                             copied_tc = dict(tc)
-                            for key in strip_tool_call_keys:
-                                copied_tc.pop(key, None)
+                            copied_tc.pop("call_id", None)
+                            copied_tc.pop("response_item_id", None)
+                            if strip_extra_content:
+                                copied_tc.pop("extra_content", None)
                             copied_tool_calls[tc_idx] = copied_tc
                 if copied_tool_calls is not None:
                     mutable_msg()["tool_calls"] = copied_tool_calls
@@ -331,20 +323,15 @@ class ChatCompletionsTransport(ProviderTransport):
             # Reasoning
             supports_reasoning: bool
             github_reasoning_extra: dict | None
-            native_gemini_protocol: bool
             lmstudio_reasoning_options: list[str] | None  # raw allowed_options from /api/v1/models
             # Claude on OpenRouter/Nous max output
             anthropic_max_output: int | None
             extra_body_additions: dict | None
         """
-        # Strict-provider sanitization: drop Codex/Responses-only fields and
-        # provider replay metadata unless the caller or target model needs it.
-        sanitized = self.convert_messages(
-            messages,
-            model=model,
-            preserve_provider_data=params.get("preserve_provider_data", False),
-            preserve_tool_call_extra_content=params.get("preserve_tool_call_extra_content", False),
-        )
+        # Codex sanitization: drop reasoning_items / call_id / response_item_id.
+        # Pass model so the Gemini thought_signature (extra_content) is kept for
+        # Gemini targets and stripped for strict non-Gemini providers.
+        sanitized = self.convert_messages(messages, model=model)
 
         # ── Provider profile: single-path when present ──────────────────
         _profile = params.get("provider_profile")
@@ -450,9 +437,7 @@ class ChatCompletionsTransport(ProviderTransport):
 
         is_openrouter = params.get("is_openrouter", False)
         is_nous = params.get("is_nous", False)
-        is_qwen = params.get("is_qwen_portal", False)
         is_github_models = params.get("is_github_models", False)
-        is_native_gemini = bool(params.get("native_gemini_protocol", False))
         provider_name = str(params.get("provider_name") or "").strip().lower()
         base_url = params.get("base_url")
 
@@ -493,42 +478,10 @@ class ChatCompletionsTransport(ProviderTransport):
                 if gh_reasoning is not None:
                     extra_body["reasoning"] = gh_reasoning
             else:
-                if reasoning_config is not None:
-                    rc = dict(reasoning_config)
-                    rc.setdefault("enabled", True)
-                    rc.setdefault("effort", "medium")
-                    if is_nous and rc.get("enabled") is False:
-                        pass  # omit for Nous when disabled
-                    else:
-                        extra_body["reasoning"] = rc
-                else:
-                    extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
-
-        if is_native_gemini and provider_name not in {"gemini", "google-gemini-cli"}:
-            native_thinking_config = self._native_gemini_thinking_config(reasoning_config)
-            if native_thinking_config:
-                extra_body["thinking_config"] = native_thinking_config
-
-        if is_nous:
-            extra_body["tags"] = ["product=hermes-agent"]
-
-        # Ollama num_ctx
-        ollama_ctx = params.get("ollama_num_ctx")
-        if ollama_ctx:
-            options = extra_body.get("options", {})
-            options["num_ctx"] = ollama_ctx
-            extra_body["options"] = options
-
-        # Ollama/custom think=false
-        if params.get("is_custom_provider", False):
-            if reasoning_config and isinstance(reasoning_config, dict):
-                _effort = (reasoning_config.get("effort") or "").strip().lower()
-                _enabled = reasoning_config.get("enabled", True)
-                if _effort == "none" or _enabled is False:
-                    extra_body["think"] = False
-
-        if is_qwen:
-            extra_body["vl_high_resolution_images"] = True
+                _effort = "medium"
+                if reasoning_config and isinstance(reasoning_config, dict):
+                    _effort = reasoning_config.get("effort", "medium") or "medium"
+                extra_body["reasoning"] = {"enabled": True, "effort": _effort}
 
         if provider_name == "gemini":
             raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
@@ -540,8 +493,6 @@ class ChatCompletionsTransport(ProviderTransport):
                     google_extra["thinking_config"] = thinking_config
                     openai_compat_extra["google"] = google_extra
                     extra_body["extra_body"] = openai_compat_extra
-            elif is_native_gemini:
-                extra_body["thinking_config"] = raw_thinking_config or self._native_gemini_thinking_config(reasoning_config)
             elif raw_thinking_config:
                 extra_body["thinking_config"] = raw_thinking_config
 
@@ -559,26 +510,6 @@ class ChatCompletionsTransport(ProviderTransport):
             api_kwargs.update(overrides)
 
         return api_kwargs
-
-    @staticmethod
-    def _native_gemini_thinking_config(reasoning_config: Any) -> Dict[str, Any]:
-        """Build Gemini native thinkingConfig for thought-summary capture."""
-        if isinstance(reasoning_config, dict):
-            enabled = reasoning_config.get("enabled", True)
-            effort = str(reasoning_config.get("effort") or "").strip().lower()
-            if enabled is False or effort == "none":
-                return {"includeThoughts": False}
-        else:
-            effort = ""
-
-        config: Dict[str, Any] = {"includeThoughts": True}
-        if effort in {"low", "high"}:
-            config["thinkingLevel"] = effort
-        elif effort == "minimal":
-            config["thinkingLevel"] = "low"
-        elif effort == "xhigh":
-            config["thinkingLevel"] = "high"
-        return config
 
     def _build_kwargs_from_profile(self, profile, model, sanitized, tools, params):
         """Build API kwargs using a ProviderProfile — single path, no legacy flags.
@@ -757,7 +688,7 @@ class ChatCompletionsTransport(ProviderTransport):
                             extra = extra.model_dump()
                         except Exception:
                             pass
-                    tc_provider_data.setdefault("google", {})["extra_content"] = extra
+                    tc_provider_data["extra_content"] = extra
                 tool_calls.append(
                     ToolCall(
                         id=tc.id,
@@ -793,13 +724,6 @@ class ChatCompletionsTransport(ProviderTransport):
         rd = getattr(msg, "reasoning_details", None)
         if rd:
             provider_data["reasoning_details"] = rd
-        gemini_content = getattr(msg, "gemini_content", None)
-        if gemini_content is None and hasattr(msg, "model_extra"):
-            model_extra = getattr(msg, "model_extra", None) or {}
-            if isinstance(model_extra, dict):
-                gemini_content = model_extra.get("gemini_content")
-        if isinstance(gemini_content, dict):
-            provider_data.setdefault("google", {})["gemini_content"] = copy.deepcopy(gemini_content)
 
         # OpenAI structured-refusal field. When a model declines, the SDK
         # populates ``message.refusal`` with the explanation and leaves

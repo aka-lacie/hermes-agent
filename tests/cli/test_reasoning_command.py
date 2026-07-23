@@ -154,6 +154,129 @@ class TestHandleReasoningCommand(unittest.TestCase):
         level = rc.get("effort", "medium")
         self.assertEqual(level, "xhigh")
 
+    def test_effort_defaults_to_session_only(self):
+        """Plain /reasoning <level> is session-scoped — no config write."""
+        from hermes_cli.cli_commands_mixin import CLICommandsMixin
+
+        stub = self._make_cli(reasoning_config={"enabled": True, "effort": "medium"})
+        with patch("cli.save_config_value") as save_config, patch("cli._cprint"):
+            CLICommandsMixin._handle_reasoning_command(stub, "/reasoning high")
+
+        save_config.assert_not_called()
+        self.assertEqual(stub.reasoning_config, {"enabled": True, "effort": "high"})
+        self.assertIsNone(stub.agent)
+
+    def test_effort_global_flag_persists_config(self):
+        """--global opts into persisting the effort to config.yaml."""
+        from cli import CLI_CONFIG
+        from hermes_cli.cli_commands_mixin import CLICommandsMixin
+
+        stub = self._make_cli(reasoning_config={"enabled": True, "effort": "medium"})
+        with patch.dict(CLI_CONFIG.setdefault("agent", {}), {"reasoning_effort": "medium"}), \
+             patch("cli.save_config_value", return_value=True) as save_config, \
+             patch("cli._cprint"):
+            CLICommandsMixin._handle_reasoning_command(stub, "/reasoning high --global")
+            self.assertEqual(CLI_CONFIG["agent"]["reasoning_effort"], "high")
+
+        save_config.assert_called_once_with("agent.reasoning_effort", "high")
+        self.assertEqual(stub.reasoning_config, {"enabled": True, "effort": "high"})
+        self.assertIsNone(stub.agent)
+
+    def test_effort_session_flag_does_not_persist_config(self):
+        """--session (explicit no-op alias for the default) stays session-only."""
+        from hermes_cli.cli_commands_mixin import CLICommandsMixin
+
+        stub = self._make_cli(reasoning_config={"enabled": True, "effort": "medium"})
+        with patch("cli.save_config_value") as save_config, patch("cli._cprint"):
+            CLICommandsMixin._handle_reasoning_command(stub, "/reasoning high --session")
+
+        save_config.assert_not_called()
+        self.assertEqual(stub.reasoning_config, {"enabled": True, "effort": "high"})
+        self.assertIsNone(stub.agent)
+
+    def test_new_session_clears_session_reasoning_override(self):
+        """/new and /clear must not carry a session-only effort override forward."""
+        from cli import CLI_CONFIG, HermesCLI
+
+        agent = SimpleNamespace(
+            reasoning_config={"enabled": True, "effort": "high"},
+            reset_session_state=MagicMock(),
+        )
+        stub = SimpleNamespace(
+            agent=agent,
+            conversation_history=[],
+            session_id="old-session",
+            _session_db=None,
+            _pending_title=None,
+            _resumed=False,
+            reasoning_config={"enabled": True, "effort": "high"},
+            _notify_session_boundary=MagicMock(),
+        )
+
+        with patch.dict(CLI_CONFIG.setdefault("agent", {}), {"reasoning_effort": "medium"}):
+            HermesCLI.new_session(stub, silent=True)
+
+        self.assertEqual(stub.reasoning_config, {"enabled": True, "effort": "medium"})
+        self.assertEqual(agent.reasoning_config, {"enabled": True, "effort": "medium"})
+        agent.reset_session_state.assert_called_once()
+
+    def test_new_session_resets_service_tier_and_model_from_config(self):
+        """/new re-derives service tier and model from config.yaml — session
+        /fast and /model switches do not carry forward (#48055, #23131)."""
+        from cli import CLI_CONFIG, HermesCLI
+
+        agent = SimpleNamespace(
+            reasoning_config=None,
+            reset_session_state=MagicMock(),
+            switch_model=MagicMock(),
+        )
+        stub = SimpleNamespace(
+            agent=agent,
+            conversation_history=[],
+            session_id="old-session",
+            _session_db=None,
+            _pending_title=None,
+            _resumed=False,
+            reasoning_config=None,
+            _notify_session_boundary=MagicMock(),
+            # Session had switched to fast + a session-only model.
+            service_tier="priority",
+            _pending_one_turn_model_restore={"model": "stale"},
+            model="session-switched-model",
+            provider="openrouter",
+            requested_provider="openrouter",
+            api_key="k",
+            base_url="",
+            api_mode="",
+        )
+
+        fake_result = SimpleNamespace(
+            success=True,
+            new_model="config-default-model",
+            target_provider="openrouter",
+            api_key="k2",
+            base_url="https://openrouter.ai/api/v1",
+            api_mode="chat_completions",
+        )
+        with patch.dict(
+            CLI_CONFIG.setdefault("agent", {}),
+            {"reasoning_effort": "medium", "service_tier": "normal"},
+        ), patch.dict(
+            CLI_CONFIG,
+            {"model": {"default": "config-default-model", "provider": "openrouter"}},
+        ), patch(
+            "hermes_cli.model_switch.switch_model", return_value=fake_result
+        ):
+            HermesCLI.new_session(stub, silent=True)
+
+        # Fast override cleared back to config default (normal → None).
+        self.assertIsNone(stub.service_tier)
+        # One-turn restore snapshot cleared.
+        self.assertIsNone(stub._pending_one_turn_model_restore)
+        # Model reset to the config default via the live agent swap.
+        self.assertEqual(stub.model, "config-default-model")
+        agent.switch_model.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Reasoning extraction and result dict
@@ -477,11 +600,6 @@ class TestInlineThinkBlockExtraction(unittest.TestCase):
         agent = MagicMock(spec=AIAgent)
         agent._build_assistant_message = AIAgent._build_assistant_message.__get__(agent)
         agent._extract_reasoning = AIAgent._extract_reasoning.__get__(agent)
-        agent._preserve_provider_data = AIAgent._preserve_provider_data.__get__(agent)
-        agent._copy_reasoning_content_for_api = AIAgent._copy_reasoning_content_for_api.__get__(agent)
-        agent._prepare_api_message = AIAgent._prepare_api_message.__get__(agent)
-        agent.provider = "openrouter"
-        agent.base_url = "https://openrouter.ai/api/v1"
         agent.verbose_logging = False
         agent.reasoning_callback = None
         agent.stream_delta_callback = None  # non-streaming by default
@@ -541,66 +659,6 @@ class TestInlineThinkBlockExtraction(unittest.TestCase):
         agent._build_assistant_message(api_msg, "stop")
         self.assertEqual(len(captured), 1)
         self.assertIn("Deep analysis", captured[0])
-
-    def test_build_assistant_message_preserves_provider_data(self):
-        agent = self._make_agent()
-        api_msg = self._build_msg(
-            "Visible answer.",
-            reasoning="Structured reasoning from API.",
-        )
-        api_msg.provider_data = {
-            "google": {
-                "gemini_content": {
-                    "role": "model",
-                    "parts": [
-                        {"thought": True, "text": "Structured reasoning from API."},
-                        {"text": "Visible answer.", "thoughtSignature": "sig-answer"},
-                    ],
-                }
-            }
-        }
-        result = agent._build_assistant_message(api_msg, "stop")
-        self.assertIn("provider_data", result)
-        self.assertEqual(
-            result["provider_data"]["google"]["gemini_content"]["parts"][1]["thoughtSignature"],
-            "sig-answer",
-        )
-
-    def test_prepare_api_message_keeps_provider_data_only_for_replay_routes(self):
-        agent = self._make_agent()
-        msg = {
-            "role": "assistant",
-            "content": "Visible answer.",
-            "reasoning": "Structured reasoning from API.",
-            "provider_data": {
-                "google": {
-                    "gemini_content": {
-                        "role": "model",
-                        "parts": [
-                            {"thought": True, "text": "Structured reasoning from API."},
-                            {"text": "Visible answer.", "thoughtSignature": "sig-answer"},
-                        ],
-                    }
-                }
-            },
-            "finish_reason": "stop",
-        }
-
-        native_msg = agent._prepare_api_message(
-            msg,
-            preserve_provider_data=True,
-            sanitize_tool_calls=False,
-        )
-        self.assertIn("provider_data", native_msg)
-        self.assertNotIn("reasoning_content", native_msg)
-
-        generic_msg = agent._prepare_api_message(
-            msg,
-            preserve_provider_data=False,
-            sanitize_tool_calls=False,
-        )
-        self.assertNotIn("provider_data", generic_msg)
-        self.assertEqual(generic_msg["reasoning_content"], "Structured reasoning from API.")
 
 
 # ---------------------------------------------------------------------------

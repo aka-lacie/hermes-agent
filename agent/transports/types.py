@@ -25,8 +25,11 @@ class ToolCall:
     fills it via ``_deterministic_call_id()`` before storing in history.
 
     ``provider_data`` carries per-tool-call protocol metadata that only
-    protocol-aware code reads. Providers should namespace opaque replay
-    state, e.g. ``{"openai_codex": {...}}`` or ``{"google": {...}}``.
+    protocol-aware code reads:
+
+    * Codex: ``{"call_id": "call_XXX", "response_item_id": "fc_XXX"}``
+    * Gemini: ``{"extra_content": {"google": {"thought_signature": "..."}}}``
+    * Others: ``None``
     """
 
     id: str | None
@@ -51,28 +54,26 @@ class ToolCall:
     @property
     def call_id(self) -> str | None:
         """Codex call_id from provider_data, accessed via getattr by _build_assistant_message."""
-        pd = self.provider_data or {}
-        codex = pd.get("openai_codex") if isinstance(pd.get("openai_codex"), dict) else {}
-        return codex.get("call_id") or pd.get("call_id")
+        return (self.provider_data or {}).get("call_id")
 
     @property
     def response_item_id(self) -> str | None:
         """Codex response_item_id from provider_data."""
-        pd = self.provider_data or {}
-        codex = pd.get("openai_codex") if isinstance(pd.get("openai_codex"), dict) else {}
-        return codex.get("response_item_id") or pd.get("response_item_id")
+        return (self.provider_data or {}).get("response_item_id")
 
     @property
     def extra_content(self) -> dict[str, Any] | None:
-        """Provider-specific OpenAI-compatible extra_content replay payload.
+        """Gemini extra_content (thought_signature) from provider_data.
 
-        Gemini thinking models attach a thought signature in this payload, and
-        older provider paths may store it either at the top level or under the
-        Google namespace.
+        Gemini 3 thinking models attach ``extra_content`` with a
+        ``thought_signature`` to each tool call.  This signature must be
+        replayed on subsequent API calls — without it the API rejects the
+        request with HTTP 400.  The chat_completions transport stores this
+        in ``provider_data["extra_content"]``; this property exposes it so
+        ``_build_assistant_message`` can ``getattr(tc, "extra_content")``
+        uniformly.
         """
-        pd = self.provider_data or {}
-        google = pd.get("google") if isinstance(pd.get("google"), dict) else {}
-        return google.get("extra_content") or pd.get("extra_content")
+        return (self.provider_data or {}).get("extra_content")
 
 
 @dataclass
@@ -97,7 +98,6 @@ class NormalizedResponse:
 
     * Anthropic: ``{"reasoning_details": [...]}``
     * Codex: ``{"codex_reasoning_items": [...], "codex_message_items": [...]}``
-    * Gemini: ``{"google": {"gemini_content": {"role": "model", "parts": [...]}}}``
     * Others: ``None``
     """
 
@@ -136,20 +136,12 @@ class NormalizedResponse:
     @property
     def codex_reasoning_items(self):
         pd = self.provider_data or {}
-        codex = pd.get("openai_codex") if isinstance(pd.get("openai_codex"), dict) else {}
-        return codex.get("codex_reasoning_items") or pd.get("codex_reasoning_items")
-
-    @property
-    def gemini_content(self):
-        pd = self.provider_data or {}
-        google = pd.get("google") if isinstance(pd.get("google"), dict) else {}
-        return google.get("gemini_content") or pd.get("gemini_content")
+        return pd.get("codex_reasoning_items")
 
     @property
     def codex_message_items(self):
         pd = self.provider_data or {}
-        codex = pd.get("openai_codex") if isinstance(pd.get("openai_codex"), dict) else {}
-        return codex.get("codex_message_items") or pd.get("codex_message_items")
+        return pd.get("codex_message_items")
 
 
 # ---------------------------------------------------------------------------

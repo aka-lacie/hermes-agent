@@ -469,15 +469,6 @@ class TestQueryLocalContextLengthLmStudio:
 
 
 class TestDetectLocalServerTypeAuth:
-    def test_skips_local_probe_for_native_gemini_proxy_url(self):
-        from agent.model_metadata import detect_local_server_type
-
-        with patch("httpx.Client") as mock_client:
-            result = detect_local_server_type("http://localhost:8080/v1beta")
-
-        assert result is None
-        mock_client.assert_not_called()
-
     def test_passes_bearer_token_to_probe_requests(self):
         from agent.model_metadata import detect_local_server_type
 

@@ -4962,15 +4962,10 @@ def resolve_provider_client(
                         extra["default_headers"] = dict(_ph_custom.default_headers)
                 except Exception:
                     pass
-            from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-
-            if is_native_gemini_base_url(custom_base):
-                client = GeminiNativeClient(api_key=custom_key, base_url=custom_base)
-            else:
-                _merged_custom = _apply_user_default_headers(extra.get("default_headers"))
-                if _merged_custom:
-                    extra["default_headers"] = _merged_custom
-                client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **extra)
+            _merged_custom = _apply_user_default_headers(extra.get("default_headers"))
+            if _merged_custom:
+                extra["default_headers"] = _merged_custom
+            client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **extra)
             client = _wrap_if_needed(client, final_model, custom_base, custom_key)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                     else (client, final_model))
@@ -5034,15 +5029,6 @@ def resolve_provider_client(
                     or "gpt-4o-mini",
                     provider,
                 )
-                from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-
-                if is_native_gemini_base_url(custom_base):
-                    client = GeminiNativeClient(api_key=custom_key, base_url=custom_base)
-                    logger.debug(
-                        "resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
-                        provider, final_model, entry_api_mode or "chat_completions")
-                    return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                            else (client, final_model))
                 # anthropic_messages talks to the /anthropic surface directly;
                 # OpenAI-wire paths (chat_completions / codex_responses) need the
                 # /v1 equivalent.  Rewrite only on the OpenAI-wire path so the

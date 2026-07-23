@@ -1101,38 +1101,6 @@ class TestExplicitProviderRouting:
             for record in caplog.records
         )
 
-    def test_explicit_custom_native_gemini_base_url_uses_native_client(self):
-        from agent.gemini_native_adapter import GeminiNativeClient
-
-        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
-            client, model = resolve_provider_client(
-                "custom",
-                model="gemini-3-flash-preview",
-                explicit_base_url="http://localhost:8080/api/provider/google/v1beta",
-                explicit_api_key="proxy-key",
-            )
-
-        assert isinstance(client, GeminiNativeClient)
-        assert model == "gemini-3-flash-preview"
-        mock_openai.assert_not_called()
-
-    def test_named_custom_native_gemini_provider_uses_native_client(self):
-        from agent.gemini_native_adapter import GeminiNativeClient
-
-        custom_provider = {
-            "name": "CLIProxyAPI Gemini Native",
-            "base_url": "http://localhost:8080/api/provider/google/v1beta",
-            "api_key": "proxy-key",
-            "model": "gemini-3.1-pro-preview",
-        }
-        with patch("hermes_cli.runtime_provider._get_named_custom_provider", return_value=custom_provider), \
-             patch("agent.auxiliary_client.OpenAI") as mock_openai:
-            client, model = resolve_provider_client("cliproxyapi-gemini-native")
-
-        assert isinstance(client, GeminiNativeClient)
-        assert model == "gemini-3.1-pro-preview"
-        mock_openai.assert_not_called()
-
     def test_try_openrouter_pool_exhausted_falls_back_to_env(self, monkeypatch):
         """Pool present but exhausted → fall through to OPENROUTER_API_KEY env var."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env-fallback")

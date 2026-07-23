@@ -18,23 +18,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import copy
 import json
 import logging
-import re
 import time
 import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
-from urllib.parse import urlparse
 
 import httpx
 
-from agent.gemini_content_utils import (
-    clone_gemini_content,
-    coalesce_split_function_response_turns,
-    tool_call_extra_content,
-)
 from agent.bounded_response import read_streaming_error_body
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 
@@ -48,9 +40,6 @@ except Exception:
     _HERMES_VERSION = "0.0.0"
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-_NATIVE_GEMINI_PROXY_PATH_RE = re.compile(r"/api/provider/(?:gemini|google)/v\d+(?:alpha|beta)?(?:/|$)")
-_NATIVE_GEMINI_VERSION_PATH_RE = re.compile(r"/v\d+(?:alpha|beta)(?:/|$)")
-_LOOPBACK_NATIVE_GEMINI_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 # Published max output-token ceiling shared by every current Gemini text model
 # (2.5 + 3.x: flash, flash-lite, pro). Used as the default when the caller
@@ -75,25 +64,9 @@ def is_native_gemini_base_url(base_url: str) -> bool:
     normalized = str(base_url or "").strip().rstrip("/").lower()
     if not normalized:
         return False
-    if normalized.startswith("cloudcode-pa://"):
+    if "generativelanguage.googleapis.com" not in normalized:
         return False
-    if normalized.endswith("/openai"):
-        return False
-    if "/v1/chat/completions" in normalized or normalized.endswith("/chat/completions"):
-        return False
-    if "generativelanguage.googleapis.com" in normalized:
-        return True
-    if _NATIVE_GEMINI_PROXY_PATH_RE.search(normalized):
-        return True
-    parsed = urlparse(normalized)
-    if (
-        (parsed.hostname or "") in _LOOPBACK_NATIVE_GEMINI_HOSTS
-        and _NATIVE_GEMINI_VERSION_PATH_RE.search(parsed.path)
-    ):
-        return True
-    if "gemini" in normalized and _NATIVE_GEMINI_VERSION_PATH_RE.search(normalized):
-        return True
-    return False
+    return not normalized.endswith("/openai")
 
 
 def probe_gemini_tier(
@@ -268,7 +241,7 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
 
 
 def _tool_call_extra_signature(tool_call: Dict[str, Any]) -> Optional[str]:
-    extra = tool_call_extra_content(tool_call) or {}
+    extra = tool_call.get("extra_content") or {}
     if not isinstance(extra, dict):
         return None
     google = extra.get("google") or extra.get("thought_signature")
@@ -300,10 +273,6 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     if thought_signature:
         part["thoughtSignature"] = thought_signature
     return part
-
-
-def _clone_gemini_content(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    return clone_gemini_content(message)
 
 
 def _translate_tool_result_to_gemini(
@@ -363,16 +332,8 @@ def _build_gemini_contents(messages: List[Dict[str, Any]]) -> tuple[List[Dict[st
         gemini_role = "model" if role == "assistant" else "user"
         parts: List[Dict[str, Any]] = []
 
-        preserved_content = _clone_gemini_content(msg) if role == "assistant" else None
-        if preserved_content is not None:
-            preserved_role = str(preserved_content.get("role") or "").strip().lower()
-            if preserved_role in {"user", "model"}:
-                gemini_role = preserved_role
-            parts.extend(preserved_content.get("parts") or [])
-
-        if preserved_content is None:
-            content_parts = _extract_multimodal_parts(msg.get("content"))
-            parts.extend(content_parts)
+        content_parts = _extract_multimodal_parts(msg.get("content"))
+        parts.extend(content_parts)
 
         tool_calls = msg.get("tool_calls") or []
         if isinstance(tool_calls, list):
@@ -382,8 +343,7 @@ def _build_gemini_contents(messages: List[Dict[str, Any]]) -> tuple[List[Dict[st
                     tool_name = str(((tool_call.get("function") or {}).get("name") or ""))
                     if tool_call_id and tool_name:
                         tool_name_by_call_id[tool_call_id] = tool_name
-                    if preserved_content is None:
-                        parts.append(_translate_tool_call_to_gemini(tool_call))
+                    parts.append(_translate_tool_call_to_gemini(tool_call))
 
         if parts:
             contents.append({"role": gemini_role, "parts": parts})
@@ -408,7 +368,7 @@ def _build_gemini_contents(messages: List[Dict[str, Any]]) -> tuple[List[Dict[st
     joined_system = "\n".join(part for part in system_text_parts if part).strip()
     if joined_system:
         system_instruction = {"role": "system", "parts": [{"text": joined_system}]}
-    return coalesce_split_function_response_turns(contents), system_instruction
+    return contents, system_instruction
 
 
 def _translate_tools_to_gemini(tools: Any) -> List[Dict[str, Any]]:
@@ -549,7 +509,6 @@ def _empty_response(model: str) -> SimpleNamespace:
         reasoning=None,
         reasoning_content=None,
         reasoning_details=None,
-        gemini_content=None,
     )
     choice = SimpleNamespace(index=0, message=message, finish_reason="stop")
     usage = SimpleNamespace(
@@ -625,7 +584,6 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
         reasoning=reasoning,
         reasoning_content=reasoning,
         reasoning_details=None,
-        gemini_content=copy.deepcopy(content_obj) if isinstance(content_obj, dict) else None,
     )
     choice = SimpleNamespace(index=0, message=message, finish_reason=finish_reason)
     return SimpleNamespace(
@@ -649,7 +607,6 @@ def _make_stream_chunk(
     tool_call_delta: Optional[Dict[str, Any]] = None,
     finish_reason: Optional[str] = None,
     reasoning: str = "",
-    gemini_part: Optional[Dict[str, Any]] = None,
 ) -> _GeminiStreamChunk:
     delta_kwargs: Dict[str, Any] = {
         "role": "assistant",
@@ -677,8 +634,6 @@ def _make_stream_chunk(
     if reasoning:
         delta_kwargs["reasoning"] = reasoning
         delta_kwargs["reasoning_content"] = reasoning
-    if isinstance(gemini_part, dict):
-        delta_kwargs["gemini_part"] = copy.deepcopy(gemini_part)
     delta = SimpleNamespace(**delta_kwargs)
     choice = SimpleNamespace(index=0, delta=delta, finish_reason=finish_reason)
     return _GeminiStreamChunk(
@@ -728,18 +683,10 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
         if not isinstance(part, dict):
             continue
         if part.get("thought") is True and isinstance(part.get("text"), str):
-            chunks.append(_make_stream_chunk(
-                model=model,
-                reasoning=part["text"],
-                gemini_part=part,
-            ))
+            chunks.append(_make_stream_chunk(model=model, reasoning=part["text"]))
             continue
         if isinstance(part.get("text"), str) and part["text"]:
-            chunks.append(_make_stream_chunk(
-                model=model,
-                content=part["text"],
-                gemini_part=part,
-            ))
+            chunks.append(_make_stream_chunk(model=model, content=part["text"]))
         fc = part.get("functionCall")
         if isinstance(fc, dict) and fc.get("name"):
             name = str(fc["name"])
@@ -782,7 +729,6 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
                         "arguments": emitted_arguments,
                         "extra_content": _tool_call_extra_from_part(part),
                     },
-                    gemini_part=part,
                 )
             )
 
@@ -1072,22 +1018,16 @@ class AsyncGeminiNativeClient:
 
     async def _create_chat_completion(self, **kwargs: Any) -> Any:
         stream = bool(kwargs.get("stream"))
+        result = await asyncio.to_thread(self._sync.chat.completions.create, **kwargs)
         if not stream:
-            return await asyncio.to_thread(self._sync.chat.completions.create, **kwargs)
-
-        # The sync streaming client returns a lazy iterator; no network read
-        # happens until iteration, so avoid spinning up an executor just to
-        # construct it. Some test runners also hang while shutting down the
-        # default executor after this path.
-        result = self._sync.chat.completions.create(**kwargs)
+            return result
 
         async def _async_stream() -> Any:
             while True:
-                done, chunk = self._sync._advance_stream_iterator(result)
+                done, chunk = await asyncio.to_thread(self._sync._advance_stream_iterator, result)
                 if done:
                     break
                 yield chunk
-                await asyncio.sleep(0)
 
         return _async_stream()
 

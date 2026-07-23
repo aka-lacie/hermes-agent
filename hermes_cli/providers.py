@@ -242,7 +242,6 @@ class ProviderDef:
     auth_type: str = "api_key"
     doc: str = ""
     source: str = ""                      # "models.dev", "hermes", "user-config"
-    configured_models: Tuple[str, ...] = ()
 
 
 # -- Aliases ------------------------------------------------------------------
@@ -646,7 +645,6 @@ def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[Pr
         is_aggregator=False,
         auth_type="api_key",
         source="user-config",
-        configured_models=_configured_model_ids(entry),
     )
 
 
@@ -658,30 +656,6 @@ def custom_provider_slug(display_name: str) -> str:
     produce identical slugs.
     """
     return "custom:" + display_name.strip().lower().replace(" ", "-")
-
-
-def _configured_model_ids(entry: Dict[str, Any]) -> Tuple[str, ...]:
-    """Return model IDs declared on a user-configured provider entry."""
-    models: List[str] = []
-
-    def _add(value: Any) -> None:
-        if isinstance(value, str):
-            model = value.strip()
-            if model and model not in models:
-                models.append(model)
-
-    _add(entry.get("model"))
-    _add(entry.get("default_model"))
-
-    cfg_models = entry.get("models")
-    if isinstance(cfg_models, dict):
-        for model in cfg_models:
-            _add(str(model))
-    elif isinstance(cfg_models, list):
-        for model in cfg_models:
-            _add(str(model))
-
-    return tuple(models)
 
 
 def resolve_custom_provider(
@@ -726,18 +700,11 @@ def resolve_custom_provider(
             first_valid = (display_name, api_url, tuple(env_vars))
 
         slug = custom_provider_slug(display_name)
-        provider_key = str(entry.get("provider_key", "") or "").strip()
-        provider_key_norm = provider_key.lower().replace(" ", "-") if provider_key else ""
-        if requested not in {
-            display_name.lower(),
-            slug,
-            provider_key_norm,
-            f"custom:{provider_key_norm}" if provider_key_norm else "",
-        }:
+        if requested not in {display_name.lower(), slug}:
             continue
 
         return ProviderDef(
-            id=provider_key or slug,
+            id=slug,
             name=display_name,
             transport="openai_chat",
             api_key_env_vars=tuple(env_vars),
@@ -745,7 +712,6 @@ def resolve_custom_provider(
             is_aggregator=False,
             auth_type="api_key",
             source="user-config",
-            configured_models=_configured_model_ids(entry),
         )
 
     # Self-heal: bare "custom" matched nothing — return first valid entry
@@ -798,6 +764,36 @@ def resolve_provider_full(
         user_pdef = resolve_user_provider(raw, user_providers)
         if user_pdef is not None:
             return user_pdef
+
+    # 0.5 Exact Hermes provider IDs must win over LOSSY alias collapsing.
+    # Example: kimi-coding-cn should stay distinct from kimi-coding instead of
+    # normalizing through the shared models.dev alias "kimi-for-coding".
+    # A collapse is lossy only when MULTIPLE distinct registry providers
+    # normalize to the same canonical name — resolving through the alias
+    # would then lose which one the caller meant. Single-entry rewrites
+    # (e.g. "copilot" → "github-copilot") are correct routing and must keep
+    # resolving through the built-in chain below so overlay transports apply.
+    if canonical != raw:
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY as _AUTH_PROVIDER_REGISTRY
+            _pcfg = _AUTH_PROVIDER_REGISTRY.get(raw)
+            if _pcfg is not None:
+                _collapsed_siblings = [
+                    _rid
+                    for _rid in _AUTH_PROVIDER_REGISTRY
+                    if normalize_provider(_rid) == canonical
+                ]
+                if len(_collapsed_siblings) > 1:
+                    return ProviderDef(
+                        id=_pcfg.id,
+                        name=_pcfg.name,
+                        transport="openai_chat",
+                        api_key_env_vars=tuple(_pcfg.api_key_env_vars or ()),
+                        base_url=_pcfg.inference_base_url or "",
+                        source="hermes-auth-registry",
+                    )
+        except Exception:
+            pass
 
     # 1. Built-in (models.dev + overlays)
     pdef = get_provider(canonical)

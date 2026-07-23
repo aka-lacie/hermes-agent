@@ -433,9 +433,9 @@ class ResponsesApiTransport(ProviderTransport):
             for tc in msg.tool_calls:
                 provider_data = {}
                 if hasattr(tc, "call_id") and tc.call_id:
-                    provider_data.setdefault("openai_codex", {})["call_id"] = tc.call_id
+                    provider_data["call_id"] = tc.call_id
                 if hasattr(tc, "response_item_id") and tc.response_item_id:
-                    provider_data.setdefault("openai_codex", {})["response_item_id"] = tc.response_item_id
+                    provider_data["response_item_id"] = tc.response_item_id
                 tool_calls.append(ToolCall(
                     id=tc.id if hasattr(tc, "id") else (tc.function.name if hasattr(tc, "function") else None),
                     name=tc.function.name if hasattr(tc, "function") else getattr(tc, "name", ""),
@@ -446,9 +446,9 @@ class ResponsesApiTransport(ProviderTransport):
         # Extract reasoning items for provider_data
         provider_data = {}
         if msg and hasattr(msg, "codex_reasoning_items") and msg.codex_reasoning_items:
-            provider_data.setdefault("openai_codex", {})["codex_reasoning_items"] = msg.codex_reasoning_items
+            provider_data["codex_reasoning_items"] = msg.codex_reasoning_items
         if msg and hasattr(msg, "codex_message_items") and msg.codex_message_items:
-            provider_data.setdefault("openai_codex", {})["codex_message_items"] = msg.codex_message_items
+            provider_data["codex_message_items"] = msg.codex_message_items
         if msg and hasattr(msg, "reasoning_details") and msg.reasoning_details:
             provider_data["reasoning_details"] = msg.reasoning_details
 

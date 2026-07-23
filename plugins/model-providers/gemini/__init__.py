@@ -25,7 +25,6 @@ class GeminiProfile(ProviderProfile):
         (OpenAI-compat /openai subpath), mirroring the legacy path's behavior.
         """
         from agent.transports.chat_completions import (
-            ChatCompletionsTransport,
             _build_gemini_thinking_config,
             _is_gemini_openai_compat_base_url,
             _snake_case_gemini_thinking_config,
@@ -36,14 +35,6 @@ class GeminiProfile(ProviderProfile):
         base_url = context.get("base_url") or self.base_url
 
         raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
-        if not raw_thinking_config and reasoning_config is None:
-            normalized_model = model.strip().lower()
-            if normalized_model.startswith("google/"):
-                normalized_model = normalized_model.split("/", 1)[1]
-            if not normalized_model or normalized_model.startswith("gemini"):
-                raw_thinking_config = ChatCompletionsTransport._native_gemini_thinking_config(
-                    reasoning_config
-                )
         if not raw_thinking_config:
             return {}
 

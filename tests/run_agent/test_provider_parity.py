@@ -143,7 +143,6 @@ class TestBuildApiKwargsOpenRouter:
                         "type": "function",
                         "function": {"name": "terminal", "arguments": "{\"command\":\"pwd\"}"},
                         "extra_content": {"thought_signature": "opaque"},
-                        "provider_data": {"google": {"extra_content": {"thought_signature": "opaque"}}},
                     }
                 ],
             },
@@ -158,22 +157,24 @@ class TestBuildApiKwargsOpenRouter:
         assert "codex_reasoning_items" not in assistant_msg
         assert tool_call["id"] == "call_123"
         assert tool_call["function"]["name"] == "terminal"
+        # extra_content (Gemini thought_signature) is stripped for non-Gemini
+        # targets — strict providers like Fireworks 400 on it. The agent here
+        # is not a Gemini model, so it must be dropped.
         assert "extra_content" not in tool_call
-        assert "provider_data" not in tool_call
         assert "call_id" not in tool_call
         assert "response_item_id" not in tool_call
 
-        # Original stored history must remain unchanged for Responses replay mode.
+        # Original stored history must remain unchanged (only the outgoing copy
+        # is sanitized) — Codex/Responses replay relies on these fields.
         assert messages[1]["tool_calls"][0]["call_id"] == "call_123"
         assert messages[1]["tool_calls"][0]["response_item_id"] == "fc_123"
-        assert messages[1]["tool_calls"][0]["extra_content"] == {"thought_signature": "opaque"}
-        assert messages[1]["tool_calls"][0]["provider_data"] == {
-            "google": {"extra_content": {"thought_signature": "opaque"}}
-        }
         assert "codex_reasoning_items" in messages[1]
+        assert messages[1]["tool_calls"][0]["extra_content"] == {"thought_signature": "opaque"}
 
     def test_keeps_extra_content_for_gemini_target(self, monkeypatch):
-        """Gemini-family targets must keep extra_content for thought replay."""
+        """Gemini-family targets must keep extra_content (thought_signature) —
+        Gemini 3 thinking models 400 without it replayed on the next turn.
+        """
         agent = _make_agent(monkeypatch, "openrouter", model="google/gemini-3-pro-preview")
         messages = [
             {"role": "user", "content": "hi"},
@@ -197,6 +198,7 @@ class TestBuildApiKwargsOpenRouter:
         kwargs = agent._build_api_kwargs(messages)
         tool_call = kwargs["messages"][1]["tool_calls"][0]
         assert tool_call["extra_content"] == {"google": {"thought_signature": "opaque"}}
+        # call_id/response_item_id still stripped regardless of model
         assert "call_id" not in tool_call
         assert "response_item_id" not in tool_call
 
@@ -206,73 +208,6 @@ class TestBuildApiKwargsOpenRouter:
         assert messages[1]["tool_calls"][0]["extra_content"] == {
             "google": {"thought_signature": "opaque"}
         }
-
-    def test_preserves_provider_data_for_native_protocol(self, monkeypatch):
-        agent = _make_agent(
-            monkeypatch,
-            "gemini",
-            base_url="https://generativelanguage.googleapis.com/v1beta",
-        )
-        msg = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_123",
-                    "call_id": "call_123",
-                    "response_item_id": "fc_123",
-                    "type": "function",
-                    "function": {"name": "terminal", "arguments": "{\"command\":\"pwd\"}"},
-                    "provider_data": {"google": {"extra_content": {"google": {"thought_signature": "opaque"}}}},
-                }
-            ],
-        }
-
-        api_msg = agent._prepare_api_message(
-            msg,
-            preserve_provider_data=True,
-            sanitize_tool_calls=True,
-        )
-
-        tool_call = api_msg["tool_calls"][0]
-        assert tool_call["provider_data"] == {
-            "google": {"extra_content": {"google": {"thought_signature": "opaque"}}}
-        }
-        assert tool_call["call_id"] == "call_123"
-        assert tool_call["response_item_id"] == "fc_123"
-
-    def test_build_api_kwargs_preserves_native_provider_data(self, monkeypatch):
-        agent = _make_agent(
-            monkeypatch,
-            "gemini",
-            base_url="https://generativelanguage.googleapis.com/v1beta",
-        )
-        messages = [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_123",
-                        "call_id": "call_123",
-                        "response_item_id": "fc_123",
-                        "type": "function",
-                        "function": {"name": "terminal", "arguments": "{\"command\":\"pwd\"}"},
-                        "provider_data": {"google": {"extra_content": {"google": {"thought_signature": "opaque"}}}},
-                    }
-                ],
-            },
-        ]
-
-        kwargs = agent._build_api_kwargs(messages)
-        tool_call = kwargs["messages"][0]["tool_calls"][0]
-
-        assert tool_call["provider_data"] == {
-            "google": {"extra_content": {"google": {"thought_signature": "opaque"}}}
-        }
-        assert "call_id" not in tool_call
-        assert "response_item_id" not in tool_call
-        assert kwargs["extra_body"]["thinking_config"] == {"includeThoughts": True}
 
     def test_gemini_native_passes_base_url_for_top_level_thinking_config(self, monkeypatch):
         agent = _make_agent(
@@ -1078,41 +1013,6 @@ class TestBuildAssistantMessage:
         )
         result = agent._build_assistant_message(msg, "stop")
         assert "codex_reasoning_items" not in result
-
-    def test_build_assistant_message_preserves_normalized_gemini_content(self, monkeypatch):
-        from agent.transports.chat_completions import ChatCompletionsTransport
-
-        agent = _make_agent(
-            monkeypatch,
-            "gemini",
-            base_url="https://generativelanguage.googleapis.com/v1beta",
-        )
-        gemini_content = {
-            "role": "model",
-            "parts": [
-                {"thought": True, "text": "internal plan"},
-                {"text": "Visible answer", "thoughtSignature": "sig-answer"},
-            ],
-        }
-        raw = SimpleNamespace(
-            choices=[SimpleNamespace(
-                message=SimpleNamespace(
-                    content="Visible answer",
-                    tool_calls=None,
-                    reasoning="internal plan",
-                    reasoning_content="internal plan",
-                    gemini_content=gemini_content,
-                ),
-                finish_reason="stop",
-            )],
-            usage=None,
-        )
-
-        normalized = ChatCompletionsTransport().normalize_response(raw)
-        result = agent._build_assistant_message(normalized, normalized.finish_reason)
-
-        assert result["provider_data"]["google"]["gemini_content"] == gemini_content
-        assert result["reasoning_content"] == "internal plan"
 
 
 # ── Auxiliary client provider resolution ─────────────────────────────────────

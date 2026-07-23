@@ -65,7 +65,6 @@ class TestChatCompletionsBasic:
             {"role": "assistant", "content": "ok", "codex_reasoning_items": [{"id": "rs_1"}],
              "codex_message_items": [{"id": "msg_1", "type": "message"}],
              "tool_calls": [{"id": "call_1", "call_id": "call_1", "response_item_id": "fc_1",
-                            "provider_data": {"google": {"extra_content": {"google": {"thought_signature": "SIG"}}}},
                             "type": "function", "function": {"name": "t", "arguments": "{}"}}]},
         ]
         result = transport.convert_messages(msgs)
@@ -73,26 +72,9 @@ class TestChatCompletionsBasic:
         assert "codex_message_items" not in result[0]
         assert "call_id" not in result[0]["tool_calls"][0]
         assert "response_item_id" not in result[0]["tool_calls"][0]
-        assert "provider_data" not in result[0]["tool_calls"][0]
         # Original list untouched (deepcopy-on-demand)
         assert "codex_reasoning_items" in msgs[0]
-        assert "provider_data" in msgs[0]["tool_calls"][0]
         assert "codex_message_items" in msgs[0]
-
-    def test_convert_messages_can_preserve_provider_data(self, transport):
-        msgs = [
-            {"role": "assistant", "content": "ok",
-             "tool_calls": [{"id": "call_1", "call_id": "call_1", "response_item_id": "fc_1",
-                            "provider_data": {"google": {"extra_content": {"google": {"thought_signature": "SIG"}}}},
-                            "type": "function", "function": {"name": "t", "arguments": "{}"}}]},
-        ]
-        result = transport.convert_messages(msgs, preserve_provider_data=True)
-        tool_call = result[0]["tool_calls"][0]
-        assert "call_id" not in tool_call
-        assert "response_item_id" not in tool_call
-        assert tool_call["provider_data"] == {
-            "google": {"extra_content": {"google": {"thought_signature": "SIG"}}}
-        }
 
     def _msg_with_extra_content(self):
         return [
@@ -105,7 +87,7 @@ class TestChatCompletionsBasic:
     def test_convert_messages_strips_extra_content_for_strict_provider(self, transport):
         """Strict providers (Fireworks, Mistral) reject extra_content on
         tool_calls with HTTP 400. When the outgoing model is NOT Gemini-family,
-        the Gemini thought_signature must be stripped, including stale
+        the Gemini thought_signature must be stripped — including stale
         signatures inherited from earlier in a mixed-provider session.
         """
         msgs = self._msg_with_extra_content()
@@ -121,8 +103,9 @@ class TestChatCompletionsBasic:
         assert "extra_content" not in result[0]["tool_calls"][0]
 
     def test_convert_messages_keeps_extra_content_for_gemini(self, transport):
-        """Gemini 3 thinking models require thought_signature replayed on
-        every turn. Keep extra_content for Gemini targets.
+        """Gemini 3 thinking models require the thought_signature replayed on
+        every turn — stripping it would 400. Keep extra_content for Gemini
+        targets (including aggregator slugs like google/gemini-3-pro).
         """
         for model in ("gemini-3-pro", "google/gemini-3-pro-preview", "gemma-3-27b"):
             msgs = self._msg_with_extra_content()
@@ -739,28 +722,6 @@ class TestChatCompletionsKimi:
         )
         assert kw["extra_body"]["thinking"] == {"type": "disabled"}
 
-    def test_native_gemini_requests_thought_summaries(self, transport):
-        kw = transport.build_kwargs(
-            model="gemini-3.1-pro-preview",
-            messages=[{"role": "user", "content": "hi"}],
-            tools=[],
-            native_gemini_protocol=True,
-            reasoning_config={"enabled": True, "effort": "medium"},
-        )
-
-        assert kw["extra_body"]["thinking_config"] == {"includeThoughts": True}
-
-    def test_native_gemini_respects_reasoning_disabled(self, transport):
-        kw = transport.build_kwargs(
-            model="gemini-3.1-pro-preview",
-            messages=[{"role": "user", "content": "hi"}],
-            tools=[],
-            native_gemini_protocol=True,
-            reasoning_config={"enabled": False},
-        )
-
-        assert kw["extra_body"]["thinking_config"] == {"includeThoughts": False}
-
     def test_moonshot_tool_schemas_are_sanitized_by_model_name(self, transport):
         """Aggregator routes (Nous, OpenRouter) hit Moonshot by model name, not base URL."""
         tools = [
@@ -785,6 +746,28 @@ class TestChatCompletionsKimi:
             max_tokens_param_fn=lambda n: {"max_tokens": n},
         )
         assert kw["tools"][0]["function"]["parameters"]["properties"]["q"]["type"] == "string"
+
+    def test_moonshot_outgoing_schema_carries_required_array(self, transport):
+        """Moonshot 400s on object schemas without an explicit `required` array
+        (#66835). Assert the wire-level tool schema — what actually leaves the
+        transport — carries `required: []` on a zero-required-param tool."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_snapshot",
+                    "description": "Snapshot",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+        kw = transport.build_kwargs(
+            model="moonshotai/kimi-k3",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=tools,
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert kw["tools"][0]["function"]["parameters"]["required"] == []
 
     def test_non_moonshot_tools_are_not_mutated(self, transport):
         """Other models don't go through the Moonshot sanitizer."""
@@ -956,7 +939,7 @@ class TestChatCompletionsNormalize:
         )
         nr = transport.normalize_response(r)
         assert nr.tool_calls[0].provider_data == {
-            "google": {"extra_content": {"google": {"thought_signature": "SIG_ABC123"}}}
+            "extra_content": {"google": {"thought_signature": "SIG_ABC123"}}
         }
 
     def test_reasoning_content_preserved_separately(self, transport):
@@ -977,36 +960,6 @@ class TestChatCompletionsNormalize:
         nr = transport.normalize_response(r)
         assert nr.reasoning == "summary text"
         assert nr.provider_data == {"reasoning_content": "detailed scratchpad"}
-
-    def test_response_level_gemini_content_preserved(self, transport):
-        """Native Gemini responses carry full content.parts on the message.
-        The normalizer must keep it so the agent can persist and replay thought
-        parts and thoughtSignature values on later turns."""
-        gemini_content = {
-            "role": "model",
-            "parts": [
-                {"thought": True, "text": "internal plan"},
-                {"text": "Visible answer", "thoughtSignature": "sig-answer"},
-            ],
-        }
-        r = SimpleNamespace(
-            choices=[SimpleNamespace(
-                message=SimpleNamespace(
-                    content="Visible answer",
-                    tool_calls=None,
-                    reasoning="internal plan",
-                    reasoning_content="internal plan",
-                    gemini_content=gemini_content,
-                ),
-                finish_reason="stop",
-            )],
-            usage=None,
-        )
-
-        nr = transport.normalize_response(r)
-
-        assert nr.gemini_content == gemini_content
-        assert nr.provider_data["google"]["gemini_content"] == gemini_content
 
     def test_empty_reasoning_content_preserved(self, transport):
         """DeepSeek can require an explicit empty reasoning_content replay field."""
