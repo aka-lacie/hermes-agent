@@ -340,7 +340,6 @@ def build_turn_context(
     set_session_context,
     set_current_write_origin,
     ra,
-    build_current_time_user_context=None,
     moa_active: bool = False,
 ) -> TurnContext:
     """Run the once-per-turn setup and return the loop's input context.

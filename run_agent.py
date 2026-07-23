@@ -2646,19 +2646,10 @@ class AIAgent:
         *,
         reason: str,
         error: Optional[Exception] = None,
-        effective_system: Optional[str] = None,
-        api_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Path]:
         """Forwarder — see ``agent.agent_runtime_helpers.dump_api_request_debug``."""
         from agent.agent_runtime_helpers import dump_api_request_debug
-        return dump_api_request_debug(
-            self,
-            api_kwargs,
-            reason=reason,
-            error=error,
-            effective_system=effective_system,
-            api_messages=api_messages,
-        )
+        return dump_api_request_debug(self, api_kwargs, reason=reason, error=error)
 
     @staticmethod
     def _clean_session_content(content: str) -> str:

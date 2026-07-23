@@ -19,8 +19,6 @@ jobs:
           cache: npm
           cache-dependency-path: website/package-lock.json
 
-      - uses: ./.github/actions/pin-npm
-
       - name: Install website dependencies
         uses: ./.github/actions/retry
         with:

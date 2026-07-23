@@ -1598,8 +1598,6 @@ def dump_api_request_debug(
     *,
     reason: str,
     error: Optional[Exception] = None,
-    effective_system: Optional[str] = None,
-    api_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Path]:
     """
     Dump a debug-friendly HTTP request record for the active inference API.
@@ -1633,12 +1631,6 @@ def dump_api_request_debug(
                 "body": body,
             },
         }
-
-        if effective_system is not None or api_messages is not None:
-            dump_payload["assembled_context"] = {
-                "effective_system": effective_system or "",
-                "messages": copy.deepcopy(api_messages) if api_messages is not None else None,
-            }
 
         if error is not None:
             error_info: Dict[str, Any] = {
@@ -1682,7 +1674,6 @@ def dump_api_request_debug(
         _serialized = json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str)
         _redacted_payload = json.loads(redact_sensitive_text(_serialized, force=True))
         atomic_json_write(dump_file, _redacted_payload, default=str)
-        prune_request_debug_dumps(agent, get_request_dump_keep_last())
 
         agent._vprint(f"{agent.log_prefix}🧾 Request debug dump written to: {dump_file}")
 
@@ -1694,58 +1685,6 @@ def dump_api_request_debug(
         if agent.verbose_logging:
             logger.warning(f"Failed to dump API request debug payload: {dump_error}")
         return None
-
-
-def get_request_dump_keep_last() -> int:
-    keep_last = 5
-    try:
-        from hermes_cli.config import read_raw_config
-
-        raw_config = read_raw_config()
-        if isinstance(raw_config, dict):
-            debug_cfg = raw_config.get("debug")
-            if isinstance(debug_cfg, dict):
-                request_dump_cfg = debug_cfg.get("request_dumps")
-                if isinstance(request_dump_cfg, dict):
-                    configured_keep = request_dump_cfg.get("keep_last")
-                    if isinstance(configured_keep, (int, float)):
-                        keep_last = max(1, int(configured_keep))
-    except Exception:
-        pass
-    return keep_last
-
-
-def request_dump_enabled() -> bool:
-    if env_var_enabled("HERMES_DUMP_REQUESTS"):
-        return True
-    try:
-        from hermes_cli.config import read_raw_config
-
-        raw_config = read_raw_config()
-        if not isinstance(raw_config, dict):
-            return False
-        debug_cfg = raw_config.get("debug")
-        if not isinstance(debug_cfg, dict):
-            return False
-        request_dump_cfg = debug_cfg.get("request_dumps")
-        if not isinstance(request_dump_cfg, dict):
-            return False
-        return bool(request_dump_cfg.get("enabled"))
-    except Exception:
-        return False
-
-
-def prune_request_debug_dumps(agent, keep_last: int) -> None:
-    if keep_last < 1:
-        keep_last = 1
-    try:
-        session_id = str(agent.session_id or "")
-        dumps = sorted(agent.logs_dir.glob(f"request_dump_{session_id}_*.json"))
-        stale = dumps[:-keep_last]
-        for path in stale:
-            path.unlink(missing_ok=True)
-    except Exception as exc:
-        _ra().logger.debug("Failed to prune request debug dumps: %s", exc)
 
 
 

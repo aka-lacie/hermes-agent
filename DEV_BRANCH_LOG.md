@@ -14,95 +14,62 @@ supersedes or that are no longer used. The pre-prune state remains available at
 Pre-existing uncommitted edits to `AGENTS.md` and `package-lock.json` belong to
 the user and are not part of this audit.
 
-## Active Local Changes Pending A Decision
+## Decisions Applied
 
 ### Local Workstation Runtime Extra
 
-Status: `decision-pending`
+Status: `externalized`
 
 Commits: `4cda99fbf`, `fb23b2b41`
 
-Files:
-- `pyproject.toml`
-- `uv.lock`
-- `AGENTS.md`
-
-Behavior:
-- Adds a `local` extra that composes the `dev`, `cli`, `messaging`, `cron`,
-  `honcho`, `pty`, `google`, and `web` extras used by this workstation.
-- Keeps the shared runtime reproducible with
-  `uv sync --locked --extra local`.
+External manifest:
+- `/home/sonya/.hermes/scripts/sync-hermes-dev-runtime.sh`
 
 Merge rule:
-- Preserve until an external workstation dependency manifest or another
-  replacement is explicitly selected.
-- After dependency conflicts, validate with `uv lock --check`; do not
-  hand-delete the `local` markers from `uv.lock`.
+- Do not restore the host-specific `local` extra to `pyproject.toml` or
+  `uv.lock`.
+- Update the external sync script when this workstation needs another
+  optional extra.
 
 ### npm Lockfile Pinning
 
-Status: `decision-pending`
+Status: `retired`
 
 Commits: `45c011128`, `fd6cd5bb2`
 
-Files:
-- `.github/actions/pin-npm/action.yml`
-- `.github/workflows/deploy-site.yml`
-- `.github/workflows/docs-site-checks.yml`
-- `.github/workflows/upload_to_pypi.yml`
-- `package.json`
-
-Behavior:
-- Pins npm for deterministic lockfile generation in selected CI workflows.
-- Avoids imposing that CI pin on normal runtime installs.
-
 Merge rule:
-- Preserve pending a separate decision.
-- Upstream deleted `upload_to_pypi.yml`; the local copy is intentionally
-  retained only while this decision is open.
+- Follow upstream's npm and workflow configuration.
+- Do not restore the local composite action, root `packageManager` pin, or
+  the upstream-deleted PyPI workflow.
 
 ### Request Debug Dump Enhancement
 
-Status: `decision-pending`
+Status: `plugin`
 
-Files:
-- `agent/agent_runtime_helpers.py`
-- `agent/conversation_loop.py`
-- `run_agent.py`
-- `tests/run_agent/test_run_agent_codex_responses.py`
+Plugin:
+- `/home/sonya/.hermes/profiles/yuri/plugins/request-debug-dumps/plugin.yaml`
+- `/home/sonya/.hermes/profiles/yuri/plugins/request-debug-dumps/__init__.py`
 
 Behavior:
-- Optionally includes the assembled system prompt and message list in request
-  debug dumps.
-- Retains only the configured number of dump files.
-- Enables dumps through `debug.request_dumps.enabled` as well as the existing
-  environment switch.
+- Observes upstream `pre_api_request` and `api_request_error` hooks.
+- Writes the host-sanitized request payload after applying a second redaction
+  pass.
+- Honors `debug.request_dumps.enabled` and `keep_last`.
 
 Merge rule:
-- Preserve pending a separate decision.
-- Current upstream exposes `pre_api_request` and `api_request_error` plugin
-  hooks with sanitized request/error payloads. The enhancement is therefore a
-  viable standalone observability plugin candidate; keep the core delta only
-  until that extraction decision is made.
+- Keep `agent/agent_runtime_helpers.py`, `agent/conversation_loop.py`,
+  `run_agent.py`, and their request-dump tests aligned with upstream.
+- Maintain this behavior in the standalone Yuri plugin.
 
 ### Optional Turn-Context Callback Compatibility
 
-Status: `decision-pending`
+Status: `retired`
 
 Commit: `88da9ebaf`
 
-File:
-- `agent/turn_context.py`
-
-Behavior:
-- Keeps `build_current_time_user_context` as an optional keyword accepted by
-  `build_turn_context`.
-- The callback is now unused because the fork-only user-turn timestamp
-  injection was retired; this is currently a one-line compatibility shim.
-
 Merge rule:
-- Preserve only until the caller-compatibility decision is made. Removing it
-  is the cleanest option if no external caller still passes the keyword.
+- Do not restore the unused `build_current_time_user_context` keyword to
+  `build_turn_context`.
 
 ## Runtime Features Moved Outside Core
 
@@ -262,7 +229,8 @@ Decision:
 1. Confirm `main` matches `origin/main`.
 2. Read this log before resolving conflicts in `dev`.
 3. Merge `main` into `dev`; do not rebase the long-lived branch.
-4. Preserve only entries still marked `decision-pending` or `plugin`.
+4. Preserve only entries marked `plugin`; keep workstation-only behavior in
+   its documented external files.
 5. Do not resurrect entries marked `retired`.
 6. Run `uv lock --check` when `pyproject.toml` or `uv.lock` changes.
 7. Run focused tests for every active local source delta touched by the merge.

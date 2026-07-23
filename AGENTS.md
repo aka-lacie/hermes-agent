@@ -223,16 +223,11 @@ the competing PRs into plugins against that interface.
 ```bash
 # Prefer .venv; fall back to venv if that's what your checkout has.
 source .venv/bin/activate   # or: source venv/bin/activate
-# Shared local workstation env (CLI + tests + gateway services):
-uv sync --extra local
 ```
 
-`local` is the canonical workstation bundle in `pyproject.toml` and currently
-expands to `dev`, `cli`, `messaging`, `cron`, `honcho`, `pty`, `google`, and `web`.
-If a new runtime-facing optional dependency is introduced (for example via a new
-configured plugin, gateway platform, cron path, terminal/runtime feature, or web
-dashboard path), add its extra to `local` so future `uv sync --extra local` runs
-do not silently strip required packages from the shared `.venv`.
+This workstation's runtime dependency bundle is intentionally external to the
+repository. Use `/home/sonya/.hermes/scripts/sync-hermes-dev-runtime.sh` after
+updates instead of adding a host-specific aggregate extra to `pyproject.toml`.
 
 `scripts/run_tests.sh` probes `.venv` first, then `venv`, then
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
@@ -483,7 +478,7 @@ Newline-delimited JSON-RPC over stdio. Requests from Ink, events from Python. Se
 
 ```bash
 cd ui-tui
-npm ci            # first time; preserves the committed lockfile exactly
+npm install       # first time
 npm run dev       # watch mode (rebuilds hermes-ink + tsx --watch)
 npm start         # production
 npm run build     # full build (hermes-ink + tsc)
