@@ -33,10 +33,10 @@ _HERMES_CORE_TOOLS = [
     "web_search", "web_extract",
     # Terminal + process management
     "terminal", "process",
-    # Read the desktop GUI's embedded terminal pane, and close an agent's
-    # read-only terminal tab (both gated on HERMES_DESKTOP via check_fn —
-    # hidden outside the GUI).
-    "read_terminal", "close_terminal",
+    # Desktop GUI affordances: read the embedded terminal pane, close an agent's
+    # read-only terminal tab, open a URL/file in the preview pane, and focus a
+    # pane (all gated on HERMES_DESKTOP via check_fn — hidden outside the GUI).
+    "read_terminal", "close_terminal", "open_preview", "focus_pane",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
     # Vision + image generation
@@ -44,7 +44,7 @@ _HERMES_CORE_TOOLS = [
     # Skills
     "skills_list", "skill_view", "skill_manage",
     # Browser automation
-    "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_click",
+    "browser_navigate", "browser_snapshot", "browser_click",
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
@@ -173,7 +173,7 @@ TOOLSETS = {
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
         "tools": [
-            "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_click",
+            "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp",
@@ -385,7 +385,7 @@ TOOLSETS = {
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
             "skills_list", "skill_view", "skill_manage",
-            "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_click",
+            "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
@@ -410,7 +410,7 @@ TOOLSETS = {
             # Skills
             "skills_list", "skill_view", "skill_manage",
             # Browser automation
-            "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_click",
+            "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",

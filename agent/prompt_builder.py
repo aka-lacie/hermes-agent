@@ -805,8 +805,19 @@ PLATFORM_HINTS = {
     ),
     "matrix": (
         "You are in a Matrix room communicating with your user. "
-        "Matrix renders Markdown — bold, italic, code blocks, and links work; "
-        "the adapter converts your Markdown to HTML for rich display. "
+        "The adapter converts your Markdown to HTML for rich display — bold, "
+        "italic, inline code, fenced code blocks, headings, bullet and "
+        "numbered lists, blockquotes, and links all render.\n\n"
+        "Do NOT use Markdown tables: many popular Matrix clients (Element X, "
+        "Beeper, most mobile apps) do not render HTML tables, so the cells "
+        "collapse into one continuous run of text. Present tabular data as "
+        "labeled '**Label:** value' lines or bullet lists instead.\n\n"
+        "Avoid ||spoiler|| tags, ~~strikethrough~~, and checkboxes "
+        "(- [ ] / - [x]) — they are not converted and appear as literal "
+        "characters.\n\n"
+        "LINKS: prefer [descriptive link text](url) over bare URLs. When "
+        "referencing something with an associated URL (events, sources, "
+        "people), make the name a clickable link.\n\n"
         "You can send media files natively: include MEDIA:/absolute/path/to/file "
         "in your response. Images (.jpg, .png, .webp) are sent as inline photos, "
         "audio (.ogg, .mp3) as voice/audio messages, video (.mp4) inline, "
@@ -1769,7 +1780,6 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
         "web_extract",
         "browser_navigate",
         "browser_snapshot",
-        "browser_screenshot",
         "browser_click",
         "browser_type",
         "browser_scroll",
@@ -1819,7 +1829,7 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
 
 
 # =========================================================================
-# Context files (SOUL.md, IDENTITY.md, AGENTS.md, .cursorrules)
+# Context files (SOUL.md, AGENTS.md, .cursorrules)
 # =========================================================================
 
 def _truncate_content(
@@ -1892,29 +1902,6 @@ def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
 
-
-def load_identity_md(context_length: Optional[int] = None) -> Optional[str]:
-    """Load optional profile-root IDENTITY.md, or None.
-
-    SOUL.md stays the primary identity slot. IDENTITY.md is an additive,
-    profile-local instruction/reference file for durable guidance that should
-    not depend on workspace context discovery.
-    """
-    identity_path = get_hermes_home() / "IDENTITY.md"
-    if not identity_path.exists():
-        return None
-    try:
-        content = identity_path.read_text(encoding="utf-8").strip()
-        if not content:
-            return None
-        content = _scan_context_content(content, "IDENTITY.md")
-        return _truncate_content(
-            content, "IDENTITY.md", context_length=context_length,
-            read_path=str(identity_path),
-        )
-    except Exception as e:
-        logger.debug("Could not read IDENTITY.md from %s: %s", identity_path, e)
-        return None
 
 def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """.hermes.md / HERMES.md — walk to git root."""

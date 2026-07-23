@@ -432,7 +432,6 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         "terminal": "command", "web_search": "query", "web_extract": "urls",
         "read_file": "path", "write_file": "path", "patch": "path",
         "search_files": "pattern", "browser_navigate": "url",
-        "browser_screenshot": "annotate",
         "browser_click": "ref", "browser_type": "text",
         "image_generate": "prompt", "text_to_speech": "text",
         "vision_analyze": "question",
@@ -1390,9 +1389,6 @@ def _get_cute_tool_message(
     if tool_name == "browser_snapshot":
         mode = "full" if args.get("full") else "compact"
         return _wrap(f"┊ 📸 snapshot  {mode}  {dur}")
-    if tool_name == "browser_screenshot":
-        mode = "annotated" if args.get("annotate") else "plain"
-        return _wrap(f"┊ 🖼️  screenshot {mode}  {dur}")
     if tool_name == "browser_click":
         return _wrap(f"┊ 👆 click     {args.get('ref', '?')}  {dur}")
     if tool_name == "browser_type":
