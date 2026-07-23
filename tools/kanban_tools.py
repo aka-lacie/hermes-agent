@@ -1232,18 +1232,8 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     chat_id = ""
     try:
         from gateway.session_context import get_session_env
-        # This helper may run inside an agent subprocess, where session
-        # routing is inherited through env vars rather than gateway
-        # ContextVars. Keep the env fallback local to this notification path
-        # instead of weakening get_session_env() globally.
-        platform = (
-            get_session_env("HERMES_SESSION_PLATFORM", "")
-            or os.environ.get("HERMES_SESSION_PLATFORM", "")
-        )
-        chat_id = (
-            get_session_env("HERMES_SESSION_CHAT_ID", "")
-            or os.environ.get("HERMES_SESSION_CHAT_ID", "")
-        )
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
         if not platform or not chat_id:
             # TUI / desktop fallback: platform/chat_id ContextVars are
             # cleared for TUI sessions, but the parent process exports
@@ -1266,16 +1256,8 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
                 return False  # CLI / cron / test — no persistent channel
             platform = "tui"
             chat_id = session_key
-        thread_id = (
-            get_session_env("HERMES_SESSION_THREAD_ID", "")
-            or os.environ.get("HERMES_SESSION_THREAD_ID", "")
-            or None
-        )
-        user_id = (
-            get_session_env("HERMES_SESSION_USER_ID", "")
-            or os.environ.get("HERMES_SESSION_USER_ID", "")
-            or None
-        )
+        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
+        user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
         notifier_profile = (
             get_session_env("HERMES_SESSION_PROFILE", "")
             or os.environ.get("HERMES_PROFILE")

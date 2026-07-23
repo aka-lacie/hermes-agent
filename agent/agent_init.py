@@ -1686,9 +1686,6 @@ def init_agent(
     if not isinstance(_agent_section, dict):
         _agent_section = {}
     agent._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
-    agent._inject_current_time_in_user_turn = str(
-        _agent_section.get("inject_current_time_in_user_turn", False)
-    ).lower() in ("true", "1", "yes")
 
     # Intent-ack continuation config: "auto" (default — codex_responses only,
     # the historical gate), true (all api_modes), false (never), or a list of

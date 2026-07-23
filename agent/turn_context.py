@@ -50,7 +50,6 @@ def compose_user_api_content(
     content: Any,
     ext_prefetch_cache: str,
     plugin_user_context: str,
-    prefix_context: str = "",
 ) -> Optional[str]:
     """Compose the API-bound content of the current turn's user message.
 
@@ -70,7 +69,6 @@ def compose_user_api_content(
     """
     if not isinstance(content, str):
         return None
-    prefix = prefix_context.strip() if isinstance(prefix_context, str) else ""
     injections = []
     if ext_prefetch_cache:
         fenced = build_memory_context_block(ext_prefetch_cache)
@@ -78,12 +76,9 @@ def compose_user_api_content(
             injections.append(fenced)
     if plugin_user_context:
         injections.append(plugin_user_context)
-    if not prefix and not injections:
+    if not injections:
         return None
-    composed = f"{prefix} {content}".strip() if prefix else content
-    if injections:
-        composed += "\n\n" + "\n\n".join(injections)
-    return composed
+    return content + "\n\n" + "\n\n".join(injections)
 
 
 def substitute_api_content(api_msg: Dict[str, Any]) -> Optional[str]:
@@ -318,8 +313,6 @@ class TurnContext:
     turn_id: str
     # Index of the current user turn within ``messages``.
     current_turn_user_idx: int
-    # Ephemeral timestamp prefix for the current user turn.
-    current_time_user_context: str = ""
     # Whether the post-turn memory review should fire.
     should_review_memory: bool = False
     # Context contributed by ``pre_llm_call`` plugins (appended to user message).
@@ -530,27 +523,6 @@ def build_turn_context(
             agent._user_turn_count = prior_user_turns
             if agent._memory_nudge_interval > 0 and agent._turns_since_memory == 0:
                 agent._turns_since_memory = prior_user_turns % agent._memory_nudge_interval
-
-    # Store a numeric timestamp as metadata so optional API-time prefixes can
-    # be reconstructed without saving plaintext prefixes in transcript content.
-    if persist_user_timestamp is not None:
-        current_turn_timestamp = float(persist_user_timestamp)
-    else:
-        try:
-            from hermes_time import now as _hermes_now
-
-            current_turn_timestamp = float(_hermes_now().timestamp())
-        except Exception:
-            current_turn_timestamp = time.time()
-    user_msg["_timestamp"] = current_turn_timestamp
-    current_time_user_context = ""
-    if (
-        getattr(agent, "_inject_current_time_in_user_turn", False)
-        and callable(build_current_time_user_context)
-    ):
-        current_time_user_context = build_current_time_user_context(
-            agent, current_turn_timestamp
-        )
 
     # Add the current user message after the prompt/session setup has made
     # close persistence safe. The handoff above preserves any marker already
@@ -1007,10 +979,7 @@ def build_turn_context(
     ):
         _turn_user_msg = messages[current_turn_user_idx]
         _api_content = compose_user_api_content(
-            _turn_user_msg.get("content", ""),
-            ext_prefetch_cache,
-            plugin_user_context,
-            current_time_user_context,
+            _turn_user_msg.get("content", ""), ext_prefetch_cache, plugin_user_context
         )
         if _api_content is not None and _api_content != _turn_user_msg.get("content"):
             _turn_user_msg["api_content"] = _api_content
@@ -1080,7 +1049,6 @@ def build_turn_context(
         effective_task_id=effective_task_id,
         turn_id=turn_id,
         current_turn_user_idx=current_turn_user_idx,
-        current_time_user_context=current_time_user_context,
         should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context,
         ext_prefetch_cache=ext_prefetch_cache,
