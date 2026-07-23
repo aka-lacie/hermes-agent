@@ -1264,19 +1264,6 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
--- Cursor for parent-agent wakeups keyed by the originating gateway session id.
--- Unlike kanban_notify_subs, this does not require a human-facing platform/chat
--- subscription. The gateway resolves routing from SessionStore when a terminal
--- event arrives.
-CREATE TABLE IF NOT EXISTS kanban_agent_notify_cursors (
-    session_id    TEXT NOT NULL,
-    task_id       TEXT NOT NULL,
-    notifier_profile TEXT,
-    created_at    INTEGER NOT NULL,
-    last_event_id INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (session_id, task_id)
-);
-
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -1287,7 +1274,6 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
-CREATE INDEX IF NOT EXISTS idx_agent_notify_task     ON kanban_agent_notify_cursors(task_id);
 """
 
 
@@ -2168,14 +2154,6 @@ _REBUILD_SPECS = {
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
-    ),
-    "kanban_agent_notify_cursors": (
-        "CREATE TABLE kanban_agent_notify_cursors ("
-        " session_id TEXT NOT NULL, task_id TEXT NOT NULL,"
-        " notifier_profile TEXT, created_at INTEGER NOT NULL,"
-        " last_event_id INTEGER NOT NULL DEFAULT 0,"
-        " PRIMARY KEY (session_id, task_id))",
-        ("CREATE INDEX idx_agent_notify_task ON kanban_agent_notify_cursors(task_id)",),
     ),
 }
 
@@ -8818,55 +8796,6 @@ def add_notify_sub(
             )
 
 
-def add_agent_notify_cursor(
-    conn: sqlite3.Connection,
-    *,
-    session_id: str,
-    task_id: str,
-    notifier_profile: Optional[str] = None,
-    last_event_id: int = 0,
-) -> None:
-    """Track terminal events that should wake a parent gateway agent.
-
-    This is intentionally keyed by ``session_id`` rather than platform/chat
-    routing. A gateway session id is enough evidence that a parent agent turn
-    created or touched the task; the gateway can resolve delivery routing from
-    its SessionStore when an event arrives.
-    """
-    session_id = str(session_id or "").strip()
-    task_id = str(task_id or "").strip()
-    if not session_id or not task_id:
-        return
-    now = int(time.time())
-    with write_txn(conn):
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO kanban_agent_notify_cursors
-                (session_id, task_id, notifier_profile, created_at, last_event_id)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (session_id, task_id, notifier_profile, now, int(last_event_id or 0)),
-        )
-        conn.execute(
-            """
-            UPDATE kanban_agent_notify_cursors
-               SET last_event_id = MAX(last_event_id, ?)
-             WHERE session_id = ? AND task_id = ?
-            """,
-            (int(last_event_id or 0), session_id, task_id),
-        )
-        if notifier_profile:
-            conn.execute(
-                """
-                UPDATE kanban_agent_notify_cursors
-                   SET notifier_profile = ?
-                 WHERE session_id = ? AND task_id = ?
-                   AND (notifier_profile IS NULL OR notifier_profile = '')
-                """,
-                (notifier_profile, session_id, task_id),
-            )
-
-
 def list_notify_subs(
     conn: sqlite3.Connection, task_id: Optional[str] = None,
 ) -> list[dict]:
@@ -8876,19 +8805,6 @@ def list_notify_subs(
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM kanban_notify_subs").fetchall()
-    return [dict(r) for r in rows]
-
-
-def list_agent_notify_cursors(
-    conn: sqlite3.Connection, task_id: Optional[str] = None,
-) -> list[dict]:
-    if task_id is not None:
-        rows = conn.execute(
-            "SELECT * FROM kanban_agent_notify_cursors WHERE task_id = ?",
-            (task_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM kanban_agent_notify_cursors").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -9009,91 +8925,6 @@ def claim_unseen_events_for_sub(
         return old_cursor, new_cursor, events
 
 
-def claim_unseen_events_for_agent_cursors(
-    conn: sqlite3.Connection,
-    *,
-    kinds: Optional[Iterable[str]] = None,
-    notifier_profile: Optional[str] = None,
-) -> list[dict]:
-    """Atomically claim unseen terminal events for session-id wake cursors."""
-    kind_list = list(kinds) if kinds else None
-    with write_txn(conn):
-        rows = conn.execute(
-            """
-            SELECT c.*, t.*
-              FROM kanban_agent_notify_cursors c
-              JOIN tasks t ON t.id = c.task_id
-             WHERE COALESCE(c.session_id, '') != ''
-               AND COALESCE(t.session_id, '') = c.session_id
-               AND NOT EXISTS (
-                    SELECT 1 FROM kanban_notify_subs s WHERE s.task_id = c.task_id
-               )
-             ORDER BY c.created_at ASC, c.task_id ASC
-            """
-        ).fetchall()
-        deliveries: list[dict] = []
-        for row in rows:
-            old_cursor = int(row["last_event_id"] or 0)
-            q = (
-                "SELECT * FROM task_events WHERE task_id = ? AND id > ? "
-                + ("AND kind IN (" + ",".join("?" * len(kind_list)) + ") " if kind_list else "")
-                + "ORDER BY id ASC"
-            )
-            params: list[Any] = [row["task_id"], old_cursor]
-            if kind_list:
-                params.extend(kind_list)
-            event_rows = conn.execute(q, params).fetchall()
-            if not event_rows:
-                continue
-            events: list[Event] = []
-            new_cursor = old_cursor
-            for ev_row in event_rows:
-                try:
-                    payload = json.loads(ev_row["payload"]) if ev_row["payload"] else None
-                except Exception:
-                    payload = None
-                events.append(Event(
-                    id=ev_row["id"],
-                    task_id=ev_row["task_id"],
-                    kind=ev_row["kind"],
-                    payload=payload,
-                    created_at=ev_row["created_at"],
-                    run_id=(
-                        int(ev_row["run_id"])
-                        if "run_id" in ev_row.keys() and ev_row["run_id"] is not None
-                        else None
-                    ),
-                ))
-                new_cursor = max(new_cursor, int(ev_row["id"]))
-            conn.execute(
-                """
-                UPDATE kanban_agent_notify_cursors
-                   SET last_event_id = ?
-                 WHERE session_id = ? AND task_id = ? AND last_event_id = ?
-                """,
-                (new_cursor, row["session_id"], row["task_id"], old_cursor),
-            )
-            if notifier_profile:
-                conn.execute(
-                    """
-                    UPDATE kanban_agent_notify_cursors
-                       SET notifier_profile = ?
-                     WHERE session_id = ? AND task_id = ?
-                       AND (notifier_profile IS NULL OR notifier_profile = '')
-                    """,
-                    (notifier_profile, row["session_id"], row["task_id"]),
-                )
-            deliveries.append({
-                "task": Task.from_row(row),
-                "session_id": row["session_id"],
-                "task_id": row["task_id"],
-                "old_cursor": old_cursor,
-                "cursor": new_cursor,
-                "events": events,
-            })
-        return deliveries
-
-
 def advance_notify_cursor(
     conn: sqlite3.Connection,
     *,
@@ -9109,27 +8940,6 @@ def advance_notify_cursor(
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
             (int(new_cursor), task_id, platform, chat_id, thread_id or ""),
         )
-
-
-def rewind_agent_notify_cursor(
-    conn: sqlite3.Connection,
-    *,
-    session_id: str,
-    task_id: str,
-    claimed_cursor: int,
-    old_cursor: int,
-) -> bool:
-    """Undo an agent-wakeup claim when synthetic delivery fails."""
-    with write_txn(conn):
-        cur = conn.execute(
-            """
-            UPDATE kanban_agent_notify_cursors
-               SET last_event_id = ?
-             WHERE session_id = ? AND task_id = ? AND last_event_id = ?
-            """,
-            (int(old_cursor), session_id, task_id, int(claimed_cursor)),
-        )
-    return cur.rowcount > 0
 
 
 def rewind_notify_cursor(

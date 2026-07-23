@@ -179,153 +179,6 @@ def _connect(board: Optional[str] = None):
     return kb, kb.connect(board=board)
 
 
-def _current_session_id(explicit: Any = None) -> str:
-    """Return the current gateway/ACP session id, if this tool call has one."""
-    session_id = str(explicit or "").strip()
-    if session_id:
-        return session_id
-    try:
-        from gateway.session_context import get_session_env
-
-        session_id = get_session_env("HERMES_SESSION_ID", "").strip()
-    except Exception:
-        session_id = ""
-    if session_id:
-        return session_id
-    return (os.environ.get("HERMES_SESSION_ID") or "").strip()
-
-
-def _current_gateway_notify_context() -> tuple[str, str, str, Optional[str]]:
-    """Return platform/chat/thread/user routing for gateway-origin tool calls."""
-    try:
-        from gateway.session_context import get_session_env
-
-        platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
-        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
-        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "").strip()
-        user_id = get_session_env("HERMES_SESSION_USER_ID", "").strip() or None
-    except Exception:
-        platform = os.environ.get("HERMES_SESSION_PLATFORM", "").strip().lower()
-        chat_id = os.environ.get("HERMES_SESSION_CHAT_ID", "").strip()
-        thread_id = os.environ.get("HERMES_SESSION_THREAD_ID", "").strip()
-        user_id = os.environ.get("HERMES_SESSION_USER_ID", "").strip() or None
-    return platform, chat_id, thread_id, user_id
-
-
-def _attach_gateway_followup(
-    kb: Any,
-    conn: Any,
-    *,
-    task_id: str,
-    board: Optional[str] = None,
-    session_id: str = "",
-    nudge_dispatcher: bool = False,
-    notify_from_now: bool = True,
-) -> None:
-    """Best-effort linkage for gateway-origin kanban mutations.
-
-    A session id means a parent gateway turn touched this card. Preserve that
-    link for future handoff context, subscribe the chat for terminal events,
-    and optionally wake the embedded dispatcher for runnable follow-up work.
-    """
-    session_id = (session_id or "").strip()
-    if not session_id:
-        return
-    try:
-        with kb.write_txn(conn):
-            conn.execute(
-                """
-                UPDATE tasks
-                   SET session_id = ?
-                 WHERE id = ?
-                """,
-                (session_id, task_id),
-            )
-    except Exception:
-        logger.debug(
-            "kanban follow-up: session stamp failed for %s",
-            task_id,
-            exc_info=True,
-        )
-
-    max_event_id = 0
-    if notify_from_now:
-        try:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(id), 0) AS max_id "
-                "FROM task_events WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            max_event_id = int(row["max_id"] if row else 0)
-        except Exception:
-            max_event_id = 0
-
-    try:
-        kb.add_agent_notify_cursor(
-            conn,
-            session_id=session_id,
-            task_id=task_id,
-            notifier_profile=os.environ.get("HERMES_PROFILE") or None,
-            last_event_id=max_event_id if notify_from_now else 0,
-        )
-    except Exception:
-        logger.debug(
-            "kanban follow-up: agent notify cursor failed for %s",
-            task_id,
-            exc_info=True,
-        )
-
-    platform, chat_id, thread_id, user_id = _current_gateway_notify_context()
-    if platform and chat_id and platform not in {"local", "api_server", "webhook"}:
-        try:
-            kb.add_notify_sub(
-                conn,
-                task_id=task_id,
-                platform=platform,
-                chat_id=chat_id,
-                thread_id=thread_id or None,
-                user_id=user_id,
-                notifier_profile=os.environ.get("HERMES_PROFILE") or None,
-            )
-            if notify_from_now:
-                with kb.write_txn(conn):
-                    conn.execute(
-                        """
-                        UPDATE kanban_notify_subs
-                           SET last_event_id = MAX(last_event_id, ?)
-                         WHERE task_id = ?
-                           AND platform = ?
-                           AND chat_id = ?
-                           AND thread_id = ?
-                        """,
-                        (
-                            max_event_id,
-                            task_id,
-                            platform,
-                            chat_id,
-                            thread_id or "",
-                        ),
-                    )
-        except Exception:
-            logger.debug(
-                "kanban follow-up: notify subscription failed for %s",
-                task_id,
-                exc_info=True,
-            )
-
-    if nudge_dispatcher:
-        try:
-            from gateway.kanban_dispatch_signal import nudge_kanban_dispatch
-
-            nudge_kanban_dispatch(
-                task_id=task_id,
-                board=board,
-                session_id=session_id,
-            )
-        except Exception:
-            logger.debug("kanban follow-up dispatch nudge failed", exc_info=True)
-
-
 _GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
 
 
@@ -975,14 +828,6 @@ def _handle_comment(args: dict, **kw) -> str:
         kb, conn = _connect(board=board)
         try:
             cid = kb.add_comment(conn, tid, author=author, body=str(body))
-            _attach_gateway_followup(
-                kb,
-                conn,
-                task_id=str(tid),
-                board=board,
-                session_id=_current_session_id(),
-                nudge_dispatcher=False,
-            )
             return _ok(task_id=tid, comment_id=cid)
         finally:
             conn.close()
@@ -1230,10 +1075,10 @@ def _handle_create(args: dict, **kw) -> str:
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
-    # Stamp the originating session id when the agent loop runs inside a
-    # gateway/ACP conversation. Prefer the task-local ContextVar path so
-    # concurrent gateway turns do not race through process-global env vars.
-    session_id = _current_session_id(args.get("session_id"))
+    # Stamp the originating session id when the agent loop runs under
+    # ACP (which sets HERMES_SESSION_ID before invoking tools). NULL on
+    # CLI / dashboard paths and on legacy hosts that don't set the env.
+    session_id = args.get("session_id") or os.environ.get("HERMES_SESSION_ID")
     priority = args.get("priority")
     # Resolve workspace. If the caller passed one explicitly, honor it.
     # Otherwise, a dispatcher-spawned worker (HERMES_KANBAN_TASK set)
@@ -1313,19 +1158,10 @@ def _handle_create(args: dict, **kw) -> str:
                 ),
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
-                session_id=session_id or None,
+                session_id=session_id,
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
-            _attach_gateway_followup(
-                kb,
-                conn,
-                task_id=new_tid,
-                board=board,
-                session_id=session_id,
-                nudge_dispatcher=True,
-                notify_from_now=False,
-            )
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
@@ -1476,16 +1312,7 @@ def _handle_unblock(args: dict, **kw) -> str:
             if not ok:
                 return tool_error(f"could not unblock {tid} (not blocked or unknown)")
             task = kb.get_task(conn, str(tid))
-            status = task.status if task else None
-            _attach_gateway_followup(
-                kb,
-                conn,
-                task_id=str(tid),
-                board=board,
-                session_id=_current_session_id(),
-                nudge_dispatcher=(status == "ready"),
-            )
-            return _ok(task_id=str(tid), status=status)
+            return _ok(task_id=str(tid), status=task.status if task else None)
         finally:
             conn.close()
     except ValueError as e:
@@ -1506,14 +1333,6 @@ def _handle_link(args: dict, **kw) -> str:
         kb, conn = _connect(board=board)
         try:
             kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
-            _attach_gateway_followup(
-                kb,
-                conn,
-                task_id=str(child_id),
-                board=board,
-                session_id=_current_session_id(),
-                nudge_dispatcher=True,
-            )
             return _ok(parent_id=parent_id, child_id=child_id)
         finally:
             conn.close()
