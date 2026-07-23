@@ -80,8 +80,10 @@ Behavior:
 
 Merge rule:
 - Preserve pending a separate decision.
-- This is core-runtime instrumentation and is not a good plugin candidate
-  unless upstream exposes a request-debug hook.
+- Current upstream exposes `pre_api_request` and `api_request_error` plugin
+  hooks with sanitized request/error payloads. The enhancement is therefore a
+  viable standalone observability plugin candidate; keep the core delta only
+  until that extraction decision is made.
 
 ### Optional Turn-Context Callback Compatibility
 
