@@ -43,23 +43,16 @@ def _mock_urlopen(response_data, status=200):
     return mock_resp
 
 
-def _disable_token_file_fallback(monkeypatch):
-    """Keep token-missing tests isolated from the developer's real profile .env."""
-    monkeypatch.setenv("HERMES_DISCORD_TOKEN_FILE_FALLBACK", "0")
-
-
 # ---------------------------------------------------------------------------
 # Token / check_fn
 # ---------------------------------------------------------------------------
 
 class TestCheckRequirements:
     def test_no_token(self, monkeypatch):
-        _disable_token_file_fallback(monkeypatch)
         monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
         assert check_discord_tool_requirements() is False
 
     def test_empty_token(self, monkeypatch):
-        _disable_token_file_fallback(monkeypatch)
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "")
         assert check_discord_tool_requirements() is False
 
@@ -72,7 +65,6 @@ class TestCheckRequirements:
         assert _get_bot_token() == "my-token"
 
     def test_get_bot_token_missing(self, monkeypatch):
-        _disable_token_file_fallback(monkeypatch)
         monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
         assert _get_bot_token() is None
 
@@ -192,7 +184,6 @@ class TestDiscordRequest:
 
 class TestDiscordServerValidation:
     def test_no_token(self, monkeypatch):
-        _disable_token_file_fallback(monkeypatch)
         monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
         result = json.loads(discord_admin_handler(action="list_guilds"))
         assert "error" in result
@@ -213,7 +204,6 @@ class TestDiscordServerValidation:
 
     def test_missing_required_channel_id(self, monkeypatch):
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
-        monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
         result = json.loads(discord_core(action="fetch_messages"))
         assert "error" in result
         assert "channel_id" in result["error"]
@@ -231,58 +221,6 @@ class TestDiscordServerValidation:
         assert "guild_id" in result["error"]
         assert "user_id" in result["error"]
         assert "role_id" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# Action: add_reaction
-# ---------------------------------------------------------------------------
-
-class TestAddReaction:
-    @patch("tools.discord_tool._discord_request")
-    def test_defaults_channel_from_session_chat_id(self, mock_req, monkeypatch):
-        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
-        monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "1443211608653430826")
-        monkeypatch.setenv("HERMES_SESSION_USER_ID", "user-1")
-        mock_req.side_effect = [
-            [{"id": "msg-1", "author": {"id": "user-1", "bot": False}}],
-            None,
-        ]
-
-        result = json.loads(discord_core(action="add_reaction", emoji="👀"))
-
-        assert result["success"] is True
-        assert result["message_id"] == "msg-1"
-        assert result["defaulted_message_id"] is True
-        assert mock_req.call_args_list[0].args == (
-            "GET",
-            "/channels/1443211608653430826/messages",
-            "test-token",
-        )
-        assert mock_req.call_args_list[0].kwargs == {"params": {"limit": "100"}}
-        assert mock_req.call_args_list[1].args == (
-            "PUT",
-            "/channels/1443211608653430826/messages/msg-1/reactions/%F0%9F%91%80/@me",
-            "test-token",
-        )
-
-    @patch("tools.discord_tool._discord_request")
-    def test_uses_os_environ_session_chat_id_when_contextvar_missing(self, mock_req, monkeypatch):
-        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
-        monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "env-channel")
-        monkeypatch.setattr("tools.discord_tool._get_session_env", lambda _name, _default="": "")
-        mock_req.side_effect = [
-            [{"id": "msg-2", "author": {"id": "someone", "bot": False}}],
-            None,
-        ]
-
-        result = json.loads(discord_core(action="add_reaction", emoji="👀"))
-
-        assert result["success"] is True
-        assert mock_req.call_args_list[0].args == (
-            "GET",
-            "/channels/env-channel/messages",
-            "test-token",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -655,14 +593,14 @@ class TestRegistration:
         from tools.registry import registry
         entry = registry._tools["discord"]
         actions = set(entry.schema["parameters"]["properties"]["action"]["enum"])
-        assert actions == {"fetch_messages", "search_members", "create_thread", "add_reaction"}
+        assert actions == {"fetch_messages", "search_members", "create_thread"}
 
     def test_admin_schema_actions(self):
         """Admin static schema should list only admin actions."""
         from tools.registry import registry
         entry = registry._tools["discord_admin"]
         actions = set(entry.schema["parameters"]["properties"]["action"]["enum"])
-        expected_admin = set(_ACTIONS.keys()) - set(_CORE_ACTIONS.keys())
+        expected_admin = set(_ACTIONS.keys()) - {"fetch_messages", "search_members", "create_thread"}
         assert actions == expected_admin
 
     def test_all_actions_covered(self):
@@ -1097,7 +1035,6 @@ class TestDynamicSchema:
 
     @patch("tools.discord_tool._discord_request")
     def test_no_token_returns_none(self, mock_req, monkeypatch):
-        _disable_token_file_fallback(monkeypatch)
         monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
         assert get_dynamic_schema_core() is None
         assert get_dynamic_schema_admin() is None

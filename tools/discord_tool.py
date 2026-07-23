@@ -72,59 +72,8 @@ def _read_limited_response_body(source: Any, limit: int, *, label: str) -> bytes
 
 
 def _get_bot_token() -> Optional[str]:
-    """Resolve the Discord bot token from environment or Hermes .env files."""
-    token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-    if token:
-        return token
-
-    if os.getenv("HERMES_DISCORD_TOKEN_FILE_FALLBACK", "1").strip().lower() in {
-        "0", "false", "no", "off",
-    }:
-        return None
-
-    # Agent startup normally hydrates os.environ from .env before tool discovery.
-    # Profile subprocesses/tests can import this module before that happens,
-    # making the discord toolset appear unavailable. Fall back to the active
-    # profile/global Hermes .env files without exposing the token in logs.
-    try:
-        from pathlib import Path
-
-        root = Path.home() / ".hermes"
-        candidates: List[Path] = []
-
-        hermes_home = os.getenv("HERMES_HOME", "").strip()
-        if hermes_home:
-            candidates.append(Path(hermes_home) / ".env")
-
-        active_profile_path = root / "active_profile"
-        if active_profile_path.exists():
-            active_profile = active_profile_path.read_text(encoding="utf-8").strip()
-            if active_profile:
-                candidates.append(root / "profiles" / active_profile / ".env")
-
-        candidates.append(root / ".env")
-
-        seen = set()
-        for env_path in candidates:
-            if env_path in seen:
-                continue
-            seen.add(env_path)
-            if not env_path.exists():
-                continue
-            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#") or "=" not in stripped:
-                    continue
-                key, value = stripped.split("=", 1)
-                if key.strip() != "DISCORD_BOT_TOKEN":
-                    continue
-                value = value.strip().strip('"').strip("'")
-                if value:
-                    return value
-    except Exception:
-        logger.debug("discord: could not resolve DISCORD_BOT_TOKEN from .env", exc_info=True)
-
-    return None
+    """Resolve the Discord bot token from environment."""
+    return os.getenv("DISCORD_BOT_TOKEN", "").strip() or None
 
 
 def _discord_request(
@@ -187,39 +136,6 @@ class DiscordAPIError(Exception):
         self.status = status
         self.body = body
         super().__init__(f"Discord API error {status}: {body}")
-
-
-def _get_session_env(name: str, default: str = "") -> str:
-    """Read gateway session context with an os.environ fallback.
-
-    The Discord gateway stores per-message session data in ContextVars so
-    concurrent chats do not clobber each other.  Import lazily to keep this tool
-    usable in non-gateway contexts and tests.
-    """
-    try:
-        from gateway.session_context import get_session_env
-        return get_session_env(name, default)
-    except Exception:
-        return os.getenv(name, default)
-
-
-def _resolve_session_channel_id(channel_id: str = "") -> str:
-    """Resolve a Discord channel ID from args or the active Hermes chat.
-
-    The Discord gateway maps Discord's channel/thread ID to the unified
-    ``HERMES_SESSION_CHAT_ID`` value. Check ``os.environ`` explicitly after the
-    ContextVar-backed helper so tool-worker threads that lose context can still
-    use an exported session chat ID.
-    """
-    resolved = str(channel_id or "").strip()
-    if resolved:
-        return resolved
-
-    resolved = (_get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
-    if resolved:
-        return resolved
-
-    return os.environ.get("HERMES_SESSION_CHAT_ID", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -718,93 +634,6 @@ def _remove_role(token: str, guild_id: str, user_id: str, role_id: str, **_kwarg
     return json.dumps({"success": True, "message": f"Role {role_id} removed from user {user_id}."})
 
 
-def _resolve_last_user_message_id(token: str, channel_id: str) -> Optional[str]:
-    """Return the most recent current-user Discord message in *channel_id*.
-
-    Discord exposes the triggering user ID through the gateway session context.
-    When available, use it to pick that user's newest message from recent channel
-    history.  In non-gateway/test contexts, fall back to the newest non-bot
-    message so ``add_reaction`` can still provide a useful default.
-    """
-    channel_id = _resolve_session_channel_id(channel_id)
-    if not channel_id:
-        return None
-
-    user_id = (_get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
-
-    messages = _discord_request(
-        "GET",
-        f"/channels/{channel_id}/messages",
-        token,
-        params={"limit": "100"},
-    )
-    if not isinstance(messages, list):
-        return None
-
-    # Discord returns channel messages newest-first.  Prefer the current
-    # session user when the gateway provided an author ID.
-    if user_id:
-        for msg in messages:
-            author = msg.get("author") or {}
-            if str(author.get("id") or "") == user_id and not author.get("bot", False):
-                return str(msg.get("id") or "") or None
-
-    # Fallback: newest non-bot message in this channel/thread.
-    for msg in messages:
-        author = msg.get("author") or {}
-        if not author.get("bot", False):
-            return str(msg.get("id") or "") or None
-    return None
-
-
-def _add_reaction(
-    token: str,
-    channel_id: str,
-    message_id: Optional[str] = None,
-    emoji: str = "",
-    **_kwargs: Any,
-) -> str:
-    """Add a reaction emoji to a message.
-
-    If *message_id* is omitted, default to the most recent message from the
-    current Discord session's user in the target channel/thread.
-    """
-    channel_id = _resolve_session_channel_id(channel_id)
-    if not channel_id:
-        return json.dumps({
-            "error": (
-                "Could not resolve a default channel_id for add_reaction. "
-                "Provide channel_id explicitly, or call from a Discord session."
-            ),
-        })
-
-    explicit_message_id = bool(str(message_id or "").strip())
-    target_message_id = str(message_id or "").strip()
-    if not target_message_id:
-        target_message_id = _resolve_last_user_message_id(token, channel_id) or ""
-    if not target_message_id:
-        return json.dumps({
-            "error": (
-                "Could not resolve a default message_id for add_reaction. "
-                "Provide message_id explicitly, or call from a Discord session "
-                "where recent channel history is available."
-            ),
-        })
-
-    encoded_emoji = urllib.parse.quote(emoji, safe="")
-    _discord_request(
-        "PUT",
-        f"/channels/{channel_id}/messages/{target_message_id}/reactions/{encoded_emoji}/@me",
-        token,
-    )
-    return json.dumps({
-        "success": True,
-        "message": f"Reaction {emoji} added to message {target_message_id}.",
-        "message_id": target_message_id,
-        "defaulted_message_id": not explicit_message_id,
-    })
-
-
 # ---------------------------------------------------------------------------
 # Action dispatch + metadata
 # ---------------------------------------------------------------------------
@@ -825,10 +654,9 @@ _ACTIONS = {
     "create_thread": _create_thread,
     "add_role": _add_role,
     "remove_role": _remove_role,
-    "add_reaction": _add_reaction,
 }
 
-_CORE_ACTION_NAMES = frozenset({"fetch_messages", "search_members", "create_thread", "add_reaction"})
+_CORE_ACTION_NAMES = frozenset({"fetch_messages", "search_members", "create_thread"})
 _ADMIN_ACTION_NAMES = frozenset(_ACTIONS.keys()) - _CORE_ACTION_NAMES
 
 _CORE_ACTIONS = {k: v for k, v in _ACTIONS.items() if k in _CORE_ACTION_NAMES}
@@ -853,7 +681,6 @@ _ACTION_MANIFEST: List[Tuple[str, str, str]] = [
     ("create_thread", "(channel_id, name)", "create a public thread; optional message_id anchor"),
     ("add_role", "(guild_id, user_id, role_id)", "assign a role"),
     ("remove_role", "(guild_id, user_id, role_id)", "remove a role"),
-    ("add_reaction", "([channel_id], emoji[, message_id])", "add a reaction emoji; defaults to the current user's latest message in the active channel"),
 ]
 
 # Actions that require the GUILD_MEMBERS privileged intent.
@@ -875,7 +702,6 @@ _REQUIRED_PARAMS: Dict[str, List[str]] = {
     "create_thread": ["channel_id", "name"],
     "add_role": ["guild_id", "user_id", "role_id"],
     "remove_role": ["guild_id", "user_id", "role_id"],
-    "add_reaction": ["emoji"],
 }
 
 
@@ -1013,7 +839,7 @@ def _build_schema(
         },
         "channel_id": {
             "type": "string",
-            "description": "Discord channel ID. Optional; defaults to the current active session channel.",
+            "description": "Discord channel ID.",
         },
         "user_id": {
             "type": "string",
@@ -1025,11 +851,7 @@ def _build_schema(
         },
         "message_id": {
             "type": "string",
-            "description": "Discord message ID. Optional for add_reaction; omitted add_reaction defaults to the current user's latest message in the channel/thread.",
-        },
-        "emoji": {
-            "type": "string",
-            "description": "Emoji to react with (add_reaction), e.g. 👍 or a custom Discord emoji.",
+            "description": "Discord message ID.",
         },
         "query": {
             "type": "string",
@@ -1181,7 +1003,6 @@ def _run_discord_action(
     message_id: str = "",
     query: str = "",
     name: str = "",
-    emoji: str = "",
     limit: int = 50,
     before: str = "",
     after: str = "",
@@ -1211,8 +1032,6 @@ def _run_discord_action(
             ),
         })
 
-    channel_id = _resolve_session_channel_id(channel_id)
-
     local_vars = {
         "guild_id": guild_id,
         "channel_id": channel_id,
@@ -1221,7 +1040,6 @@ def _run_discord_action(
         "message_id": message_id,
         "query": query,
         "name": name,
-        "emoji": emoji,
     }
 
     missing = [p for p in _REQUIRED_PARAMS.get(action, []) if not local_vars.get(p)]
@@ -1240,7 +1058,6 @@ def _run_discord_action(
             message_id=message_id,
             query=query,
             name=name,
-            emoji=emoji,
             limit=limit,
             before=before,
             after=after,
@@ -1273,8 +1090,7 @@ def discord_admin_handler(action: str, **kwargs) -> str:
 _HANDLER_DEFAULTS = {
     "action": "", "guild_id": "", "channel_id": "", "user_id": "",
     "role_id": "", "message_id": "", "query": "", "name": "",
-    "emoji": "", "limit": 50, "before": "", "after": "",
-    "auto_archive_duration": 1440,
+    "limit": 50, "before": "", "after": "", "auto_archive_duration": 1440,
 }
 
 
