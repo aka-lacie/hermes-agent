@@ -58,7 +58,6 @@ _CLONE_CONFIG_FILES = [
     "config.yaml",
     ".env",
     "SOUL.md",
-    "IDENTITY.md",
 ]
 
 # Subdirectory files copied during --clone (path relative to profile root).
