@@ -669,36 +669,6 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                              f"(spawn_failed, timed_out, or crashed; default: {kb.DEFAULT_SPAWN_FAILURE_LIMIT})")
     p_disp.add_argument("--json", action="store_true")
 
-    # --- persistent worker ---
-    p_worker = sub.add_parser(
-        "worker",
-        help="Run a persistent headless worker for one assignee profile",
-        description=(
-            "Claim and execute kanban tasks assigned to a single Hermes "
-            "profile in a long-lived non-gateway process. Existing gateway "
-            "dispatch stays available as fallback when no matching healthy "
-            "worker is registered."
-        ),
-    )
-    p_worker.add_argument(
-        "--profile",
-        default=None,
-        help="Assignee/profile to run as. Defaults to the active Hermes profile.",
-    )
-    p_worker.add_argument("--interval", type=float, default=60.0,
-                          help="Seconds between idle polls (default: 60)")
-    p_worker.add_argument("--failure-limit", type=int,
-                          default=kb.DEFAULT_SPAWN_FAILURE_LIMIT,
-                          help=f"Auto-block a task after this many consecutive "
-                               f"non-success attempts (default: {kb.DEFAULT_SPAWN_FAILURE_LIMIT})")
-    p_worker.add_argument("--stale-timeout", type=int, default=0,
-                          help="Seconds with no heartbeat before reclaiming stale "
-                               "running tasks during this worker's ticks; 0 disables")
-    p_worker.add_argument("--pidfile", default=None,
-                          help="Write the worker daemon's PID to this file on start")
-    p_worker.add_argument("--once", action="store_true",
-                          help="Run one dispatch tick/task and exit")
-
     # --- daemon (deprecated) ---
     p_daemon = sub.add_parser(
         "daemon",
@@ -1014,7 +984,6 @@ def kanban_command(args: argparse.Namespace) -> int:
             "archive":  _cmd_archive,
             "tail":     _cmd_tail,
             "dispatch": _cmd_dispatch,
-            "worker":   _cmd_worker,
             "daemon":   _cmd_daemon,
             "watch":    _cmd_watch,
             "stats":    _cmd_stats,
@@ -2313,10 +2282,6 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 {"task_id": tid, "assignee": who, "current": current}
                 for (tid, who, current) in res.skipped_per_profile_capped
             ],
-            "deferred_to_daemon": [
-                {"task_id": tid, "assignee": who}
-                for (tid, who) in res.deferred_to_daemon
-            ],
             "auto_assigned_default": res.auto_assigned_default,
         }, indent=2))
         return 0
@@ -2338,10 +2303,6 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     for tid, who, ws in res.spawned:
         tag = " (dry)" if args.dry_run else ""
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")
-    if res.deferred_to_daemon:
-        print(f"Deferred to daemon: {len(res.deferred_to_daemon)}")
-        for tid, who in res.deferred_to_daemon:
-            print(f"  - {tid}  ->  {who}")
     if res.auto_assigned_default:
         print(
             f"Auto-assigned to kanban.default_assignee={default_assignee!r}: "
@@ -2359,59 +2320,6 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(res.skipped_nonspawnable)}"
         )
-    return 0
-
-
-def _cmd_worker(args: argparse.Namespace) -> int:
-    """Run a persistent headless kanban worker for one profile."""
-    from hermes_cli.kanban_worker import run_worker_daemon
-    from hermes_cli.profiles import normalize_profile_name, profile_exists
-
-    profile = normalize_profile_name(
-        getattr(args, "profile", None) or get_active_profile_name()
-    )
-    if not profile:
-        print(
-            "hermes kanban worker: no profile selected; pass --profile <name> "
-            "or run under `hermes -p <name>`.",
-            file=sys.stderr,
-        )
-        return 2
-    if not profile_exists(profile):
-        print(f"hermes kanban worker: profile {profile!r} does not exist", file=sys.stderr)
-        return 2
-
-    pidfile = getattr(args, "pidfile", None)
-    if pidfile:
-        try:
-            Path(pidfile).parent.mkdir(parents=True, exist_ok=True)
-            Path(pidfile).write_text(str(os.getpid()), encoding="utf-8")
-        except OSError as exc:
-            print(f"warning: could not write pidfile {pidfile}: {exc}", file=sys.stderr)
-
-    print(
-        f"Kanban worker running as {profile} "
-        f"(board={args.board or kb.get_current_board()}, interval={args.interval}s, "
-        f"pid={os.getpid()}). Ctrl-C to stop.",
-        file=sys.stderr,
-        flush=True,
-    )
-    try:
-        run_worker_daemon(
-            profile=profile,
-            board=getattr(args, "board", None),
-            interval=float(getattr(args, "interval", 60.0) or 60.0),
-            failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
-            stale_timeout_seconds=int(getattr(args, "stale_timeout", 0) or 0),
-            once=bool(getattr(args, "once", False)),
-        )
-    finally:
-        if pidfile:
-            try:
-                Path(pidfile).unlink()
-            except OSError:
-                pass
-    print("(worker stopped)")
     return 0
 
 
@@ -2511,7 +2419,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             return
         did_work = (
             res.reclaimed or res.crashed or res.timed_out or res.promoted
-            or res.spawned or res.deferred_to_daemon or res.auto_blocked or res.stale
+            or res.spawned or res.auto_blocked or res.stale
         )
         if did_work:
             print(
@@ -2519,7 +2427,6 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
                 f"reclaimed={res.reclaimed} crashed={len(res.crashed)} "
                 f"timed_out={len(res.timed_out)} stale={len(res.stale)} "
                 f"promoted={res.promoted} spawned={len(res.spawned)} "
-                f"deferred_to_daemon={len(res.deferred_to_daemon)} "
                 f"auto_blocked={len(res.auto_blocked)}",
                 flush=True,
             )

@@ -34,17 +34,6 @@ def nudge_kanban_dispatch(**payload: Any) -> None:
     This is intentionally best-effort. Tool calls should not fail just because
     no gateway dispatcher is running in this process.
     """
-    try:
-        from hermes_cli import kanban_db as _kb
-
-        conn = _kb.connect(board=payload.get("board"))
-        try:
-            _kb.wake_worker_daemons(conn, payload=payload)
-        finally:
-            conn.close()
-    except Exception:
-        logger.debug("kanban worker-daemon wake failed", exc_info=True)
-
     with _lock:
         callbacks = tuple(_callbacks)
     for callback in callbacks:

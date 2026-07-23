@@ -2888,17 +2888,6 @@ DEFAULT_CONFIG = {
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
-        # Persistent headless workers: optional long-lived runtimes that
-        # claim tasks for selected profiles without depending on gateway
-        # adapters. When a healthy worker is registered for an assignee, the
-        # normal gateway dispatcher defers to it; if it is absent or stale,
-        # subprocess dispatch remains the fallback.
-        "worker_daemon": {
-            "enabled": False,
-            "profiles": [],
-            "spawn_fallback": True,
-            "interval_seconds": 60,
-        },
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

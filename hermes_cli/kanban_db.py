@@ -78,7 +78,6 @@ import re
 import random
 import secrets
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -1278,23 +1277,6 @@ CREATE TABLE IF NOT EXISTS kanban_agent_notify_cursors (
     PRIMARY KEY (session_id, task_id)
 );
 
--- Long-running headless worker runtimes. These are not gateways; they are
--- profile-scoped kanban workers that keep their tool/MCP runtime warm and
--- claim assigned tasks directly. The dispatcher uses this registry to avoid
--- cold-spawning subprocess workers when a healthy daemon is already available.
-CREATE TABLE IF NOT EXISTS kanban_worker_daemons (
-    worker_id      TEXT PRIMARY KEY,
-    profile        TEXT NOT NULL,
-    host           TEXT NOT NULL,
-    pid            INTEGER NOT NULL,
-    board          TEXT,
-    wake_host      TEXT,
-    wake_port      INTEGER,
-    started_at     INTEGER NOT NULL,
-    last_heartbeat INTEGER NOT NULL,
-    metadata       TEXT
-);
-
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -1306,7 +1288,6 @@ CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_notify_task     ON kanban_agent_notify_cursors(task_id);
-CREATE INDEX IF NOT EXISTS idx_worker_daemons_profile ON kanban_worker_daemons(profile, last_heartbeat);
 """
 
 
@@ -2195,15 +2176,6 @@ _REBUILD_SPECS = {
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (session_id, task_id))",
         ("CREATE INDEX idx_agent_notify_task ON kanban_agent_notify_cursors(task_id)",),
-    ),
-    "kanban_worker_daemons": (
-        "CREATE TABLE kanban_worker_daemons ("
-        " worker_id TEXT PRIMARY KEY, profile TEXT NOT NULL,"
-        " host TEXT NOT NULL, pid INTEGER NOT NULL, board TEXT,"
-        " wake_host TEXT, wake_port INTEGER,"
-        " started_at INTEGER NOT NULL, last_heartbeat INTEGER NOT NULL,"
-        " metadata TEXT)",
-        ("CREATE INDEX idx_worker_daemons_profile ON kanban_worker_daemons(profile, last_heartbeat)",),
     ),
 }
 
@@ -6123,238 +6095,12 @@ class DispatchResult:
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
     window just makes the task bounce cheaply until the window clears."""
-    deferred_to_daemon: list[tuple[str, str]] = field(default_factory=list)
-    """Ready/review task ids skipped by a cold-spawning dispatcher because
-    a healthy persistent worker daemon for the assignee is registered.
-    Each entry is ``(task_id, assignee)``. The daemon itself will claim the
-    task through the same CAS path."""
     skipped_locked: bool = False
     """True when this tick was skipped because another process already held
     the board's dispatch lock (issue #35240). A losing dispatcher does no
     DB writes this tick — the lock holder is making progress on the same
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
-
-
-# ---------------------------------------------------------------------------
-# Persistent worker daemon registry
-# ---------------------------------------------------------------------------
-
-DEFAULT_WORKER_DAEMON_HEALTH_SECONDS = 120
-
-
-def _host_name() -> str:
-    try:
-        return socket.gethostname() or "localhost"
-    except Exception:
-        return "localhost"
-
-
-def _daemon_health_cutoff(max_age_seconds: Optional[int] = None) -> int:
-    try:
-        age = int(max_age_seconds or DEFAULT_WORKER_DAEMON_HEALTH_SECONDS)
-    except (TypeError, ValueError):
-        age = DEFAULT_WORKER_DAEMON_HEALTH_SECONDS
-    if age < 1:
-        age = DEFAULT_WORKER_DAEMON_HEALTH_SECONDS
-    return int(time.time()) - age
-
-
-def register_worker_daemon(
-    conn: sqlite3.Connection,
-    *,
-    profile: str,
-    worker_id: str,
-    pid: Optional[int] = None,
-    board: Optional[str] = None,
-    wake_host: Optional[str] = None,
-    wake_port: Optional[int] = None,
-    metadata: Optional[dict[str, Any]] = None,
-) -> None:
-    """Register or refresh a persistent headless worker daemon."""
-    profile = str(profile or "").strip()
-    worker_id = str(worker_id or "").strip()
-    if not profile or not worker_id:
-        return
-    now = int(time.time())
-    meta = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
-    with write_txn(conn):
-        conn.execute(
-            """
-            INSERT INTO kanban_worker_daemons (
-                worker_id, profile, host, pid, board, wake_host, wake_port,
-                started_at, last_heartbeat, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(worker_id) DO UPDATE SET
-                profile = excluded.profile,
-                host = excluded.host,
-                pid = excluded.pid,
-                board = excluded.board,
-                wake_host = excluded.wake_host,
-                wake_port = excluded.wake_port,
-                last_heartbeat = excluded.last_heartbeat,
-                metadata = excluded.metadata
-            """,
-            (
-                worker_id,
-                profile,
-                _host_name(),
-                int(pid or os.getpid()),
-                board,
-                wake_host,
-                int(wake_port) if wake_port else None,
-                now,
-                now,
-                meta,
-            ),
-        )
-
-
-def heartbeat_worker_daemon(
-    conn: sqlite3.Connection,
-    *,
-    worker_id: str,
-    wake_host: Optional[str] = None,
-    wake_port: Optional[int] = None,
-) -> bool:
-    """Refresh a daemon liveness row. Returns False if it is not registered."""
-    worker_id = str(worker_id or "").strip()
-    if not worker_id:
-        return False
-    now = int(time.time())
-    with write_txn(conn):
-        if wake_host is not None or wake_port is not None:
-            cur = conn.execute(
-                """
-                UPDATE kanban_worker_daemons
-                   SET last_heartbeat = ?,
-                       wake_host = COALESCE(?, wake_host),
-                       wake_port = COALESCE(?, wake_port)
-                 WHERE worker_id = ?
-                """,
-                (
-                    now,
-                    wake_host,
-                    int(wake_port) if wake_port else None,
-                    worker_id,
-                ),
-            )
-        else:
-            cur = conn.execute(
-                "UPDATE kanban_worker_daemons SET last_heartbeat = ? WHERE worker_id = ?",
-                (now, worker_id),
-            )
-    return cur.rowcount == 1
-
-
-def unregister_worker_daemon(conn: sqlite3.Connection, *, worker_id: str) -> None:
-    worker_id = str(worker_id or "").strip()
-    if not worker_id:
-        return
-    with write_txn(conn):
-        conn.execute("DELETE FROM kanban_worker_daemons WHERE worker_id = ?", (worker_id,))
-
-
-def prune_stale_worker_daemons(
-    conn: sqlite3.Connection,
-    *,
-    max_age_seconds: Optional[int] = None,
-) -> int:
-    cutoff = _daemon_health_cutoff(max_age_seconds)
-    with write_txn(conn):
-        cur = conn.execute(
-            "DELETE FROM kanban_worker_daemons WHERE last_heartbeat < ?",
-            (cutoff,),
-        )
-    return int(cur.rowcount or 0)
-
-
-def list_worker_daemons(
-    conn: sqlite3.Connection,
-    *,
-    profile: Optional[str] = None,
-    healthy_only: bool = False,
-    max_age_seconds: Optional[int] = None,
-) -> list[dict[str, Any]]:
-    clauses: list[str] = []
-    params: list[Any] = []
-    if profile:
-        clauses.append("profile = ?")
-        params.append(profile)
-    if healthy_only:
-        clauses.append("last_heartbeat >= ?")
-        params.append(_daemon_health_cutoff(max_age_seconds))
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    rows = conn.execute(
-        "SELECT * FROM kanban_worker_daemons" + where + " ORDER BY profile, started_at",
-        params,
-    ).fetchall()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
-        raw_meta = item.get("metadata")
-        if raw_meta:
-            try:
-                item["metadata"] = json.loads(raw_meta)
-            except Exception:
-                item["metadata"] = {}
-        else:
-            item["metadata"] = {}
-        out.append(item)
-    return out
-
-
-def has_healthy_worker_daemon(
-    conn: sqlite3.Connection,
-    profile: str,
-    *,
-    max_age_seconds: Optional[int] = None,
-) -> bool:
-    profile = str(profile or "").strip()
-    if not profile:
-        return False
-    row = conn.execute(
-        """
-        SELECT 1 FROM kanban_worker_daemons
-         WHERE profile = ? AND last_heartbeat >= ?
-         LIMIT 1
-        """,
-        (profile, _daemon_health_cutoff(max_age_seconds)),
-    ).fetchone()
-    return row is not None
-
-
-def wake_worker_daemons(
-    conn: sqlite3.Connection,
-    *,
-    profile: Optional[str] = None,
-    payload: Optional[dict[str, Any]] = None,
-    max_age_seconds: Optional[int] = None,
-) -> int:
-    """Best-effort loopback UDP wakeup for healthy persistent workers."""
-    workers = list_worker_daemons(
-        conn,
-        profile=profile,
-        healthy_only=True,
-        max_age_seconds=max_age_seconds,
-    )
-    if not workers:
-        return 0
-    body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
-    sent = 0
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(0.05)
-        for worker in workers:
-            host = worker.get("wake_host") or "127.0.0.1"
-            port = worker.get("wake_port")
-            if not port:
-                continue
-            try:
-                sock.sendto(body, (str(host), int(port)))
-                sent += 1
-            except OSError:
-                continue
-    return sent
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -7477,71 +7223,6 @@ def _record_spawn_failure(
     )
 
 
-def record_worker_runtime_failure(
-    conn: sqlite3.Connection,
-    task_id: str,
-    error: str,
-    *,
-    outcome: str = "crashed",
-    failure_limit: int = None,
-    event_payload_extra: Optional[dict] = None,
-) -> bool:
-    """Record an in-process worker failure and release the task claim.
-
-    Persistent workers do not exit per task, so ``detect_crashed_workers``
-    cannot infer a failure from a child PID. This helper gives daemon runners
-    the same unified failure-counter / circuit-breaker behavior that
-    subprocess crashes and spawn failures use.
-    """
-    return _record_task_failure(
-        conn,
-        task_id,
-        error,
-        outcome=outcome,
-        failure_limit=failure_limit,
-        release_claim=True,
-        end_run=True,
-        event_payload_extra=event_payload_extra,
-    )
-
-
-def record_worker_rate_limited(
-    conn: sqlite3.Connection,
-    task_id: str,
-    error: str,
-    *,
-    metadata: Optional[dict[str, Any]] = None,
-) -> bool:
-    """Release an in-process worker task after a quota/rate-limit wall.
-
-    Mirrors the subprocess ``KANBAN_RATE_LIMIT_EXIT_CODE`` path: requeue the
-    task without incrementing ``consecutive_failures`` and stamp
-    ``last_failure_error`` so the respawn guard spaces out retries.
-    """
-    error = (error or "worker rate-limited").strip()
-    with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL, last_failure_error = ? "
-            "WHERE id = ? AND status = 'running'",
-            (error[:500], task_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        payload = dict(metadata or {})
-        payload.setdefault("error", error[:500])
-        run_id = _end_run(
-            conn,
-            task_id,
-            outcome="rate_limited",
-            status="rate_limited",
-            error=error[:500],
-            metadata=payload,
-        )
-        _append_event(conn, task_id, "rate_limited", payload, run_id=run_id)
-    return True
-
-
 def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
     """Record the spawned child's pid + emit a ``spawned`` event.
 
@@ -7790,9 +7471,6 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
-    assignee_filter: Optional[str] = None,
-    prefer_worker_daemons: bool = True,
-    count_existing_running_for_max_spawn: bool = True,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -7827,14 +7505,11 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
-            assignee_filter=assignee_filter,
-            prefer_worker_daemons=prefer_worker_daemons,
-            count_existing_running_for_max_spawn=count_existing_running_for_max_spawn,
         )
     with _dispatch_tick_lock(db_path) as held:
         if not held:
             return DispatchResult(skipped_locked=True)
-        return _dispatch_once_locked(
+        result = _dispatch_once_locked(
             conn,
             spawn_fn=spawn_fn,
             ttl_seconds=ttl_seconds,
@@ -7846,10 +7521,11 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
-            assignee_filter=assignee_filter,
-            prefer_worker_daemons=prefer_worker_daemons,
-            count_existing_running_for_max_spawn=count_existing_running_for_max_spawn,
         )
+        # Still under the dispatch lock: opportunistically truncate the WAL
+        # at a coarse interval so it cannot grow unbounded between restarts.
+        _maybe_checkpoint_wal(conn, db_path)
+        return result
 
 
 def _dispatch_once_locked(
@@ -7865,9 +7541,6 @@ def _dispatch_once_locked(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
-    assignee_filter: Optional[str] = None,
-    prefer_worker_daemons: bool = True,
-    count_existing_running_for_max_spawn: bool = True,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -7885,14 +7558,13 @@ def _dispatch_once_locked(
     failures the task is auto-blocked with the last error as its reason —
     prevents the dispatcher from thrashing forever on an unfixable task.
 
-    ``max_spawn`` is a **live concurrency cap** by default: it counts tasks
-    already in ``status='running'`` plus this tick's spawns against the
-    limit. So ``max_spawn=4`` means "at most 4 workers running at any time
-    across the whole board" — matching the gateway's stated intent
-    ("limit concurrent kanban tasks"). Persistent worker daemons pass
-    ``count_existing_running_for_max_spawn=False`` so ``max_spawn=1`` means
-    "claim at most one task in this daemon tick" rather than "only run if the
-    whole board has no running tasks".
+    ``max_spawn`` is a **live concurrency cap**, not a per-tick spawn budget:
+    it counts tasks already in ``status='running'`` plus this tick's spawns
+    against the limit. So ``max_spawn=4`` means "at most 4 workers running
+    at any time across the whole board" — matching the gateway's stated
+    intent ("limit concurrent kanban tasks"). With a per-tick interpretation
+    a 60-second tick interval could grow concurrency by N every minute on a
+    busy board and accumulate without bound.
 
     ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
     ``board`` pins workspace/log/db resolution for this tick to a specific
@@ -7935,27 +7607,18 @@ def _dispatch_once_locked(
     # they sit in status='running' until the worker calls
     # kanban_complete/kanban_block (or the dispatcher TTL-reclaims them).
     running_count = 0
-    if max_spawn is not None and count_existing_running_for_max_spawn:
+    if max_spawn is not None:
         running_count = int(
             conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
             ).fetchone()[0]
         )
 
-    assignee_filter = (assignee_filter or "").strip() or None
-    if assignee_filter:
-        ready_rows = conn.execute(
-            "SELECT id, assignee FROM tasks "
-            "WHERE status = 'ready' AND claim_lock IS NULL AND assignee = ? "
-            "ORDER BY priority DESC, created_at ASC",
-            (assignee_filter,),
-        ).fetchall()
-    else:
-        ready_rows = conn.execute(
-            "SELECT id, assignee FROM tasks "
-            "WHERE status = 'ready' AND claim_lock IS NULL "
-            "ORDER BY priority DESC, created_at ASC"
-        ).fetchall()
+    ready_rows = conn.execute(
+        "SELECT id, assignee FROM tasks "
+        "WHERE status = 'ready' AND claim_lock IS NULL "
+        "ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
     # Honour kanban.max_in_progress: if the board already has enough running
     # tasks, skip spawning this tick so slow workers (local LLMs,
     # resource-constrained hosts) can finish what they have before more tasks
@@ -8090,9 +7753,6 @@ def _dispatch_once_locked(
                     (row["id"], row_assignee, current)
                 )
                 continue
-        if prefer_worker_daemons and has_healthy_worker_daemon(conn, row_assignee):
-            result.deferred_to_daemon.append((row["id"], row_assignee))
-            continue
         # Respawn guard: refuse to re-spawn when useful work is already
         # in-flight/recent, or when the last failure is a deterministic
         # blocker (quota / auth). The guard defers the spawn this tick so
@@ -8196,19 +7856,11 @@ def _dispatch_once_locked(
     # Same concurrency model as ready dispatch: review spawns count
     # against max_spawn alongside ready tasks, so the total number of
     # running workers stays bounded.
-    if assignee_filter:
-        review_rows = conn.execute(
-            "SELECT id, assignee FROM tasks "
-            "WHERE status = 'review' AND claim_lock IS NULL AND assignee = ? "
-            "ORDER BY priority DESC, created_at ASC",
-            (assignee_filter,),
-        ).fetchall()
-    else:
-        review_rows = conn.execute(
-            "SELECT id, assignee FROM tasks "
-            "WHERE status = 'review' AND claim_lock IS NULL "
-            "ORDER BY priority DESC, created_at ASC"
-        ).fetchall()
+    review_rows = conn.execute(
+        "SELECT id, assignee FROM tasks "
+        "WHERE status = 'review' AND claim_lock IS NULL "
+        "ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
     for row in review_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
@@ -8221,9 +7873,6 @@ def _dispatch_once_locked(
             profile_exists = None  # type: ignore[assignment]
         if profile_exists is not None and not profile_exists(row["assignee"]):
             result.skipped_nonspawnable.append(row["id"])
-            continue
-        if prefer_worker_daemons and has_healthy_worker_daemon(conn, row["assignee"]):
-            result.deferred_to_daemon.append((row["id"], row["assignee"]))
             continue
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
