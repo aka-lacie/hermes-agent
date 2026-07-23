@@ -67,6 +67,7 @@ Status: `decision-pending`
 
 Files:
 - `agent/agent_runtime_helpers.py`
+- `agent/conversation_loop.py`
 - `run_agent.py`
 - `tests/run_agent/test_run_agent_codex_responses.py`
 

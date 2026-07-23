@@ -1519,8 +1519,15 @@ def run_conversation(
                 except Exception:
                     pass
 
-                if env_var_enabled("HERMES_DUMP_REQUESTS"):
-                    agent._dump_api_request_debug(api_kwargs, reason="preflight")
+                from agent.agent_runtime_helpers import request_dump_enabled
+
+                if request_dump_enabled():
+                    agent._dump_api_request_debug(
+                        api_kwargs,
+                        reason="preflight",
+                        effective_system=effective_system,
+                        api_messages=api_messages,
+                    )
 
                 # This object is private to the in-process MoA facade.  Add it
                 # only after middleware, hooks, and debug dumps so none of them
