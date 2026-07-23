@@ -16570,7 +16570,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     codex_reasoning_items=msg.get("codex_reasoning_items"),
                     codex_message_items=msg.get("codex_message_items"),
                     provider_data=msg.get("provider_data"),
-                    timestamp=msg.get("_timestamp", msg.get("timestamp")),
                 )
             except Exception:
                 pass  # Best-effort copy

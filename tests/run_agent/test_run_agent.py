@@ -12,8 +12,8 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
-from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import SimpleNamespace
@@ -315,40 +315,6 @@ def test_aiagent_reuses_existing_errors_log_handler():
                 handler.close()
         for handler in original_handlers:
             root_logger.addHandler(handler)
-
-
-def test_request_dump_uses_config_and_captures_final_api_context(agent):
-    agent.client.chat.completions.create.return_value = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content="Final answer", tool_calls=None),
-                finish_reason="stop",
-            )
-        ],
-        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
-    )
-    agent.logs_dir.mkdir(parents=True, exist_ok=True)
-
-    with (
-        patch("hermes_cli.config.read_raw_config", return_value={"debug": {"request_dumps": {"enabled": True, "keep_last": 5}}}),
-        patch.object(agent, "_persist_session"),
-        patch.object(agent, "_save_trajectory"),
-        patch.object(agent, "_cleanup_task_resources"),
-        patch.object(agent, "_dump_api_request_debug") as mock_dump,
-    ):
-        result = agent.run_conversation("hello")
-
-    assert result["final_response"] == "Final answer"
-    assert mock_dump.call_count == 1
-    _, kwargs = mock_dump.call_args
-    assert kwargs["reason"] == "preflight"
-    assert kwargs["effective_system"]
-    assert kwargs["api_messages"][0]["role"] == "system"
-    assert kwargs["api_messages"][0]["content"] == kwargs["effective_system"]
-    assert any(
-        msg.get("role") == "user" and msg.get("content") == "hello"
-        for msg in kwargs["api_messages"]
-    )
 
 
 class TestProviderModelNormalization:
@@ -2110,6 +2076,7 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
         assert kwargs["max_tokens"] == 4096
 
+
     def test_qwen_portal_formats_messages_and_metadata(self, agent):
         agent.provider = "qwen-oauth"
         agent.base_url = "https://portal.qwen.ai/v1"
@@ -2169,6 +2136,46 @@ class TestBuildApiKwargs:
         messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         assert kwargs["max_tokens"] == 65536
+
+    def test_ollama_think_false_on_effort_none(self, agent):
+        """Custom (Ollama) provider with effort=none should inject think=false."""
+        agent.provider = "custom"
+        agent.base_url = "http://localhost:11434/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.reasoning_config = {"effort": "none"}
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs.get("extra_body", {}).get("think") is False
+
+    def test_ollama_think_false_on_enabled_false(self, agent):
+        """Custom (Ollama) provider with enabled=false should inject think=false."""
+        agent.provider = "custom"
+        agent.base_url = "http://localhost:11434/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.reasoning_config = {"enabled": False}
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs.get("extra_body", {}).get("think") is False
+
+    def test_ollama_no_think_param_when_reasoning_enabled(self, agent):
+        """Custom provider with reasoning enabled should NOT inject think=false."""
+        agent.provider = "custom"
+        agent.base_url = "http://localhost:11434/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs.get("extra_body", {}).get("think") is None
+
+    def test_non_custom_provider_unaffected(self, agent):
+        """OpenRouter provider with effort=none should NOT inject think=false."""
+        agent.provider = "openrouter"
+        agent.model = "qwen/qwen3.5-plus-02-15"
+        agent.reasoning_config = {"effort": "none"}
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs.get("extra_body", {}).get("think") is None
+
 
 
 class TestBuildAssistantMessage:
@@ -2268,26 +2275,25 @@ class TestBuildAssistantMessage:
         result = agent._build_assistant_message(msg, "stop")
         assert "reasoning_content" not in result
 
-    def test_tool_call_provider_data_preserved(self, agent):
-        """Provider replay metadata on tool calls must survive history storage."""
+    def test_tool_call_extra_content_preserved(self, agent):
+        """Gemini thinking models attach extra_content with thought_signature
+        to tool calls. This must be preserved so subsequent API calls include it."""
         tc = _mock_tool_call(
             name="get_weather", arguments='{"city":"NYC"}', call_id="c2"
         )
-        tc.provider_data = {
-            "google": {"extra_content": {"google": {"thought_signature": "abc123"}}}
-        }
+        tc.extra_content = {"google": {"thought_signature": "abc123"}}
         msg = _mock_assistant_msg(content="", tool_calls=[tc])
         result = agent._build_assistant_message(msg, "tool_calls")
-        assert result["tool_calls"][0]["provider_data"] == {
-            "google": {"extra_content": {"google": {"thought_signature": "abc123"}}}
+        assert result["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "abc123"}
         }
 
-    def test_tool_call_without_provider_data(self, agent):
-        """Standard tool calls should not have replay metadata."""
+    def test_tool_call_without_extra_content(self, agent):
+        """Standard tool calls (no thinking model) should not have extra_content."""
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c3")
         msg = _mock_assistant_msg(content="", tool_calls=[tc])
         result = agent._build_assistant_message(msg, "tool_calls")
-        assert "provider_data" not in result["tool_calls"][0]
+        assert "extra_content" not in result["tool_calls"][0]
 
     def test_think_blocks_stripped_from_content(self, agent):
         """Inline <think> blocks are stripped from stored content (#8878, #9568).
@@ -2545,6 +2551,21 @@ class TestExecuteToolCalls:
 
         mock_print.assert_called_once()
         assert "search" in str(mock_print.call_args.args[0]).lower()
+        assert len(messages) == 1
+        assert messages[0]["role"] == "tool"
+
+    def test_quiet_tool_output_suppressed_without_progress_callback_for_non_cli_agent(self, agent):
+        tc = _mock_tool_call(name="web_search", arguments='{"q":"test"}', call_id="c1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        agent.platform = None
+        agent.tool_progress_callback = None
+
+        with patch("run_agent.handle_function_call", return_value="search result"), \
+             patch.object(agent, "_safe_print") as mock_print:
+            agent._execute_tool_calls(mock_msg, messages, "task-1")
+
+        mock_print.assert_not_called()
         assert len(messages) == 1
         assert messages[0]["role"] == "tool"
 
@@ -4026,9 +4047,11 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         from agent.portal_tags import nous_portal_tags
 
-        assert kwargs["extra_body"] == {
-            "tags": nous_portal_tags(session_id=agent.session_id)
-        }
+        expected = {"tags": nous_portal_tags(session_id=agent.session_id)}
+        if agent.session_id:
+            # Top-level sticky-routing key ships whenever a session exists.
+            expected["session_id"] = agent.session_id
+        assert kwargs["extra_body"] == expected
 
     def test_summary_drops_invalid_provider_sort(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"
@@ -4285,66 +4308,6 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
-    def test_system_time_tag_injected_only_into_api_payload(self, agent):
-        self._setup_agent(agent)
-        agent._inject_current_time_in_user_turn = True
-        agent.client.chat.completions.create.return_value = _mock_response(
-            content="Final answer", finish_reason="stop"
-        )
-        fake_now = datetime(2026, 4, 9, 1, 39, tzinfo=timezone(timedelta(hours=-7), "PDT"))
-
-        with (
-            patch("hermes_time.now", return_value=fake_now),
-            patch.object(agent, "_persist_session") as mock_persist,
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("hello")
-
-        call_args = agent.client.chat.completions.create.call_args
-        assert call_args is not None
-        api_messages = call_args.kwargs["messages"]
-        api_user = next(msg for msg in api_messages if msg.get("role") == "user")
-        assert api_user["content"] == "[2026-04-09 Thu 01:39 PDT] hello"
-
-        persisted_messages = mock_persist.call_args.args[0]
-        assert persisted_messages[0]["content"] == "hello"
-        assert result["messages"][0]["content"] == "hello"
-
-    def test_prior_user_turn_time_tags_are_reconstructed_from_metadata(self, agent):
-        self._setup_agent(agent)
-        agent._inject_current_time_in_user_turn = True
-        agent.client.chat.completions.create.return_value = _mock_response(
-            content="Final answer", finish_reason="stop"
-        )
-        tz = timezone(timedelta(hours=-7), "PDT")
-        prior_ts = datetime(2026, 4, 8, 23, 5, tzinfo=tz).timestamp()
-        fake_now = datetime(2026, 4, 9, 1, 39, tzinfo=tz)
-        history = [
-            {"role": "user", "content": "earlier", "_timestamp": prior_ts},
-            {"role": "assistant", "content": "prior answer"},
-        ]
-
-        with (
-            patch("hermes_time.get_timezone", return_value=tz),
-            patch("hermes_time.now", return_value=fake_now),
-            patch.object(agent, "_persist_session") as mock_persist,
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("hello", conversation_history=history)
-
-        api_messages = agent.client.chat.completions.create.call_args.kwargs["messages"]
-        api_users = [msg for msg in api_messages if msg.get("role") == "user"]
-        assert api_users[0]["content"] == "[2026-04-08 Wed 23:05 PDT] earlier"
-        assert api_users[1]["content"] == "[2026-04-09 Thu 01:39 PDT] hello"
-        assert all("_timestamp" not in msg and "timestamp" not in msg for msg in api_users)
-
-        persisted_messages = mock_persist.call_args.args[0]
-        assert persisted_messages[0]["content"] == "earlier"
-        assert persisted_messages[-2]["content"] == "hello"
-        assert result["messages"][-2]["content"] == "hello"
-
     def test_tool_call_none_args_verbose_logging_does_not_crash(self, agent):
         self._setup_agent(agent)
         agent.verbose_logging = True
@@ -4478,62 +4441,29 @@ class TestRunConversation:
         assert hook_checks == {"pre_api_request": 1, "post_api_request": 1}
         assert payload_counts == {"request": 0, "response": 0}
 
-    def test_browser_screenshot_injected_as_ephemeral_user_image_for_native_vision(self, agent, tmp_path):
+    def test_content_with_tool_calls_stays_silent_for_non_cli_quiet_mode(self, agent):
         self._setup_agent(agent)
-        agent.valid_tool_names = set(agent.valid_tool_names or set())
-        agent.valid_tool_names.add("browser_screenshot")
-        shot = tmp_path / "browser.png"
-        shot.write_bytes(b"png")
-
-        tc = _mock_tool_call(name="browser_screenshot", arguments="{}", call_id="shot1")
-        resp1 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
-        resp2 = _mock_response(content="done", finish_reason="stop")
+        agent.platform = None
+        tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        resp1 = _mock_response(
+            content="I'll search for that.",
+            finish_reason="tool_calls",
+            tool_calls=[tc],
+        )
+        resp2 = _mock_response(content="Done searching", finish_reason="stop")
         agent.client.chat.completions.create.side_effect = [resp1, resp2]
 
-        tool_result = json.dumps({
-            "success": True,
-            "screenshot_path": str(shot),
-            "mime_type": "image/png",
-        })
-
         with (
-            patch("run_agent.handle_function_call", return_value=tool_result),
-            patch.object(agent, "_active_model_supports_vision", return_value=True),
-            patch("tools.vision_tools._image_to_base64_data_url", return_value="data:image/png;base64,AAAA"),
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_safe_print") as mock_print,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
-            result = agent.run_conversation("inspect the page")
+            result = agent.run_conversation("search something")
 
-        assert result["final_response"] == "done"
-        second_call_messages = agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
-        screenshot_msgs = [
-            msg for msg in second_call_messages
-            if msg.get("role") == "user" and isinstance(msg.get("content"), list)
-        ]
-        assert screenshot_msgs, "expected an ephemeral screenshot image message in the second API call"
-        image_parts = [
-            part for msg in screenshot_msgs for part in msg["content"]
-            if isinstance(part, dict) and part.get("type") == "image_url"
-        ]
-        assert image_parts
-        assert image_parts[0]["image_url"]["url"] == "data:image/png;base64,AAAA"
-
-    def test_prepare_anthropic_messages_preserves_native_image_blocks_when_model_supports_vision(self, agent):
-        self._setup_agent(agent)
-        api_messages = [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "inspect this"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-            ],
-        }]
-
-        with patch.object(agent, "_active_model_supports_vision", return_value=True):
-            prepared = agent._prepare_anthropic_messages_for_api(api_messages)
-
-        assert prepared == api_messages
+        assert result["final_response"] == "Done searching"
+        mock_print.assert_not_called()
 
     def test_interrupt_breaks_loop(self, agent):
         self._setup_agent(agent)
@@ -4920,6 +4850,136 @@ class TestRunConversation:
             "role": "assistant",
             "content": "Sure, here's how to do it: first",
         }
+
+    def test_redirect_during_thinking_retries_same_turn_with_context(self, agent):
+        """A corrective follow-up keeps displayed reasoning and does not end the turn."""
+        self._setup_agent(agent)
+        agent.reasoning_callback = lambda _text: None
+        final = _mock_response(content="Using Postgres instead.", finish_reason="stop")
+        requests = []
+        persisted = []
+
+        def _fake_api_call(api_kwargs):
+            requests.append(api_kwargs)
+            if len(requests) == 1:
+                agent._fire_reasoning_delta("I should implement this with SQLite.")
+                assert agent.redirect("No, use Postgres instead.") is True
+                raise InterruptedError("redirect cancelled the first request")
+            return final
+
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, *_a, **_k: persisted.append(
+                    [dict(message) for message in messages]
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Choose a database and implement it.")
+
+        assert result["completed"] is True
+        assert result["interrupted"] is False
+        assert result["final_response"] == "Using Postgres instead."
+        assert len(requests) == 2
+
+        replay = requests[1]["messages"]
+        assert [m["role"] for m in replay[-3:]] == [
+            "user",
+            "assistant",
+            "user",
+        ]
+        checkpoint = replay[-2]["content"]
+        assert "interrupted by a user correction" in checkpoint
+        assert "I should implement this with SQLite." in checkpoint
+        assert replay[-1]["content"] == "No, use Postgres instead."
+        assert agent._pending_redirect is None
+        assert any(
+            snapshot[-1].get("content") == "No, use Postgres instead."
+            and snapshot[-2].get("role") == "assistant"
+            for snapshot in persisted
+            if len(snapshot) >= 2
+        )
+
+    def test_redirect_wins_race_with_response_completion(self, agent):
+        """If the provider returns as redirect lands, discard the stale answer."""
+        self._setup_agent(agent)
+        stale = _mock_response(content="Using SQLite.", finish_reason="stop")
+        corrected = _mock_response(content="Using Postgres.", finish_reason="stop")
+        calls = 0
+
+        def _fake_api_call(_api_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                assert agent.redirect("Use Postgres instead.") is True
+                return stale
+            return corrected
+
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Choose a database.")
+
+        assert calls == 2
+        assert result["final_response"] == "Using Postgres."
+        assert all(
+            message.get("content") != "Using SQLite."
+            for message in result["messages"]
+        )
+
+    def test_redirect_from_input_thread_cancels_live_model_request(self, agent):
+        """Exercise the real cross-thread path used by CLI and gateways."""
+        self._setup_agent(agent)
+        agent.reasoning_callback = lambda _text: None
+        entered = threading.Event()
+        results = {}
+        calls = 0
+        final = _mock_response(content="Corrected answer.", finish_reason="stop")
+
+        def _fake_api_call(_api_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                agent._fire_reasoning_delta("Following the original approach.")
+                entered.set()
+                deadline = time.time() + 2
+                while not agent._interrupt_requested and time.time() < deadline:
+                    time.sleep(0.01)
+                raise InterruptedError("request cancelled by redirect")
+            return final
+
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            worker = threading.Thread(
+                target=lambda: results.update(
+                    result=agent.run_conversation("Take the original approach.")
+                )
+            )
+            worker.start()
+            assert entered.wait(timeout=2)
+            assert agent.redirect("Use the corrected approach.") is True
+            worker.join(timeout=5)
+
+        assert worker.is_alive() is False
+        assert calls == 2
+        assert results["result"]["completed"] is True
+        assert results["result"]["final_response"] == "Corrected answer."
+        checkpoint = results["result"]["messages"][-3]
+        assert "Following the original approach." in checkpoint["content"]
+        assert results["result"]["messages"][-2]["content"] == (
+            "Use the corrected approach."
+        )
 
     def test_interrupt_before_any_stream_keeps_sentinel(self, agent):
         """An interrupt with no streamed text falls back to the metadata sentinel."""
@@ -7215,7 +7275,7 @@ class TestAnthropicBaseUrlPassthrough:
         ):
             mock_build.return_value = MagicMock()
             a = AIAgent(
-                api_key="sk-ant-api03-test1234567890",
+                api_key="sk-ant...7890",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
                 skip_context_files=True,
@@ -7272,6 +7332,7 @@ class TestAnthropicCredentialRefresh:
         ):
             agent = AIAgent(
                 api_key="sk-ant-oat01-same-token",
+                base_url="https://openrouter.ai/api/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
                 skip_context_files=True,
@@ -7299,6 +7360,7 @@ class TestAnthropicCredentialRefresh:
         ):
             agent = AIAgent(
                 api_key="sk-ant-oat01-current-token",
+                base_url="https://openrouter.ai/api/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
                 skip_context_files=True,
@@ -7472,6 +7534,10 @@ class TestStreamingApiCall:
         callback.assert_any_call("World")
 
     def test_tool_call_accumulation(self, agent):
+        # Per OpenAI streaming spec, function names are delivered atomically
+        # in the first chunk; only `arguments` is fragmented across chunks.
+        # The accumulator uses assignment for names (immune to MiniMax/NIM
+        # resends of the full name) and `+=` for arguments.
         chunks = [
             _make_chunk(tool_calls=[_make_tc_delta(0, "call_1", "web_search", '{"q":')]),
             _make_chunk(tool_calls=[_make_tc_delta(0, None, None, '"test"}')]),
@@ -8227,8 +8293,7 @@ class TestMemoryNudgeCounterPersistence:
         with patch("run_agent.get_tool_definitions", return_value=[]):
             a = AIAgent(
                 model="test", api_key="test-key", base_url="http://localhost:1234/v1",
-                provider="openrouter",
-                skip_context_files=True, skip_memory=True,
+                provider="openrouter", skip_context_files=True, skip_memory=True,
             )
         assert hasattr(a, "_turns_since_memory")
         assert hasattr(a, "_iters_since_skill")

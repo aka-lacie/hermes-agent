@@ -25,15 +25,22 @@ import ssl
 import threading
 import time
 import uuid
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
-from agent.conversation_compression import conversation_history_after_compression
+from agent.conversation_compression import (
+    COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE,
+    COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE,
+    COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE,
+    COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE,
+    PRE_API_COMPRESSION_STATUS_TEMPLATE,
+    conversation_history_after_compression,
+)
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
 from agent.turn_context import (
+    _compression_warrants_another_preflight_pass,
     build_turn_context,
     compose_user_api_content,
     reanchor_current_turn_user_idx,
@@ -53,6 +60,7 @@ from agent.message_sanitization import (
 )
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
+    _estimate_tools_tokens_rough,
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
     get_context_length_from_provider_error,
@@ -100,6 +108,53 @@ _LOCAL_PROCESSING_MODULES = frozenset({
 _API_CALL_MODULES = frozenset({
     "chat_completion_helpers",
 })
+
+
+def _apply_active_turn_redirect(agent: Any, messages: List[Dict[str, Any]], text: str) -> None:
+    """Append a provider-safe checkpoint and correction to the live turn.
+
+    Incomplete provider reasoning blocks are not valid replay items (Anthropic
+    signs them; Responses reasoning items require their following output).
+    Preserve only what Hermes actually displayed, demoted to ordinary text,
+    then add the correction as a real user message. This keeps role alternation
+    valid and leaves every previously cached message byte-for-byte unchanged.
+    """
+    reasoning = str(
+        getattr(agent, "_current_streamed_reasoning_text", "") or ""
+    ).strip()
+    visible = agent._strip_think_blocks(
+        getattr(agent, "_current_streamed_assistant_text", "") or ""
+    ).strip()
+
+    checkpoint_parts = ["[This response was interrupted by a user correction.]"]
+    if reasoning:
+        checkpoint_parts.extend(
+            ["Reasoning shown before the interruption:", reasoning]
+        )
+    if visible:
+        checkpoint_parts.extend(
+            ["Visible response before the interruption:", visible]
+        )
+    checkpoint = "\n\n".join(checkpoint_parts)
+
+    # The normal live tail is user or tool, so an assistant checkpoint followed
+    # by the correction preserves strict alternation. If a transport already
+    # committed an assistant item, attribute the checkpoint inside the user
+    # correction instead of creating assistant→assistant.
+    if messages and messages[-1].get("role") == "assistant":
+        correction = (
+            "[Context from the interrupted assistant response]\n"
+            f"{checkpoint}\n\n"
+            f"{text}"
+        )
+        messages.append({"role": "user", "content": correction})
+    else:
+        messages.append({"role": "assistant", "content": checkpoint})
+        messages.append({"role": "user", "content": text})
+
+    agent._current_streamed_assistant_text = ""
+    agent._current_streamed_reasoning_text = ""
+    agent._stream_needs_break = True
 
 
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
@@ -424,68 +479,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                 agent.session_id, exc,
             )
 
-def _coerce_turn_timestamp(value: Any) -> Optional[float]:
-    """Return a Unix timestamp in seconds, or None for invalid metadata."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        ts = float(value)
-    elif isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return None
-        try:
-            ts = float(raw)
-        except ValueError:
-            try:
-                ts = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-            except (TypeError, ValueError, OverflowError):
-                return None
-    else:
-        return None
-    if ts > 10_000_000_000:
-        ts /= 1000.0
-    if ts <= 0:
-        return None
-    return ts
-
-
-def _datetime_from_turn_timestamp(value: Any) -> Optional[datetime]:
-    ts = _coerce_turn_timestamp(value)
-    if ts is None:
-        return None
-    try:
-        from hermes_time import get_timezone
-
-        tz = get_timezone()
-        if tz is not None:
-            return datetime.fromtimestamp(ts, tz)
-        return datetime.fromtimestamp(ts).astimezone()
-    except Exception:
-        logger.debug("Current-time user context timestamp conversion failed", exc_info=True)
-        return None
-
-
-def _format_user_turn_time_context(dt: datetime) -> str:
-    stamp = dt.strftime("%Y-%m-%d %a %H:%M %Z").strip()
-    return f"[{stamp}]" if stamp else ""
-
-
-def _build_current_time_user_context(agent, timestamp: Any = None) -> str:
-    """Return an ephemeral timestamp prefix for a user turn."""
-    if not getattr(agent, "_inject_current_time_in_user_turn", False):
-        return ""
-    try:
-        if timestamp is not None:
-            dt = _datetime_from_turn_timestamp(timestamp)
-            return _format_user_turn_time_context(dt) if dt is not None else ""
-        from hermes_time import now as _hermes_now
-
-        return _format_user_turn_time_context(_hermes_now())
-    except Exception:
-        logger.debug("Current-time user context injection failed", exc_info=True)
-    return ""
-
 
 def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     """Return False when the persisted Model/Provider lines are stale."""
@@ -713,7 +706,6 @@ def run_conversation(
         install_safe_stdio=_install_safe_stdio,
         sanitize_surrogates=_sanitize_surrogates,
         summarize_user_message_for_log=_summarize_user_message_for_log,
-        build_current_time_user_context=_build_current_time_user_context,
         set_session_context=set_session_context,
         set_current_write_origin=set_current_write_origin,
         ra=_ra,
@@ -729,7 +721,6 @@ def run_conversation(
     effective_task_id = _ctx.effective_task_id
     turn_id = _ctx.turn_id
     current_turn_user_idx = _ctx.current_turn_user_idx
-    _current_time_user_context = _ctx.current_time_user_context
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
@@ -748,12 +739,31 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    # One resolved per-turn compression attempt cap, shared by every site that
+    # consumes ``compression_attempts``: the pre-API pressure gate, the
+    # overflow/413 retry handlers, and the post-tool compaction gate.
+    # Config-driven via compression.max_attempts (parsed + validated in
+    # agent_init); default 3 preserves the prior hardcoded behavior for
+    # objects without the attribute (older pickles / minimal stubs).
+    max_compression_attempts = getattr(agent, "max_compression_attempts", 3)
+    _last_preflight_pressure: Optional[int] = None
+    _preflight_compression_blocked = _ctx.preflight_compression_blocked
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
     # that continuation consumes the remaining budget, this is the best
     # user-facing result available; it must not be confused with error or
     # recovery text produced by unrelated exit paths.
     _pending_verification_response = None
+    # Tracks whether the pending verification candidate was already streamed
+    # to the user as interim content. The finalizer uses this to set
+    # ``_response_was_previewed`` ONLY when the pending candidate is actually
+    # reused as the final response — not merely because any interim was
+    # streamed. (#65919 review: response-loss blocker)
+    _pending_verification_response_previewed = False
+    # If pre-API compression fires after MoA advisors have produced guidance,
+    # retain that ephemeral output and rebase it onto the compacted transcript
+    # on the next loop iteration. This prevents a second advisor fan-out.
+    pending_moa_prepared_request = None
 
     # Per-turn tally of consecutive successful credential-pool token refreshes,
     # keyed by (provider, pool-entry-id). A persistent upstream 401 lets
@@ -777,6 +787,16 @@ def run_conversation(
         )
 
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+        _redirect_text = agent._drain_pending_redirect()
+        if _redirect_text:
+            _apply_active_turn_redirect(agent, messages, _redirect_text)
+            if isinstance(original_user_message, str):
+                original_user_message = (
+                    f"{original_user_message}\n\n"
+                    f"User correction during the turn: {_redirect_text}"
+                )
+            agent._persist_session(messages, conversation_history)
+
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
@@ -926,27 +946,8 @@ def run_conversation(
             )
 
         api_messages = []
-        preserve_provider_data = agent._preserves_provider_data_for_route()
-        sanitize_tool_calls = agent._should_sanitize_tool_calls()
-        tool_name_by_id = {}
-        for _msg in messages:
-            if _msg.get("role") != "assistant":
-                continue
-            for _tc in _msg.get("tool_calls") or []:
-                _name = ""
-                if isinstance(_tc, dict):
-                    _name = ((_tc.get("function") or {}).get("name") or "").strip()
-                else:
-                    _name = str(getattr(getattr(_tc, "function", None), "name", "") or "").strip()
-                _cid = _ra().AIAgent._get_tool_call_id_static(_tc)
-                if _cid and _name:
-                    tool_name_by_id[_cid] = _name
         for idx, msg in enumerate(messages):
-            api_msg = agent._prepare_api_message(
-                msg,
-                preserve_provider_data=preserve_provider_data,
-                sanitize_tool_calls=sanitize_tool_calls,
-            )
+            api_msg = msg.copy()
 
             # api_content is the persistence sidecar carrying the exact bytes
             # sent to the API for this message when they differ from the clean
@@ -957,9 +958,10 @@ def run_conversation(
 
             # Inject ephemeral context into the current turn's user message.
             # Sources: memory manager prefetch + plugin pre_llm_call hooks
-            # with target="user_message" (the default). Both are API-call-time
-            # only — the original message in `messages` is never mutated beyond
-            # the api_content stamp, so nothing leaks into transcript content.
+            # with target="user_message" (the default).  Both are
+            # API-call-time only — the original message in `messages` is
+            # never mutated beyond the api_content stamp, so nothing leaks
+            # into the clean transcript content.
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 if isinstance(_api_content, str) and _api_content:
                     # Stamped by the prologue from the same composition —
@@ -1015,12 +1017,6 @@ def run_conversation(
             # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
-            if msg.get("role") == "tool":
-                _tool_name = tool_name_by_id.get(str(msg.get("tool_call_id") or ""))
-                if _tool_name == "browser_screenshot":
-                    _followup = agent._build_browser_screenshot_api_followup(msg.get("content"))
-                    if _followup:
-                        api_messages.append(_followup)
 
         # Build the final system message: cached prompt + ephemeral system prompt.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
@@ -1161,17 +1157,39 @@ def run_conversation(
         # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
         _sanitize_messages_surrogates(api_messages)
 
-        # Calculate approximate request size for logging and pressure checks.
-        # estimate_messages_tokens_rough(api_messages) includes the system
-        # prompt copy but not the tool schema payload, which is sent as a
-        # separate field. Add tools back for compression decisions so long
-        # tool-heavy turns do not creep up to the context ceiling and leave
-        # no room for the model's final answer.
-        total_chars = sum(len(str(msg)) for msg in api_messages)
+        # Build a persistent-MoA request before measuring compression pressure.
+        # MoA reference output is injected into the aggregator prompt, but it
+        # is deliberately ephemeral and therefore absent from ``messages``.
+        # Preparing here makes the pre-API guard measure the exact prompt the
+        # aggregator will receive; ``create()`` consumes this private prepared
+        # request later without running the advisors a second time.
+        _moa_prepared_request = None
+        if agent.provider == "moa":
+            _moa_completions = getattr(getattr(agent.client, "chat", None), "completions", None)
+            if pending_moa_prepared_request is not None:
+                _rebase_moa_request = getattr(_moa_completions, "rebase_prepared_request", None)
+                if callable(_rebase_moa_request):
+                    _moa_prepared_request = _rebase_moa_request(
+                        pending_moa_prepared_request, api_messages
+                    )
+                pending_moa_prepared_request = None
+            if _moa_prepared_request is None:
+                _prepare_moa_request = getattr(_moa_completions, "prepare", None)
+                if callable(_prepare_moa_request):
+                    _moa_prepared_request = _prepare_moa_request(api_messages)
+            if _moa_prepared_request is not None:
+                api_messages = _moa_prepared_request["messages"]
+
+        # One image-stripped message estimate feeds both figures. Was: a
+        # str(msg) char walk (re-serialized base64 every call) + a second
+        # messages walk inside estimate_request_tokens_rough. Tools added
+        # separately (compression needs them: 50+ tools = 20-30K tokens).
+        # total_chars is a rough (~) proxy — verbose log + hook metric only.
         approx_tokens = estimate_messages_tokens_rough(api_messages)
-        request_pressure_tokens = estimate_request_tokens_rough(
-            api_messages, tools=agent.tools or None
+        request_pressure_tokens = approx_tokens + (
+            _estimate_tools_tokens_rough(agent.tools) if agent.tools else 0
         )
+        total_chars = approx_tokens * 4
 
         _runtime_context_error = _ollama_context_limit_error(
             agent, request_pressure_tokens
@@ -1208,6 +1226,37 @@ def run_conversation(
         # LLM cooldown + anti-thrash guards (#11529). compression_attempts is a
         # hard per-turn backstop shared with the overflow error handlers.
         _compressor = agent.context_compressor
+        _preflight_threshold = int(
+            getattr(_compressor, "threshold_tokens", 0) or 0
+        )
+        # A previous mid-turn preflight pass deliberately continued the loop so
+        # API-only context and all sanitization could be rebuilt. Compare that
+        # fully assembled request with the fully assembled request that caused
+        # the pass. Raw ``messages`` are not equivalent here: they omit
+        # api_content/plugin injections, prefills, MoA context, and ephemeral
+        # system text.
+        _previous_preflight_pressure = _last_preflight_pressure
+        _last_preflight_pressure = None
+        if (
+            _previous_preflight_pressure is not None
+            and request_pressure_tokens >= _preflight_threshold
+            and not _compression_warrants_another_preflight_pass(
+                _previous_preflight_pressure,
+                request_pressure_tokens,
+                _preflight_threshold,
+            )
+        ):
+            # Stop proactive retries for this turn without consuming the
+            # shared overflow-recovery budget. If the provider proves the
+            # request truly does not fit, its error handler may still compact
+            # with that stronger signal.
+            _preflight_compression_blocked = True
+            logger.warning(
+                "Pre-API compression made insufficient progress: ~%s -> "
+                "~%s request tokens; skipping additional preflight passes",
+                f"{_previous_preflight_pressure:,}",
+                f"{request_pressure_tokens:,}",
+            )
         _defer_preflight = getattr(
             _compressor, "should_defer_preflight_to_real_usage", lambda _t: False
         )
@@ -1217,25 +1266,31 @@ def run_conversation(
         if (
             agent.compression_enabled
             and len(messages) > 1
-            and compression_attempts < 3
+            and compression_attempts < max_compression_attempts
+            and not _preflight_compression_blocked
             and not _defer_preflight(request_pressure_tokens)
             and not _compression_cooldown
             and _compressor.should_compress(request_pressure_tokens)
         ):
+            if _moa_prepared_request is not None:
+                pending_moa_prepared_request = _moa_prepared_request
             compression_attempts += 1
             logger.info(
                 "Pre-API compression: ~%s request tokens >= %s threshold "
-                "(context=%s, attempt=%s/3)",
+                "(context=%s, attempt=%s/%s)",
                 f"{request_pressure_tokens:,}",
                 f"{int(getattr(_compressor, 'threshold_tokens', 0) or 0):,}",
                 f"{int(getattr(_compressor, 'context_length', 0) or 0):,}"
                 if getattr(_compressor, "context_length", 0) else "unknown",
                 compression_attempts,
+                max_compression_attempts,
             )
             agent._emit_status(
-                f"📦 Pre-API compression: ~{request_pressure_tokens:,} tokens "
-                f"near the context/output limit. Compacting before the next model call."
+                PRE_API_COMPRESSION_STATUS_TEMPLATE.format(
+                    tokens=request_pressure_tokens
+                )
             )
+            _last_preflight_pressure = request_pressure_tokens
             messages, active_system_prompt = agent._compress_context(
                 messages,
                 system_message,
@@ -1299,7 +1354,6 @@ def run_conversation(
         retry_count = 0
         max_retries = agent._api_max_retries
         _retry = TurnRetryState()
-        max_compression_attempts = 3
 
         finish_reason = "stop"
         response = None  # Guard against UnboundLocalError if all retries fail
@@ -1465,13 +1519,14 @@ def run_conversation(
                 except Exception:
                     pass
 
-                if agent._request_dump_enabled():
-                    agent._dump_api_request_debug(
-                        api_kwargs,
-                        reason="preflight",
-                        effective_system=effective_system,
-                        api_messages=api_messages,
-                    )
+                if env_var_enabled("HERMES_DUMP_REQUESTS"):
+                    agent._dump_api_request_debug(api_kwargs, reason="preflight")
+
+                # This object is private to the in-process MoA facade.  Add it
+                # only after middleware, hooks, and debug dumps so none of them
+                # attempts to serialize it as part of the provider payload.
+                if _moa_prepared_request is not None and agent.provider == "moa":
+                    api_kwargs["_moa_prepared_request"] = _moa_prepared_request
 
                 # Always prefer the streaming path — even without stream
                 # consumers.  Streaming gives us fine-grained health
@@ -1542,22 +1597,59 @@ def run_conversation(
 
                 from hermes_cli.middleware import run_llm_execution_middleware
 
-                response = run_llm_execution_middleware(
-                    api_kwargs,
-                    _perform_api_call,
-                    original_request=_original_api_kwargs,
-                    task_id=effective_task_id,
-                    turn_id=turn_id,
-                    api_request_id=api_request_id,
-                    session_id=agent.session_id or "",
-                    platform=agent.platform or "",
-                    model=agent.model,
-                    provider=agent.provider,
-                    base_url=agent.base_url,
-                    api_mode=agent.api_mode,
-                    api_call_count=api_call_count,
-                    middleware_trace=list(_llm_middleware_trace),
-                )
+                _model_request_active = getattr(agent, "_model_request_active", None)
+                _redirect_lock = getattr(agent, "_pending_redirect_lock", None)
+                if _redirect_lock is not None:
+                    with _redirect_lock:
+                        if _model_request_active is not None:
+                            _model_request_active.set()
+                elif _model_request_active is not None:
+                    _model_request_active.set()
+                _redirect_crossed_response = False
+                try:
+                    response = run_llm_execution_middleware(
+                        api_kwargs,
+                        _perform_api_call,
+                        original_request=_original_api_kwargs,
+                        task_id=effective_task_id,
+                        turn_id=turn_id,
+                        api_request_id=api_request_id,
+                        session_id=agent.session_id or "",
+                        platform=agent.platform or "",
+                        model=agent.model,
+                        provider=agent.provider,
+                        base_url=agent.base_url,
+                        api_mode=agent.api_mode,
+                        api_call_count=api_call_count,
+                        middleware_trace=list(_llm_middleware_trace),
+                    )
+                finally:
+                    if _redirect_lock is not None:
+                        with _redirect_lock:
+                            if _model_request_active is not None:
+                                _model_request_active.clear()
+                            _redirect_crossed_response = bool(
+                                agent._pending_redirect
+                            )
+                    else:
+                        if _model_request_active is not None:
+                            _model_request_active.clear()
+                        _redirect_crossed_response = agent._has_pending_redirect()
+                if _redirect_crossed_response:
+                    # The response and redirect can cross on different threads:
+                    # redirect() observed the request as active just before this
+                    # call returned. Discard that now-stale response and rebuild
+                    # from the correction rather than silently losing it.
+                    if thinking_spinner:
+                        thinking_spinner.stop("")
+                        thinking_spinner = None
+                    if agent.thinking_callback:
+                        agent.thinking_callback("")
+                    if agent.clear_interrupt(preserve_redirect=True):
+                        _retry.restart_with_redirected_messages = True
+                    else:
+                        interrupted = True
+                    break
                 
                 api_duration = time.time() - api_start_time
                 
@@ -2519,6 +2611,15 @@ def run_conversation(
                     thinking_spinner = None
                 if agent.thinking_callback:
                     agent.thinking_callback("")
+                if agent._has_pending_redirect():
+                    # redirect() deliberately used the interrupt machinery to
+                    # cancel only this provider request. Keep its correction
+                    # queued, clear the cancellation bit, and let the outer
+                    # loop rebuild a clean request tail. Never materialize
+                    # incomplete signed/encrypted reasoning items.
+                    if agent.clear_interrupt(preserve_redirect=True):
+                        _retry.restart_with_redirected_messages = True
+                        break
                 api_elapsed = time.time() - api_start_time
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupted during API call.", force=True)
                 interrupted = True
@@ -3401,8 +3502,9 @@ def run_conversation(
                         )
                         if len(messages) < original_len or old_ctx > _reduced_ctx:
                             agent._buffer_status(
-                                f"🗜️ Context reduced to {_reduced_ctx:,} tokens "
-                                f"(was {old_ctx:,}), retrying..."
+                                COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE.format(
+                                    new_ctx=_reduced_ctx, old_ctx=old_ctx
+                                )
                             )
                             time.sleep(2)
                             _retry.restart_with_compressed_messages = True
@@ -3663,9 +3765,9 @@ def run_conversation(
 
                     if len(messages) < original_len or (new_tokens > 0 and new_tokens < original_tokens * 0.95):
                         if len(messages) < original_len:
-                            agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                            agent._buffer_status(COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE.format(before=original_len, after=len(messages)))
                         else:
-                            agent._buffer_status(f"🗜️ Compressed ~{original_tokens:,} → ~{new_tokens:,} tokens, retrying...")
+                            agent._buffer_status(COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE.format(before=original_tokens, after=new_tokens))
                         time.sleep(2)  # Brief pause between compression retries
                         _retry.restart_with_compressed_messages = True
                         break
@@ -3883,7 +3985,7 @@ def run_conversation(
                             "failed": True,
                             "compression_exhausted": True,
                         }
-                    agent._buffer_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
+                    agent._buffer_status(COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE.format(tokens=approx_tokens, attempt=compression_attempts, cap=max_compression_attempts))
 
                     original_len = len(messages)
                     original_tokens = estimate_messages_tokens_rough(messages)
@@ -3904,9 +4006,9 @@ def run_conversation(
 
                     if len(messages) < original_len or (new_tokens > 0 and new_tokens < original_tokens * 0.95) or (new_ctx and new_ctx < old_ctx):
                         if len(messages) < original_len:
-                            agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                            agent._buffer_status(COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE.format(before=original_len, after=len(messages)))
                         elif new_tokens > 0 and new_tokens < original_tokens * 0.95:
-                            agent._buffer_status(f"🗜️ Compressed ~{original_tokens:,} → ~{new_tokens:,} tokens, retrying...")
+                            agent._buffer_status(COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE.format(before=original_tokens, after=new_tokens))
                         time.sleep(2)  # Brief pause between compression retries
                         _retry.restart_with_compressed_messages = True
                         break
@@ -4467,6 +4569,15 @@ def run_conversation(
                             f"{int(sleep_end - time.time())}s remaining"
                         )
         
+        if _retry.restart_with_redirected_messages:
+            # The cancelled request produced no valid assistant item. Reuse the
+            # same logical iteration after the outer loop appends the displayed
+            # partial context and correction to ``messages``.
+            api_call_count -= 1
+            agent.iteration_budget.refund()
+            _retry.restart_with_redirected_messages = False
+            continue
+
         # If the API call was interrupted, skip response processing
         if interrupted:
             _turn_exit_reason = "interrupted_during_api_call"
@@ -5227,7 +5338,12 @@ def run_conversation(
                         messages, tools=agent.tools or None
                     )
 
-                if agent.compression_enabled and _compressor.should_compress(_real_tokens):
+                if (
+                    agent.compression_enabled
+                    and compression_attempts < max_compression_attempts
+                    and _compressor.should_compress(_real_tokens)
+                ):
+                    compression_attempts += 1
                     agent._safe_print("  ⟳ compacting context…")
                     messages, active_system_prompt = agent._compress_context(
                         messages, system_message,
@@ -5616,17 +5732,17 @@ def run_conversation(
                         getattr(agent, "_verification_stop_nudges", 0) + 1
                     )
                     final_msg["finish_reason"] = "verification_required"
-                    final_msg["_verification_stop_synthetic"] = True
+                    # The assistant response is real content — persist it and
+                    # emit to the UI as an interim message so the user sees the
+                    # attempted final answer before the verification loop runs.
+                    # Only the nudge is flagged synthetic so it gets stripped
+                    # from the durable transcript (#65919 §7).
+                    agent._emit_interim_assistant_message(final_msg)
                     messages.append(final_msg)
-                    # Keep the attempted final answer in model history so the
-                    # synthetic user nudge preserves role alternation, but do
-                    # not surface it to the user as an interim answer. The
-                    # whole point of this guard is to prevent premature
-                    # "done" claims before checks run. Both the attempted
-                    # answer and the nudge are flagged synthetic so neither
-                    # persists — otherwise the resumed transcript keeps a
-                    # premature "done" with the nudge stripped, producing an
-                    # assistant→assistant adjacency. (#55733)
+                    try:
+                        agent._flush_messages_to_session_db(messages, conversation_history)
+                    except Exception:
+                        logger.debug("verify-on-stop interim flush failed", exc_info=True)
                     messages.append({
                         "role": "user",
                         "content": _verify_nudge,
@@ -5642,7 +5758,13 @@ def run_conversation(
                     # continuation-budget exhaustion.  ``final_response`` itself
                     # must be cleared so the finalizer can distinguish this gate
                     # from unrelated error/recovery exits. (#61631)
+                    # Track whether this candidate was already streamed so the
+                    # finalizer can mark the turn previewed only if the
+                    # candidate is actually reused as the final response.
                     _pending_verification_response = final_response
+                    _pending_verification_response_previewed = (
+                        agent._interim_content_was_streamed(final_response or "")
+                    )
                     final_response = None
                     continue
 
@@ -5681,12 +5803,17 @@ def run_conversation(
                 if _verify_nudge2:
                     agent._pre_verify_nudges = _attempt + 1
                     final_msg["finish_reason"] = "verify_hook_continue"
-                    final_msg["_pre_verify_synthetic"] = True
-                    # Same alternation contract as verify-on-stop: keep the
-                    # attempted answer in history, follow it with a synthetic
-                    # user nudge, and don't surface the premature answer. Both
-                    # are flagged synthetic so neither persists. (#55733)
+                    # The assistant response is real content — persist it and
+                    # emit to the UI as an interim message so the user sees the
+                    # attempted final answer before the pre_verify loop runs.
+                    # Only the nudge is flagged synthetic so it gets stripped
+                    # from the durable transcript (#65919 §7).
+                    agent._emit_interim_assistant_message(final_msg)
                     messages.append(final_msg)
+                    try:
+                        agent._flush_messages_to_session_db(messages, conversation_history)
+                    except Exception:
+                        logger.debug("pre_verify interim flush failed", exc_info=True)
                     messages.append({
                         "role": "user",
                         "content": _verify_nudge2,
@@ -5696,6 +5823,9 @@ def run_conversation(
                     logger.debug("pre_verify nudge issued (attempt %d)",
                                  agent._pre_verify_nudges)
                     _pending_verification_response = final_response
+                    _pending_verification_response_previewed = (
+                        agent._interim_content_was_streamed(final_response or "")
+                    )
                     final_response = None
                     continue
 
@@ -5743,6 +5873,9 @@ def run_conversation(
                     # exhaustion path does not treat the narrated stop as
                     # a completed answer.
                     _pending_verification_response = final_response
+                    _pending_verification_response_previewed = (
+                        agent._interim_content_was_streamed(final_response or "")
+                    )
                     final_response = None
                     continue
 
@@ -5867,6 +6000,7 @@ def run_conversation(
         _should_review_memory=_should_review_memory,
         _turn_exit_reason=_turn_exit_reason,
         _pending_verification_response=_pending_verification_response,
+        _pending_verification_response_previewed=_pending_verification_response_previewed,
     )
 
 

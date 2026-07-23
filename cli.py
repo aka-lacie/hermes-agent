@@ -6236,9 +6236,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 resolved_meta = self._session_db.get_session(self.session_id)
                 if resolved_meta:
                     session_meta = resolved_meta
-            restored = self._session_db.get_messages_as_conversation(
-                self.session_id, include_timestamps=True
-            )
+            restored = self._session_db.get_messages_as_conversation(self.session_id)
             if restored:
                 restored = [m for m in restored if m.get("role") != "session_meta"]
                 self.conversation_history = restored
@@ -6589,9 +6587,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             if resolved_meta:
                 session_meta = resolved_meta
 
-        restored = self._session_db.get_messages_as_conversation(
-            self.session_id, include_timestamps=True
-        )
+        restored = self._session_db.get_messages_as_conversation(self.session_id)
         if restored:
             restored = [m for m in restored if m.get("role") != "session_meta"]
             self.conversation_history = restored
@@ -7898,9 +7894,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         _sync_process_session_id(target_id)
 
         # Load conversation history (strip transcript-only metadata entries)
-        restored = self._session_db.get_messages_as_conversation(
-            target_id, include_timestamps=True
-        )
+        restored = self._session_db.get_messages_as_conversation(target_id)
         restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
         self.conversation_history = restored
 
@@ -8101,7 +8095,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     tool_calls=msg.get("tool_calls"),
                     tool_call_id=msg.get("tool_call_id"),
                     reasoning=msg.get("reasoning"),
-                    timestamp=msg.get("_timestamp", msg.get("timestamp")),
                 )
             except Exception:
                 pass  # Best-effort copy

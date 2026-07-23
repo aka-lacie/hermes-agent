@@ -167,7 +167,6 @@ from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock
     build_environment_hints,
     build_nous_subscription_prompt,
     load_soul_md,
-    load_identity_md,
 )
 from agent.process_bootstrap import _get_proxy_from_env  # noqa: F401
 from agent.message_sanitization import (  # noqa: F401
@@ -230,11 +229,12 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_empty_recovery_synthetic",
     "_empty_terminal_sentinel",
     "_thinking_prefill",
-    # verify-on-stop and pre_verify nudges append a synthetic assistant
-    # "done" plus a synthetic user nudge to keep the agent going one more
-    # turn before it can claim completion. Those messages exist only to
-    # drive the verification loop; persisting them poisons the resumed
-    # transcript and breaks prompt-prefix cache reuse on later turns. (#55733)
+    # verify-on-stop and pre_verify nudges append a synthetic user nudge to
+    # keep the agent going one more turn before it can claim completion.
+    # The nudge exists only to drive the verification loop; persisting it
+    # poisons the resumed transcript and breaks prompt-prefix cache reuse
+    # on later turns. The assistant candidate is NOT synthetic — it is
+    # persisted and emitted as an interim message (#65919).
     "_verification_stop_synthetic",
     "_pre_verify_synthetic",
     # kanban worker stop-guard: narrated exit without kanban_complete/block
@@ -1939,7 +1939,7 @@ class AIAgent:
                 _row_api_content = msg.get("api_content")
                 if not isinstance(_row_api_content, str):
                     _row_api_content = None
-                _row_timestamp = msg.get("_timestamp", msg.get("timestamp"))
+                _row_timestamp = msg.get("timestamp")
                 # Apply the persist override to THIS row's written values only
                 # (never to the live dict). A multimodal override is a complete
                 # clean replacement for an API-local noted payload. Preserve the
@@ -2646,34 +2646,10 @@ class AIAgent:
         *,
         reason: str,
         error: Optional[Exception] = None,
-        effective_system: Optional[str] = None,
-        api_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Path]:
         """Forwarder — see ``agent.agent_runtime_helpers.dump_api_request_debug``."""
         from agent.agent_runtime_helpers import dump_api_request_debug
-        return dump_api_request_debug(
-            self,
-            api_kwargs,
-            reason=reason,
-            error=error,
-            effective_system=effective_system,
-            api_messages=api_messages,
-        )
-
-    def _request_dump_enabled(self) -> bool:
-        """Forwarder — see ``agent.agent_runtime_helpers.request_dump_enabled``."""
-        from agent.agent_runtime_helpers import request_dump_enabled
-        return request_dump_enabled()
-
-    def _get_request_dump_keep_last(self) -> int:
-        """Forwarder — see ``agent.agent_runtime_helpers.get_request_dump_keep_last``."""
-        from agent.agent_runtime_helpers import get_request_dump_keep_last
-        return get_request_dump_keep_last()
-
-    def _prune_request_debug_dumps(self, keep_last: int) -> None:
-        """Forwarder — see ``agent.agent_runtime_helpers.prune_request_debug_dumps``."""
-        from agent.agent_runtime_helpers import prune_request_debug_dumps
-        return prune_request_debug_dumps(self, keep_last)
+        return dump_api_request_debug(self, api_kwargs, reason=reason, error=error)
 
     @staticmethod
     def _clean_session_content(content: str) -> str:
@@ -2833,8 +2809,33 @@ class AIAgent:
             if session_has_running_agent:
                 running_agent.interrupt(new_message.text)
         """
-        self._interrupt_requested = True
-        self._interrupt_message = message
+        # A hard stop and redirect share one lock so /stop cannot race with an
+        # accepted correction and accidentally turn itself into a retry.
+        _redirect_lock = getattr(self, "_pending_redirect_lock", None)
+        if _redirect_lock is not None:
+            with _redirect_lock:
+                self._interrupt_requested = True
+                self._interrupt_message = message
+                self._pending_redirect = None
+        else:
+            self._interrupt_requested = True
+            self._interrupt_message = message
+            self._pending_redirect = None
+
+        # Codex app-server owns its model/tool loop and watches a private
+        # interrupt event rather than Hermes' per-thread flag.
+        if getattr(self, "api_mode", None) == "codex_app_server":
+            _codex_session = getattr(self, "_codex_session", None)
+            _request_interrupt = getattr(_codex_session, "request_interrupt", None)
+            if callable(_request_interrupt):
+                try:
+                    _request_interrupt()
+                except Exception:
+                    logger.debug(
+                        "Failed to interrupt Codex app-server turn",
+                        exc_info=True,
+                    )
+
         # A cron turn performs its API request on the conversation thread to
         # avoid the nested interrupt-worker deadlock.  Unlike the normal worker
         # path, its client is registered here so this cross-thread interrupt can
@@ -2887,10 +2888,29 @@ class AIAgent:
         if not self.quiet_mode:
             print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
 
-    def clear_interrupt(self) -> None:
-        """Clear any pending interrupt request and the per-thread tool interrupt signal."""
-        self._interrupt_requested = False
-        self._interrupt_message = None
+    def clear_interrupt(self, *, preserve_redirect: bool = False) -> bool:
+        """Clear the interrupt request and per-thread tool signal.
+
+        ``preserve_redirect`` is used only by the conversation loop after it
+        intentionally cancels a model request to rebuild that same logical
+        turn. Public hard-stop paths keep the default and clear everything.
+        """
+        _redirect_lock = getattr(self, "_pending_redirect_lock", None)
+        if _redirect_lock is not None:
+            with _redirect_lock:
+                if preserve_redirect and not self._pending_redirect:
+                    return False
+                self._interrupt_requested = False
+                self._interrupt_message = None
+                if not preserve_redirect:
+                    self._pending_redirect = None
+        else:
+            if preserve_redirect and not getattr(self, "_pending_redirect", None):
+                return False
+            self._interrupt_requested = False
+            self._interrupt_message = None
+            if not preserve_redirect:
+                self._pending_redirect = None
         self._interrupt_thread_signal_pending = False
         if self._execution_thread_id is not None:
             _set_interrupt(False, self._execution_thread_id)
@@ -2919,6 +2939,7 @@ class AIAgent:
         if _steer_lock is not None:
             with _steer_lock:
                 self._pending_steer = None
+        return True
 
     def steer(self, text: str) -> bool:
         """
@@ -2955,6 +2976,118 @@ class AIAgent:
             else:
                 self._pending_steer = cleaned
         return True
+
+    def redirect(self, text: str) -> bool:
+        """Redirect the active turn without converting it into a new task.
+
+        During a normal Hermes model request this cancels only that request;
+        the conversation loop retains completed messages/tool results, records
+        the displayed partial reasoning as plain assistant context, appends the
+        correction as a real user message, and retries. During tool execution
+        it degrades to ``steer()`` so the tool can finish at a safe boundary.
+        Codex app-server has a native ``turn/steer`` operation and uses it
+        directly instead of cancelling.
+
+        Returns ``False`` when there is no live turn or the text is empty, so
+        surfaces can fall back to their existing next-turn queue.
+        """
+        if not text or not text.strip():
+            return False
+        cleaned = text.strip()
+
+        # Codex owns its internal reasoning/tool loop, so use its first-class
+        # active-turn steering protocol rather than interrupting the subprocess.
+        if getattr(self, "api_mode", None) == "codex_app_server":
+            _codex_session = getattr(self, "_codex_session", None)
+            _native_steer = getattr(_codex_session, "request_steer", None)
+            if callable(_native_steer):
+                _redirect_lock = getattr(self, "_pending_redirect_lock", None)
+                if _redirect_lock is not None:
+                    with _redirect_lock:
+                        if self._interrupt_requested:
+                            return False
+                elif self._interrupt_requested:
+                    return False
+                try:
+                    return bool(_native_steer(cleaned))
+                except Exception:
+                    logger.debug("Codex app-server turn/steer failed", exc_info=True)
+                    return False
+
+        # Never kill a tool merely to deliver conversational guidance. The
+        # existing steer drain puts it on the final tool result before the next
+        # model decision, including delegate_task children.
+        if getattr(self, "_executing_tools", False):
+            return self.steer(cleaned)
+
+        _model_active = getattr(self, "_model_request_active", None)
+        _redirect_lock = getattr(self, "_pending_redirect_lock", None)
+        if _redirect_lock is None:
+            if _model_active is None or not _model_active.is_set():
+                return False
+            existing = getattr(self, "_pending_redirect", None)
+            if self._interrupt_requested and not existing:
+                return False
+            self._pending_redirect = (
+                f"{existing}\n\n[Additional user correction]\n{cleaned}"
+                if existing
+                else cleaned
+            )
+            self._interrupt_requested = True
+            self._interrupt_message = None
+        else:
+            with _redirect_lock:
+                if _model_active is None or not _model_active.is_set():
+                    # The response completed before we acquired the state lock.
+                    # Reject so the surface queues a new turn.
+                    return False
+                if self._interrupt_requested and not self._pending_redirect:
+                    return False
+                if self._pending_redirect:
+                    self._pending_redirect = (
+                        f"{self._pending_redirect}\n\n"
+                        f"[Additional user correction]\n{cleaned}"
+                    )
+                else:
+                    self._pending_redirect = cleaned
+                self._interrupt_requested = True
+                self._interrupt_message = None
+
+        # Interrupt only the model request. Do not fan out to tool workers or
+        # child agents as interrupt() does.
+        _execution_thread_id = getattr(self, "_execution_thread_id", None)
+        if _execution_thread_id is not None:
+            _set_interrupt(True, _execution_thread_id)
+            self._interrupt_thread_signal_pending = False
+        else:
+            self._interrupt_thread_signal_pending = True
+        _abort_active_request = getattr(self, "_active_request_abort", None)
+        if callable(_abort_active_request):
+            try:
+                _abort_active_request("redirect_abort")
+            except Exception:
+                logger.debug("Failed to abort request for redirect", exc_info=True)
+        return True
+
+    def _has_pending_redirect(self) -> bool:
+        """Return whether an active-turn redirect is waiting to be applied."""
+        _redirect_lock = getattr(self, "_pending_redirect_lock", None)
+        if _redirect_lock is None:
+            return bool(getattr(self, "_pending_redirect", None))
+        with _redirect_lock:
+            return bool(self._pending_redirect)
+
+    def _drain_pending_redirect(self) -> Optional[str]:
+        """Return and clear pending active-turn correction text."""
+        _redirect_lock = getattr(self, "_pending_redirect_lock", None)
+        if _redirect_lock is None:
+            text = getattr(self, "_pending_redirect", None)
+            self._pending_redirect = None
+            return text
+        with _redirect_lock:
+            text = self._pending_redirect
+            self._pending_redirect = None
+        return text
 
     def _drain_pending_steer(self) -> Optional[str]:
         """Return the pending steer text (if any) and clear the slot.
@@ -4680,7 +4813,12 @@ class AIAgent:
         self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
         return True
 
-    def _apply_client_headers_for_base_url(self, base_url: str) -> None:
+    def _apply_client_headers_for_base_url(
+        self,
+        base_url: str,
+        *,
+        apply_user_headers: bool = True,
+    ) -> None:
         from agent.auxiliary_client import (
             build_nvidia_nim_headers,
             build_or_headers,
@@ -4720,10 +4858,10 @@ class AIAgent:
             else:
                 self._client_kwargs.pop("default_headers", None)
 
-        # User-configured overrides win over URL/profile defaults — keep them
-        # applied across credential swaps and client rebuilds, not just at
-        # first construction.
-        self._apply_user_default_headers()
+        # User-configured overrides win over URL/profile defaults for the same
+        # route. A credential swap to another endpoint must not inherit them.
+        if apply_user_headers:
+            self._apply_user_default_headers()
 
         # Per-provider extra HTTP headers (providers.<name>.extra_headers /
         # custom_providers[].extra_headers) — applied last so the most
@@ -4774,6 +4912,11 @@ class AIAgent:
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
+        from hermes_cli.route_identity import normalize_route_base_url
+
+        route_changed = normalize_route_base_url(self.base_url) != normalize_route_base_url(
+            runtime_base
+        )
 
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
@@ -4784,21 +4927,43 @@ class AIAgent:
                 pass
 
             self._anthropic_api_key = runtime_key
-            self._anthropic_base_url = runtime_base
+            self._anthropic_base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
             self._anthropic_client = build_anthropic_client(
-                runtime_key, runtime_base,
+                runtime_key, self._anthropic_base_url,
                 timeout=get_provider_request_timeout(self.provider, self.model),
             )
             self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
             self.api_key = runtime_key
-            self.base_url = runtime_base
+            self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
             return
 
         self.api_key = runtime_key
         self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
-        self._apply_client_headers_for_base_url(self.base_url)
+        self._client_kwargs.pop("ssl_verify", None)
+        self._client_kwargs.pop("ssl_ca_cert", None)
+        try:
+            from hermes_cli.config import (
+                apply_custom_provider_tls_to_client_kwargs,
+                get_compatible_custom_providers,
+                load_config_readonly,
+            )
+
+            apply_custom_provider_tls_to_client_kwargs(
+                self._client_kwargs,
+                str(self.base_url or ""),
+                get_compatible_custom_providers(load_config_readonly()),
+            )
+        except Exception:
+            logger.debug(
+                "custom-provider TLS resolution skipped on credential rotation",
+                exc_info=True,
+            )
+        self._apply_client_headers_for_base_url(
+            self.base_url,
+            apply_user_headers=not route_changed,
+        )
         self._replace_primary_openai_client(reason="credential_rotation")
 
     def _recover_with_credential_pool(
@@ -4910,6 +5075,7 @@ class AIAgent:
                         pass
                 self._record_streamed_assistant_text(tail)
         self._current_streamed_assistant_text = ""
+        self._current_streamed_reasoning_text = ""
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
@@ -4939,7 +5105,16 @@ class AIAgent:
         streamed = self._normalize_interim_visible_text(
             self._strip_think_blocks(getattr(self, "_current_streamed_assistant_text", "") or "")
         )
-        return bool(streamed) and streamed == visible_content
+        # Prefix match (not exact equality): the final response may be the
+        # streamed text plus a trailing delta, or the stream may have been
+        # partial when the verify nudge fired.  In both cases the streamed
+        # content is a prefix of the final — that's enough to mark it
+        # previewed (fails safe to a benign duplicate, never loses text).
+        # The reverse direction (streamed longer than final) is NOT matched:
+        # that could suppress a needed resend in the gateway path where
+        # already_streamed=True calls on_segment_break() instead of
+        # on_commentary() (#65919 review).
+        return bool(streamed) and visible_content.startswith(streamed)
 
     def _extract_codex_interim_visible_parts(
         self,
@@ -5044,8 +5219,19 @@ class AIAgent:
         except Exception:
             logger.debug("interim_assistant_callback error", exc_info=True)
 
-    def _emit_interim_assistant_message(self, assistant_msg: Dict[str, Any]) -> None:
-        """Surface a real mid-turn assistant commentary message to the UI layer."""
+    def _emit_interim_assistant_message(
+        self, assistant_msg: Dict[str, Any]
+    ) -> None:
+        """Surface a real mid-turn assistant commentary message to the UI layer.
+
+        Does NOT set ``_response_was_previewed`` — that flag means "the final
+        response was already shown to the user," but this helper is called for
+        ordinary tool-call narration, intermediate acknowledgements, and
+        verification candidates alike. Setting it here would cause the CLI to
+        suppress a *different* final summary (e.g. from ``_handle_max_iterations``)
+        when the only streamed text was unrelated mid-turn commentary. (#65919
+        review: response-loss blocker)
+        """
         cb = getattr(self, "interim_assistant_callback", None)
         if cb is None or not isinstance(assistant_msg, dict):
             return
@@ -5230,6 +5416,15 @@ class AIAgent:
                 cb(text)
             except Exception:
                 pass
+            else:
+                # Only checkpoint reasoning that a surface actually displayed.
+                # show_reasoning=false leaves the callback unset, so hidden
+                # provider thinking never becomes visible transcript content.
+                if isinstance(text, str) and text:
+                    self._current_streamed_reasoning_text = (
+                        getattr(self, "_current_streamed_reasoning_text", "")
+                        + text
+                    )
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify display layer that the model is generating tool call arguments.
@@ -5391,128 +5586,29 @@ class AIAgent:
         self._anthropic_image_fallback_cache[cache_key] = note
         return note
 
-    def _active_model_supports_vision(self) -> bool:
-        """Return True when the active chat model can inspect images natively."""
-        cache_key = (
-            str(getattr(self, "provider", "") or "").strip().lower(),
-            str(getattr(self, "model", "") or "").strip().lower(),
-            str(getattr(self, "base_url", "") or "").strip().lower(),
-        )
-        cached = getattr(self, "_supports_vision_cache", None)
-        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == cache_key:
-            return bool(cached[1])
+    def _model_supports_vision(self) -> bool:
+        """Return True if the active provider+model reports native vision.
 
-        provider = cache_key[0]
-        model = cache_key[1]
-        supports = False
+        Used to decide whether to strip image content parts from API-bound
+        messages (for non-vision models) or let the provider adapter handle
+        them natively (for vision-capable models).
 
+        Resolution order (see ``agent.image_routing._supports_vision_override``):
+          1. ``model.supports_vision`` (top-level, single-model shortcut)
+          2. ``providers.<provider>.models.<model>.supports_vision``
+          3. models.dev capability lookup
+        Custom/local models absent from models.dev would otherwise be
+        misclassified as non-vision and have their images stripped.
+        """
         try:
             from hermes_cli.config import load_config
             from agent.image_routing import _lookup_supports_vision
-
-            override = _lookup_supports_vision(provider, model, load_config())
-            if override is not None:
-                supports = bool(override)
+            cfg = load_config()
+            provider = (getattr(self, "provider", "") or "").strip()
+            model = (getattr(self, "model", "") or "").strip()
+            return _lookup_supports_vision(provider, model, cfg) is True
         except Exception:
-            logger.debug("Model vision config lookup failed", exc_info=True)
-
-        if not supports:
-            try:
-                from agent.models_dev import get_model_info, get_model_info_any_provider
-
-                info = None
-                if provider and model:
-                    info = get_model_info(provider, model)
-                if info is None and model:
-                    info = get_model_info_any_provider(model)
-                if info is None and "/" in model:
-                    info = get_model_info_any_provider(model.split("/", 1)[1])
-                if info is not None:
-                    supports = bool(info.supports_vision())
-            except Exception:
-                logger.debug("Model vision capability lookup failed", exc_info=True)
-
-        if not supports:
-            heuristic_tokens = (
-                "gemini",
-                "gpt-4o",
-                "gpt-4.1",
-                "gpt-5",
-                "claude-3",
-                "claude-sonnet-4",
-                "claude-opus-4",
-                "claude-4",
-                "qwen2-vl",
-                "qwen2.5-vl",
-                "qwen-vl",
-                "qvq",
-                "llava",
-                "minicpm-v",
-                "pixtral",
-                "glm-4v",
-            )
-            supports = provider in {"google", "gemini"} or any(token in model for token in heuristic_tokens)
-
-        self._supports_vision_cache = (cache_key, supports)
-        return supports
-
-    def _model_supports_vision(self) -> bool:
-        """Backward-compatible alias for active model vision capability."""
-        return self._active_model_supports_vision()
-
-    def _build_browser_screenshot_api_followup(self, tool_content: Any) -> Optional[Dict[str, Any]]:
-        """Build an ephemeral user image message from a browser_screenshot result."""
-        if not self._active_model_supports_vision():
-            return None
-
-        try:
-            parsed = json.loads(tool_content) if isinstance(tool_content, str) else tool_content
-        except (json.JSONDecodeError, TypeError, ValueError):
-            parsed = None
-            if isinstance(tool_content, str) and "<untrusted_tool_result" in tool_content:
-                match = re.search(
-                    r"<untrusted_tool_result[^>]*>\n.*?\n\n(.*)\n</untrusted_tool_result>\s*$",
-                    tool_content,
-                    re.DOTALL,
-                )
-                if match:
-                    try:
-                        parsed = json.loads(match.group(1))
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        parsed = None
-            if parsed is None:
-                return None
-
-        if not isinstance(parsed, dict) or not parsed.get("success"):
-            return None
-
-        screenshot_path = parsed.get("screenshot_path")
-        if not screenshot_path:
-            return None
-
-        path = Path(str(screenshot_path)).expanduser()
-        if not path.exists():
-            return None
-
-        try:
-            from tools.vision_tools import _image_to_base64_data_url
-
-            data_url = _image_to_base64_data_url(path, mime_type=parsed.get("mime_type"))
-        except Exception:
-            logger.debug("Failed to convert browser screenshot to data URL", exc_info=True)
-            return None
-
-        guidance = (
-            "Internal browser screenshot from the previous tool call. "
-            "Inspect this image directly and continue the task without asking the user to re-upload it."
-        )
-        return {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": guidance},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }
+            return False
 
     def _provider_supports_vision_tool_messages(self) -> bool:
         """Return True if the active provider accepts list-type tool content.
@@ -5606,7 +5702,7 @@ class AIAgent:
         # native Anthropic ``{"type": "image", "source": ...}`` blocks. When
         # the active model supports vision we let the adapter do its job and
         # skip this legacy text-fallback preprocessor entirely.
-        if self._active_model_supports_vision():
+        if self._model_supports_vision():
             return api_messages
 
         # Non-vision Anthropic model (rare today, but keep the fallback for
@@ -5636,7 +5732,7 @@ class AIAgent:
         ):
             return api_messages
 
-        if self._active_model_supports_vision():
+        if self._model_supports_vision():
             return api_messages
 
         transformed = copy.deepcopy(api_messages)
@@ -6193,14 +6289,13 @@ class AIAgent:
         Responses API compatibility (e.g. if the session falls back to a
         Codex provider later).
 
-        Fields stripped: call_id, response_item_id, provider_data, and
-        extra_content for non-Gemini targets.
+        Fields stripped: call_id, response_item_id, extra_content (model-gated)
         """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
         from agent.transports.chat_completions import _model_consumes_thought_signature
-        _STRIP_KEYS = {"call_id", "response_item_id", "provider_data"}
+        _STRIP_KEYS = {"call_id", "response_item_id"}
         if not _model_consumes_thought_signature(model):
             _STRIP_KEYS = _STRIP_KEYS | {"extra_content"}
         api_msg["tool_calls"] = [
@@ -6208,92 +6303,6 @@ class AIAgent:
             if isinstance(tc, dict) else tc
             for tc in tool_calls
         ]
-        return api_msg
-
-    def _uses_gemini_native_protocol(
-        self,
-        *,
-        provider: Optional[str] = None,
-        base_url: Optional[str] = None,
-    ) -> bool:
-        """Return True when the active route expects Gemini native ``contents[]``."""
-        resolved_provider = provider or self.provider
-        resolved_base_url = str(base_url if base_url is not None else (self.base_url or ""))
-        if resolved_provider == "google-gemini-cli" or resolved_base_url.startswith("cloudcode-pa://"):
-            return True
-        try:
-            from agent.gemini_native_adapter import is_native_gemini_base_url
-
-            return is_native_gemini_base_url(resolved_base_url)
-        except Exception:
-            return False
-
-    def _preserves_provider_data_for_route(self) -> bool:
-        """Return True when the active route consumes stored provider metadata."""
-        return self._uses_gemini_native_protocol()
-
-    def _preserve_provider_data(self, source: Any) -> Optional[Dict[str, Any]]:
-        """Return a sanitized deep copy of opaque provider replay metadata."""
-        provider_data = source
-        if not isinstance(provider_data, dict):
-            provider_data = getattr(source, "provider_data", None)
-        if provider_data is None and hasattr(source, "model_extra"):
-            model_extra = getattr(source, "model_extra", None) or {}
-            if isinstance(model_extra, dict):
-                provider_data = model_extra.get("provider_data")
-        if provider_data is None:
-            gemini_content = getattr(source, "gemini_content", None)
-            if gemini_content is None and hasattr(source, "model_extra"):
-                model_extra = getattr(source, "model_extra", None) or {}
-                if isinstance(model_extra, dict):
-                    gemini_content = model_extra.get("gemini_content")
-            if isinstance(gemini_content, dict):
-                provider_data = {"google": {"gemini_content": gemini_content}}
-        if provider_data is None:
-            extra = getattr(source, "extra_content", None)
-            if extra is None and hasattr(source, "model_extra"):
-                model_extra = getattr(source, "model_extra", None) or {}
-                if isinstance(model_extra, dict):
-                    extra = model_extra.get("extra_content")
-            if extra is not None:
-                if hasattr(extra, "model_dump"):
-                    extra = extra.model_dump()
-                provider_data = {"google": {"extra_content": extra}}
-        if not isinstance(provider_data, dict):
-            return None
-        preserved = copy.deepcopy(provider_data)
-        _sanitize_structure_surrogates(preserved)
-        return preserved or None
-
-    def _prepare_api_message(
-        self,
-        msg: dict,
-        *,
-        preserve_provider_data: bool,
-        sanitize_tool_calls: bool,
-    ) -> dict:
-        """Convert an internal message dict to the API-facing payload shape."""
-        api_msg = msg.copy()
-        role = msg.get("role")
-        if role == "assistant":
-            if preserve_provider_data:
-                api_msg.pop("reasoning_content", None)
-                if not isinstance(api_msg.get("provider_data"), dict):
-                    api_msg.pop("provider_data", None)
-            else:
-                self._copy_reasoning_content_for_api(msg, api_msg)
-                api_msg.pop("provider_data", None)
-        else:
-            api_msg.pop("provider_data", None)
-
-        api_msg.pop("gemini_content", None)
-        api_msg.pop("reasoning", None)
-        api_msg.pop("finish_reason", None)
-        api_msg.pop("timestamp", None)
-        api_msg.pop("_thinking_prefill", None)
-        api_msg.pop("_timestamp", None)
-        if sanitize_tool_calls and not preserve_provider_data:
-            self._sanitize_tool_calls_for_strict_api(api_msg, model=self.model)
         return api_msg
 
     @staticmethod
@@ -6320,7 +6329,17 @@ class AIAgent:
         """
         return self.api_mode != "codex_responses"
 
-    def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None, force: bool = False) -> tuple:
+    def _compress_context(
+        self,
+        messages: list,
+        system_message: str,
+        *,
+        approx_tokens: int = None,
+        task_id: str = "default",
+        focus_topic: str = None,
+        force: bool = False,
+        defer_context_engine_notification: bool = False,
+    ) -> tuple:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
 
         ``force=True`` is passed by the manual ``/compress`` slash command
@@ -6333,6 +6352,7 @@ class AIAgent:
             self, messages, system_message,
             approx_tokens=approx_tokens, task_id=task_id, focus_topic=focus_topic,
             force=force,
+            defer_context_engine_notification=defer_context_engine_notification,
         )
 
     def _set_tool_guardrail_halt(self, decision: ToolGuardrailDecision) -> None:
