@@ -217,10 +217,6 @@ the competing PRs into plugins against that interface.
 source .venv/bin/activate   # or: source venv/bin/activate
 ```
 
-This workstation's runtime dependency bundle is intentionally external to the
-repository. Use `/home/sonya/.hermes/scripts/sync-hermes-dev-runtime.sh` after
-updates instead of adding a host-specific aggregate extra to `pyproject.toml`.
-
 `scripts/run_tests.sh` probes `.venv` first, then `venv`, then
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
