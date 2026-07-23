@@ -1,426 +1,264 @@
 # Dev Branch Local Change Log
 
-This file tracks intentional local changes carried by the long-lived `dev`
-branch. Use it during upstream merges to decide whether to keep local behavior,
-accept upstream replacements, or reconcile both.
+This file is the source of truth for intentional differences carried by the
+long-lived `dev` branch. Consult it before merging upstream into `dev`.
 
-The default rule is: keep upstream changes unless they remove one of the local
-behaviors listed here. When a conflict touches a listed file, preserve the local
-behavior and adapt it to the upstream structure.
+## Current Audit
 
-## Current Branch Audit
+Audited on 2026-07-22 after merging `main` at `a23e39fe6`.
 
-Audited on 2026-06-04 after merging upstream `main` commit `d29caf382` into
-`dev` as `a6b35159a`.
+The branch was pruned to remove fork-only runtime features that upstream now
+supersedes or that are no longer used. The pre-prune state remains available at
+`backup/dev-pre-prune-20260722-210022`.
 
-Current branch shape:
-- `dev` is current with `origin/main` but carries local integration history.
-- Live fork footprint versus upstream is roughly 61 files and 4.4k added lines.
-- Highest-conflict surface remains core runtime/provider files, especially
-  `run_agent.py`, `agent/conversation_loop.py`,
-  `agent/transports/chat_completions.py`, `hermes_state.py`, and gateway config.
-- `git rerere` is enabled locally so repeated conflict resolutions can be
-  remembered on future merges.
+Pre-existing uncommitted edits to `AGENTS.md` and `package-lock.json` belong to
+the user and are not part of this audit.
 
-Prune/isolate status:
-- `keep-isolate`: feature is still useful but should be moved out of hot core
-  files or kept in a small module/tool boundary where practical.
-- `audit`: upstream now carries part of the behavior; compare exact semantics
-  before preserving all local code.
-- `keep`: small local workstation behavior that is still required.
-- `prune-candidate`: likely obsolete or mostly upstreamed; avoid preserving old
-  conflict rules unless tests or runtime config prove the behavior is still
-  missing upstream.
-
-## Local Features To Preserve Or Prune
-
-### Discord Reaction Tool Support
-
-Status: `keep-isolate`
-
-Commits: `ba911ac75`
-
-Behavior:
-- The user-facing `discord` tool exposes `add_reaction`.
-- `add_reaction` can default to the active Discord session channel and the
-  current user's latest message.
-- Automatic gateway processing reactions are intentionally disabled, while the
-  explicit tool action remains available.
-- Discord tool token discovery can fall back to Hermes `.env` files for profile
-  subprocesses and tests.
-
-Main files:
-- `tools/discord_tool.py`
-- `gateway/platforms/discord.py`
-- `gateway/config.py`
-- `tests/tools/test_discord_tool.py`
-- `tests/gateway/test_discord_reactions.py`
-
-Current audit note:
-- Still fork-only in `tools/discord_tool.py`; upstream Discord adapter has
-  internal reaction helpers, but not the user-facing tool action.
-- Prefer extracting this behind a small tool/plugin boundary before rebuilding
-  `dev-v2`.
-
-Merge rule:
-- Keep local `discord.add_reaction` action, session defaulting, and tests.
-- Keep `_reactions_enabled()` disabled for automatic gateway processing
-  indicators unless we explicitly decide to re-enable them.
-- Accept upstream Discord adapter changes around command sync, lazy deps,
-  auth, UI views, and voice handling when they do not re-enable automatic
-  processing reactions or remove the explicit reaction tool.
-
-### Discord And Cron Media Delivery
-
-Status: `keep-isolate`
-
-Commits: `465d6fc9b`, `f54b8a9a9`
-
-Behavior:
-- Cron delivery supports Telegram voice media and Discord standalone media.
-- Discord media send path tries Discord voice delivery for voice media before
-  falling back to regular attachments.
-- Discord message text avoids extra local part tags.
-
-Main files:
-- `tools/send_message_tool.py`
-- `cron/scheduler.py`
-- `gateway/platforms/discord.py`
-- `tests/tools/test_send_message_tool.py`
-- `tests/cron/test_scheduler.py`
-
-Current audit note:
-- Still a live fork delta, concentrated in `tools/send_message_tool.py` plus
-  delivery tests.
-- Keep for now, but isolate behind media-delivery helpers if this continues to
-  conflict with upstream send-message refactors.
-
-Merge rule:
-- Keep local Discord voice-first media sending and standalone media delivery.
-- Accept upstream send-message refactors if the voice-first and fallback
-  semantics stay covered by tests.
-
-### Honcho Memory And Observation Behavior
-
-Status: `prune-candidate`
-
-Commits: `467f2e8fa`, `28220aa5f`, `8197fa6a1`, `790a3c109`, `dd17afaae`,
-`544d624c9`, `4096e3a46`
-
-Behavior:
-- Honcho supports configurable bidirectional observation mode.
-- Per-turn Honcho injection is disabled locally; observation context is kept
-  first-turn / explicit rather than injected every turn.
-- Gateway user aliases feed observation context.
-- Honcho local behavior has been aligned with the newer upstream plugin shape.
-
-Main files:
-- `plugins/memory/honcho/__init__.py`
-- `plugins/memory/honcho/session.py`
-- `plugins/memory/honcho/cli.py`
-- `plugins/memory/honcho/client.py`
-- `plugins/memory/honcho/README.md`
-- `gateway/config.py`
-- `gateway/platforms/base.py`
-- `hermes_cli/config.py`
-- `hermes_cli/main.py`
-- `run_agent.py`
-- `tests/honcho_plugin/test_session.py`
-- `tests/honcho_plugin/test_client.py`
-- `tests/gateway/test_config.py`
-- `tests/gateway/test_platform_base.py`
-
-Current audit note:
-- The listed `plugins/memory/honcho/*` files are no longer in the live fork
-  diff, and upstream now has bidirectional-observation compatibility comments.
-- Treat this as mostly upstreamed. Preserve only the remaining `user_aliases`
-  behavior if runtime config still depends on it.
-
-Merge rule:
-- Keep the local no-per-turn-injection default only if upstream no longer
-  provides the same default.
-- Keep bidirectional observation mode and user-alias observation context.
-- Accept upstream Honcho API/client/session refactors when the local defaults
-  and tests are preserved.
-- If upstream introduces a cleaner equivalent, prefer upstream implementation
-  but keep local config compatibility.
-
-### Provider Replay And Gemini Reasoning
-
-Status: `audit`
-
-Commits: `800f84615`, `422b49c57`, `e206176fb`, `2ea753369`, `672da089b`
-
-Behavior:
-- Gemini native and Gemini Cloud Code reasoning traces are preserved.
-- Gemini Cloud Code tool result names are fixed for replay.
-- Provider replay metadata is normalized through `provider_data`, including
-  Gemini content, Codex reasoning/message items, reasoning details, and
-  OpenAI-compatible extra content.
-- Native Gemini profile defaults are preserved.
-- Loopback native Gemini proxy endpoints exposing `/v1beta` are treated as
-  native Gemini, not generic OpenAI-compatible local servers, so local
-  context-length probing is skipped for those URLs.
-
-Main files:
-- `agent/gemini_native_adapter.py`
-- `agent/gemini_cloudcode_adapter.py`
-- `agent/gemini_content_utils.py`
-- `agent/transports/types.py`
-- `agent/transports/chat_completions.py`
-- `agent/transports/codex.py`
-- `gateway/run.py`
-- `gateway/session.py`
-- `hermes_state.py`
-- `run_agent.py`
-- `plugins/model-providers/gemini/__init__.py`
-- `hermes_cli/doctor.py`
-- `hermes_cli/model_switch.py`
-- `hermes_cli/providers.py`
-- `tests/agent/test_gemini_cloudcode.py`
-- `tests/agent/test_gemini_native_adapter.py`
-- `tests/agent/transports/test_chat_completions.py`
-- `tests/agent/transports/test_types.py`
-- `tests/run_agent/test_provider_parity.py`
-- `tests/run_agent/test_streaming.py`
-- `tests/test_hermes_state.py`
-
-Current audit note:
-- Upstream now has first-class `provider_data` in transport types and provider
-  adapters. Local code still adds namespaced Google/Codex compatibility,
-  `gemini_content` persistence, and route-specific preservation.
-- This is the highest-conflict area. Audit exact tests before deciding whether
-  to keep all local DB/runtime changes or reduce to upstream behavior plus a
-  small compatibility shim.
-
-Merge rule:
-- Keep reasoning/replay fidelity fields unless upstream has an exact
-  replacement with tests for the same providers.
-- Preserve `provider_data` namespace compatibility; do not collapse local
-  Google/Codex replay metadata back into one-off top-level fields only.
-- Preserve native Gemini base URL detection for loopback `/v1beta` proxy
-  endpoints and skip generic local-server probes for those endpoints.
-- For conflicts, prefer upstream structure but re-add local replay fields and
-  tests.
-
-### Native Browser Screenshot Tool Path
-
-Status: `keep-isolate`
-
-Commits: `bfd57f467`, `71c281e00`
-
-Behavior:
-- Adds a native browser screenshot tool path and fixes screenshot path handling.
-
-Main files:
-- `tools/browser_tool.py`
-- `tools/browser_camofox.py`
-- `run_agent.py`
-- `agent/display.py`
-- `agent/prompt_builder.py`
-- `model_tools.py`
-- `toolsets.py`
-- `tests/run_agent/test_run_agent.py`
-- `tests/tools/test_browser_console.py`
-
-Current audit note:
-- Upstream already stores browser screenshots under Hermes cache paths. The
-  remaining fork value is the separate `browser_screenshot` tool and the
-  vision-capable auto-follow-up path in `run_agent.py`.
-- Prefer extracting the tool path and minimizing the `run_agent.py` hook before
-  rebuilding the branch.
-
-Merge rule:
-- Keep the native screenshot path unless upstream fully replaces it with a
-  tested equivalent.
-- Accept upstream browser backend changes if screenshot path handling remains
-  correct.
+## Active Local Changes Pending A Decision
 
 ### Local Workstation Runtime Extra
 
-Status: `keep`
+Status: `decision-pending`
 
 Commits: `4cda99fbf`, `fb23b2b41`
 
-Behavior:
-- Adds the canonical `local` extra used by this workstation runtime.
-- `local` aliases the extras expected by the active shared environment:
-  `dev`, `cli`, `messaging`, `cron`, `honcho`, `pty`, `google`, and `web`
-  as currently represented in `pyproject.toml`.
-
-Main files:
+Files:
 - `pyproject.toml`
 - `uv.lock`
 - `AGENTS.md`
 
-Merge rule:
-- Always keep the `local` extra.
-- When upstream changes dependency groups or extras, update `local` to include
-  any extra required by configured local profiles, plugins, platforms, or
-  dashboards.
-- Regenerate `uv.lock` with `uv sync --extra local` after conflicts rather
-  than hand-editing lockfile entries.
+Behavior:
+- Adds a `local` extra that composes the `dev`, `cli`, `messaging`, `cron`,
+  `honcho`, `pty`, `google`, and `web` extras used by this workstation.
+- Keeps the shared runtime reproducible with
+  `uv sync --locked --extra local`.
 
-### Retired: Local Kanban Orchestration And Worker Daemons
+Merge rule:
+- Preserve until an external workstation dependency manifest or another
+  replacement is explicitly selected.
+- After dependency conflicts, validate with `uv lock --check`; do not
+  hand-delete the `local` markers from `uv.lock`.
+
+### npm Lockfile Pinning
+
+Status: `decision-pending`
+
+Commits: `45c011128`, `fd6cd5bb2`
+
+Files:
+- `.github/actions/pin-npm/action.yml`
+- `.github/workflows/deploy-site.yml`
+- `.github/workflows/docs-site-checks.yml`
+- `.github/workflows/upload_to_pypi.yml`
+- `package.json`
+
+Behavior:
+- Pins npm for deterministic lockfile generation in selected CI workflows.
+- Avoids imposing that CI pin on normal runtime installs.
+
+Merge rule:
+- Preserve pending a separate decision.
+- Upstream deleted `upload_to_pypi.yml`; the local copy is intentionally
+  retained only while this decision is open.
+
+### Request Debug Dump Enhancement
+
+Status: `decision-pending`
+
+Files:
+- `agent/agent_runtime_helpers.py`
+- `tests/run_agent/test_run_agent_codex_responses.py`
+
+Behavior:
+- Optionally includes the assembled system prompt and message list in request
+  debug dumps.
+- Retains only the configured number of dump files.
+- Enables dumps through `debug.request_dumps.enabled` as well as the existing
+  environment switch.
+
+Merge rule:
+- Preserve pending a separate decision.
+- This is core-runtime instrumentation and is not a good plugin candidate
+  unless upstream exposes a request-debug hook.
+
+### Optional Turn-Context Callback Compatibility
+
+Status: `decision-pending`
+
+Commit: `88da9ebaf`
+
+File:
+- `agent/turn_context.py`
+
+Behavior:
+- Keeps `build_current_time_user_context` as an optional keyword accepted by
+  `build_turn_context`.
+- The callback is now unused because the fork-only user-turn timestamp
+  injection was retired; this is currently a one-line compatibility shim.
+
+Merge rule:
+- Preserve only until the caller-compatibility decision is made. Removing it
+  is the cleanest option if no external caller still passes the keyword.
+
+## Runtime Features Moved Outside Core
+
+### Discord Explicit Reaction Tool
+
+Status: `plugin`
+
+Former core commit: `ba911ac75`
+
+Plugin:
+- `/home/sonya/.hermes/profiles/yuri/plugins/discord-reactions/plugin.yaml`
+- `/home/sonya/.hermes/profiles/yuri/plugins/discord-reactions/__init__.py`
+
+Behavior:
+- Registers `discord_add_reaction` into the existing `hermes-discord` toolset.
+- Defaults channel and message IDs from the active Discord session.
+- Uses `DISCORD_BOT_TOKEN` and the Discord reaction endpoint directly.
+
+Core removal commit:
+- `9fffca3bb`
+
+Merge rule:
+- Do not restore the former `tools/discord_tool.py` action or gateway config
+  delta. Maintain the standalone Yuri plugin instead.
+
+## Retired Local Features
+
+### Kanban Orchestration And Worker Daemons
 
 Status: `retired`
 
-Retired on: 2026-07-22
+Source commits:
+- `535976a01`
+- `b7933e81b`
+- `b1c8d8e19`
+- `c5fa84d32`
 
-Source commits: `535976a01`, `b7933e81b`, `b1c8d8e19`, `c5fa84d32`
-
-Removal commits: `53f63b02f`, `f4e24be82`, `5e2f0ab45`
+Removal commits:
+- `53f63b02f`
+- `f4e24be82`
+- `5e2f0ab45`
+- `01439c2a6`
 
 Decision:
-- Remove the fork-only parent-agent wakeup, immediate dispatcher nudge, and
-  persistent worker-daemon layers. Upstream `delegate_task` now covers the
-  required background delegation workflow without carrying a parallel
-  Kanban execution architecture in hot gateway, CLI, database, and tool files.
-- Preserve upstream Kanban behavior, including the current single-writer
-  dispatch lock, WAL checkpointing, task lifecycle, and notification support.
-- Keep the existing board database as historical data; this retirement does
-  not delete task records.
-
-Runtime cleanup:
-- Disabled gateway Kanban dispatch and removed the local Kanban skills/toolset
-  from the Yuri profile.
-- Disabled and stopped
-  `hermes-kanban-worker@executor-codex.service` and
-  `hermes-kanban-worker@executor-general.service`; both were inactive after
-  cleanup.
-- Retained the user service template as dormant reference material so the
-  design can be revisited without reintroducing it into the runtime.
-- Preserved the pre-removal branch at
-  `backup/dev-pre-prune-20260722-210022`.
+- Use upstream `delegate_task` instead of a parallel fork-only Kanban
+  orchestration architecture.
+- Keep upstream Kanban behavior and the existing board database.
+- Yuri gateway dispatch is disabled and the local Kanban skills/toolset are no
+  longer enabled.
+- `hermes-kanban-worker@executor-codex.service` and
+  `hermes-kanban-worker@executor-general.service` are disabled and inactive.
+- The systemd template remains as dormant reference material.
 
 Merge rule:
-- Do not resurrect these fork-only Kanban layers during future upstream
-  merges. Prefer upstream `delegate_task` and upstream Kanban implementations.
-- The source commits and backup branch remain available if a narrowly scoped
-  behavior needs to be reconsidered later.
+- Do not resurrect parent-agent wakeups, immediate dispatcher nudges, or
+  persistent Kanban worker daemons.
 
-### Profile Identity Prompt Overlay
+### User-Turn Timestamp Injection And Replay
 
-Status: `keep-isolate`
+Status: `retired`
 
-Commits: `6558e16ec`
+Source commits:
+- `d330f5c88`
+- `369341adc`
+- `2df216078`
+- `2d2402078`
+- `c5d635cba`
 
-Behavior:
-- Profiles may carry a root-level `IDENTITY.md` in addition to `SOUL.md`.
-- `IDENTITY.md` is loaded only from the active Hermes profile root, not from
-  the current workspace, and is appended to the stable system prompt after the
-  SOUL/default identity block.
-- Profile cloning copies `IDENTITY.md` alongside `config.yaml`, `.env`, and
-  `SOUL.md`.
-
-Main files:
-- `agent/prompt_builder.py`
-- `agent/system_prompt.py`
-- `hermes_cli/profiles.py`
-- `run_agent.py`
-- `tests/agent/test_prompt_builder.py`
-- `tests/agent/test_system_prompt.py`
+Decision:
+- Use upstream gateway message timestamps.
+- Yuri enables `gateway.message_timestamps.enabled`.
 
 Merge rule:
-- Preserve `IDENTITY.md` as a profile-root-only stable prompt overlay.
-- Do not let workspace-local `IDENTITY.md` files become context files unless a
-  separate explicit feature adds that behavior.
-- Keep `SOUL.md` as the primary identity slot; `IDENTITY.md` is additive.
+- Do not restore `_inject_current_time_in_user_turn`, timestamp sidecars, or
+  replay reconstruction.
 
-### Chat Completion Streaming Gemini Replay Fix
+### Discord And Cron Media Delivery
 
-Status: `keep`
+Status: `retired`
 
-Commits: `b12b177f4`
+Source commits:
+- `465d6fc9b`
+- `f54b8a9a9`
 
-Behavior:
-- Imports `copy` for the chat-completion streaming path that deep-copies
-  Gemini provider parts before mutating accumulated tool-call state.
+Decision:
+- Adopt upstream media delivery behavior.
 
-Main files:
-- `agent/chat_completion_helpers.py`
+### Honcho Memory And Observation Fork
 
-Merge rule:
-- Preserve the `copy.deepcopy` import/use when keeping the Gemini provider
-  replay accumulation path.
+Status: `retired`
 
-### Agent-Facing Time Context
+Source commits:
+- `467f2e8fa`
+- `28220aa5f`
+- `8197fa6a1`
+- `790a3c109`
+- `dd17afaae`
+- `544d624c9`
+- `4096e3a46`
 
-Status: `keep-isolate`
+Decision:
+- Adopt the upstream Honcho plugin and remove gateway user-alias/injection
+  deltas.
 
-Commits: `d330f5c88`, `369341adc`, `2df216078`
+### Gemini Replay And Loopback Compatibility
 
-Behavior:
-- Agent receives current time context during conversations.
-- Local implementation injects current time into user turns with a `system_time`
-  tag.
-- Agent-facing timestamps use 24-hour time.
-- Stronger upstream behavior is acceptable, including always-on current time or
-  timestamps on all messages.
+Status: `retired`
 
-Main files:
-- `run_agent.py`
-- `hermes_cli/config.py`
-- `cli-config.yaml.example`
-- `tests/run_agent/test_run_agent.py`
+Source commits:
+- `800f84615`
+- `422b49c57`
+- `e206176fb`
+- `672da089b`
+- `a9890ee85`
+- `b12b177f4`
 
-Current audit note:
-- Still a live config/runtime delta. If pre-LLM hooks can inject this reliably,
-  move it there to avoid touching `run_agent.py` and conversation assembly.
+Decision:
+- Adopt upstream provider replay and Gemini behavior. The local runtime does
+  not currently use Gemini.
 
-Merge rule:
-- Preserve the guarantee that the agent has at least the current time.
-- Prefer upstream behavior if it provides always-on current time or timestamps
-  on all messages.
-- Keep 24-hour agent-facing timestamp formatting where local code controls the
-  presentation.
+### Native Browser Screenshot Path
+
+Status: `retired`
+
+Source commits:
+- `bfd57f467`
+- `71c281e00`
+
+Decision:
+- Adopt upstream browser screenshot behavior.
+
+### Profile Identity Overlay
+
+Status: `retired`
+
+Source commit:
+- `6558e16ec`
+
+Decision:
+- Merge Yuri's identity rules into `SOUL.md`.
+- The former file is retained outside the repository as
+  `IDENTITY.md.retired-20260722`.
+- Do not restore the core `IDENTITY.md` prompt overlay.
 
 ### TUI Profile Branding
 
-Status: `keep`
+Status: `retired`
 
-Commits: `6d5388a79`
+Source commit:
+- `6d5388a79`
 
-Behavior:
-- TUI banner can reflect profile branding.
-
-Main files:
-- `ui-tui/src/components/branding.tsx`
-- `ui-tui/src/theme.ts`
-- `ui-tui/packages/hermes-ink/src/ink/dom.ts`
-
-Current audit note:
-- Tiny live delta in `ui-tui/src/theme.ts`; low update cost. Keep unless
-  upstream adds equivalent branding fields.
-
-Merge rule:
-- Keep profile-branded banner support.
-- Accept upstream TUI layout/rendering changes when profile branding remains
-  wired.
-
-## Pruning Plan
-
-1. Mark each status above as final: `keep`, `isolate`, or `remove`.
-2. For `audit` items, compare upstream tests and runtime behavior before
-   preserving local code.
-3. Build a fresh `dev-v2` from `origin/main` by cherry-picking only final
-   `keep` items and extracting `keep-isolate` items behind smaller boundaries.
-4. Keep the current `dev` branch intact until `dev-v2` has passed runtime sync,
-   focused tests, and gateway/dashboard restart checks.
-5. Once `dev-v2` is proven, move `fork/dev` to it intentionally.
+Decision:
+- Adopt upstream TUI branding and theme behavior.
 
 ## Merge Checklist
 
-1. Confirm `git config rerere.enabled` is `true` in the Hermes worktrees.
-2. Update clean `main` from `origin/main` and push `fork/main`.
-3. Merge any integration branch into `dev` before bringing in fresh `main`
-   updates, if that integration branch contains unfinished local work.
-4. Merge `main` into `dev`.
-5. For conflicts, consult the entries above before choosing either side.
-6. If `rerere` applies a resolution, still inspect the hunk and run focused
-   tests before committing.
-7. Regenerate dependencies with `uv sync --extra local`.
-8. Run focused tests for any listed local feature touched by the merge.
-9. Commit and push `dev` to `fork/dev`.
-10. Restart Hermes gateways and dashboards from the updated `hermes-dev`
-    environment.
+1. Confirm `main` matches `origin/main`.
+2. Read this log before resolving conflicts in `dev`.
+3. Merge `main` into `dev`; do not rebase the long-lived branch.
+4. Preserve only entries still marked `decision-pending` or `plugin`.
+5. Do not resurrect entries marked `retired`.
+6. Run `uv lock --check` when `pyproject.toml` or `uv.lock` changes.
+7. Run focused tests for every active local source delta touched by the merge.
