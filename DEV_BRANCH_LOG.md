@@ -261,65 +261,43 @@ Merge rule:
 - Regenerate `uv.lock` with `uv sync --extra local` after conflicts rather
   than hand-editing lockfile entries.
 
-### Kanban Gateway Orchestration Wakeups
+### Retired: Local Kanban Orchestration And Worker Daemons
 
-Status: `keep-isolate`
+Status: `retired`
 
-Commits: `535976a01`, `b7933e81b`, `b1c8d8e19`
+Retired on: 2026-07-22
 
-Behavior:
-- Gateway-created kanban tasks are stamped with the originating gateway
-  `session_id` from task-local session context.
-- Terminal kanban task events for session-stamped tasks wake the parent
-  gateway agent with a synthetic internal message, instead of only sending a
-  human-facing platform notification.
-- Session-id wakeups are also tracked through `kanban_agent_notify_cursors`
-  for tasks without a human-facing chat subscription. Chat-backed task
-  deliveries advance the agent cursor too, so terminal events are not replayed
-  after the chat subscription is removed.
-- Worker handoff text surfaced into gateway agent context is quoted and
-  labelled as untrusted data so child summaries cannot become parent-system
-  instructions.
-- Session-stamped `kanban_create`, `kanban_unblock`, and `kanban_link`
-  nudge the embedded gateway dispatcher immediately instead of waiting for the
-  next `dispatch_interval_seconds` poll.
-- Gateway-origin follow-up mutations subscribe the active chat to future
-  terminal events. Follow-up subscriptions start at the current event cursor
-  to avoid replaying old completed/blocked events.
-- `kanban_comment` attaches the current session/chat for future notification
-  context but remains passive: it does not make a task runnable or wake the
-  dispatcher by itself.
+Source commits: `535976a01`, `b7933e81b`, `b1c8d8e19`, `c5fa84d32`
 
-Main files:
-- `gateway/run.py`
-- `hermes_cli/kanban_db.py`
-- `gateway/session_context.py`
-- `gateway/kanban_dispatch_signal.py`
-- `tools/kanban_tools.py`
-- `tests/gateway/test_kanban_notifier.py`
-- `tests/gateway/test_kanban_dispatch_signal.py`
-- `tests/tools/test_kanban_tools.py`
+Removal commits: `53f63b02f`, `f4e24be82`, `5e2f0ab45`
 
-Current audit note:
-- The dispatcher nudge is intentionally process-local. It wakes the embedded
-  dispatcher when the kanban tool call runs in the gateway process, while still
-  routing all actual claiming/spawning through `kanban_db.dispatch_once`.
-- The preferred follow-up model for already-done work is a new
-  `kanban_create` card with `parents=[old_task_id]`, not reopening the done
-  card.
+Decision:
+- Remove the fork-only parent-agent wakeup, immediate dispatcher nudge, and
+  persistent worker-daemon layers. Upstream `delegate_task` now covers the
+  required background delegation workflow without carrying a parallel
+  Kanban execution architecture in hot gateway, CLI, database, and tool files.
+- Preserve upstream Kanban behavior, including the current single-writer
+  dispatch lock, WAL checkpointing, task lifecycle, and notification support.
+- Keep the existing board database as historical data; this retirement does
+  not delete task records.
+
+Runtime cleanup:
+- Disabled gateway Kanban dispatch and removed the local Kanban skills/toolset
+  from the Yuri profile.
+- Disabled and stopped
+  `hermes-kanban-worker@executor-codex.service` and
+  `hermes-kanban-worker@executor-general.service`; both were inactive after
+  cleanup.
+- Retained the user service template as dormant reference material so the
+  design can be revisited without reintroducing it into the runtime.
+- Preserved the pre-removal branch at
+  `backup/dev-pre-prune-20260722-210022`.
 
 Merge rule:
-- Preserve session-id stamping through `gateway.session_context`; do not fall
-  back to process-global env-only session routing for concurrent gateway turns.
-- Preserve synthetic parent-agent wakeups for session-stamped terminal kanban
-  events, including agent-only cursors and untrusted-data quoting for worker
-  handoffs.
-- Preserve immediate dispatcher nudges for session-stamped create/unblock/link
-  mutations, but keep task execution inside the normal dispatcher path.
-- Preserve "from now" notification cursors for follow-up subscriptions so old
-  terminal events are not replayed.
-- Accept upstream kanban dispatcher or notifier refactors when these semantics
-  stay covered by focused tests.
+- Do not resurrect these fork-only Kanban layers during future upstream
+  merges. Prefer upstream `delegate_task` and upstream Kanban implementations.
+- The source commits and backup branch remain available if a narrowly scoped
+  behavior needs to be reconsidered later.
 
 ### Profile Identity Prompt Overlay
 
