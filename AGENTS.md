@@ -1,11 +1,3 @@
-# DEV BRANCH NOTE
-
-Open [`DEV_BRANCH_LOG.md`](DEV_BRANCH_LOG.md) before doing merge work,
-production sync, or anything involving the long-lived `dev` branch. It is the
-canonical tracked record of local `dev` changes, touched files, and conflict
-resolution rules for deciding when to preserve local behavior vs accept upstream
-replacement.
-
 # Hermes Agent - Development Guide
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
