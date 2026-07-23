@@ -5,14 +5,15 @@ long-lived `dev` branch. Consult it before merging upstream into `dev`.
 
 ## Current Audit
 
-Audited on 2026-07-22 after merging `main` at `a23e39fe6`.
+Audited on 2026-07-22 after merging `main` at `a8e6c0f85`.
 
 The branch was pruned to remove fork-only runtime features that upstream now
 supersedes or that are no longer used. The pre-prune state remains available at
 `backup/dev-pre-prune-20260722-210022`.
 
-Pre-existing uncommitted edits to `AGENTS.md` and `package-lock.json` belong to
-the user and are not part of this audit.
+The former repository-local `AGENTS.md` branch note was removed because the
+parent workspace instructions now own that guardrail. Unexplained
+`package-lock.json` peer-flag churn was discarded.
 
 ## Decisions Applied
 
@@ -117,8 +118,8 @@ Decision:
 - Use upstream `delegate_task` instead of a parallel fork-only Kanban
   orchestration architecture.
 - Keep upstream Kanban behavior and the existing board database.
-- Yuri gateway dispatch is disabled and the local Kanban skills/toolset are no
-  longer enabled.
+- Yuri and Pompom gateway dispatch are disabled, and the local Kanban
+  skills/toolset are no longer enabled.
 - `hermes-kanban-worker@executor-codex.service` and
   `hermes-kanban-worker@executor-general.service` are disabled and inactive.
 - The systemd template remains as dormant reference material.
