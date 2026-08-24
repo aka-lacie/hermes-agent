@@ -46,6 +46,15 @@ def build_webhook_parser(subparsers, *, cmd_webhook: Callable) -> None:
         help="Target chat ID for cross-platform delivery",
     )
     wh_sub.add_argument(
+        "--delivery-mode",
+        choices=("direct", "internal_turn"),
+        default="direct",
+        help=(
+            "direct delivers the detached result as-is; internal_turn wakes "
+            "that channel's agent for a second turn"
+        ),
+    )
+    wh_sub.add_argument(
         "--secret", default="", help="HMAC secret (auto-generated if omitted)"
     )
     wh_sub.add_argument(

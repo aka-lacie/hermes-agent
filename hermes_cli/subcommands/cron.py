@@ -44,6 +44,23 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     )
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     cron_create.add_argument(
+        "--job-type",
+        choices=("agent", "script", "reminder"),
+        help=(
+            "Execution type. reminder stores the prompt as a no-worker alarm; "
+            "script is the explicit form of --no-agent."
+        ),
+    )
+    cron_create.add_argument(
+        "--delivery-mode",
+        choices=("direct", "internal_turn"),
+        help=(
+            "direct delivers the result as-is; internal_turn wakes the "
+            "destination agent for another turn. Reminders "
+            "default to internal_turn."
+        ),
+    )
+    cron_create.add_argument(
         "--skill",
         dest="skills",
         action="append",
@@ -143,6 +160,16 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument("--name", help="New job name")
     cron_edit.add_argument("--deliver", help="New delivery target")
     cron_edit.add_argument("--repeat", type=int, help="New repeat count")
+    cron_edit.add_argument(
+        "--job-type",
+        choices=("agent", "script", "reminder"),
+        help="Change execution type",
+    )
+    cron_edit.add_argument(
+        "--delivery-mode",
+        choices=("direct", "internal_turn"),
+        help="Change delivery behavior",
+    )
     cron_edit.add_argument(
         "--skill",
         dest="skills",

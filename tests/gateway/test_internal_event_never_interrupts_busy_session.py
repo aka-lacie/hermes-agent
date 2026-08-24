@@ -10,12 +10,10 @@ default ``busy_input_mode='interrupt'`` path — calling
 completions (terminal ``notify_on_complete``), which also re-enter as internal
 events.
 
-The fix: ``_handle_active_session_busy_message`` returns ``False`` early for any
-event with ``internal=True``, so the base adapter queues it silently (no
-interrupt, no ack) and it cascades as a new turn after the current one finishes.
-This preserves strict message-role alternation and the design invariant that a
-completion surfaces as a NEW turn only when idle, never spliced into a running
-turn.
+The fix: ``_handle_active_session_busy_message`` handles ``internal=True``
+itself and puts it into the runner's non-merging FIFO. It cascades as a new
+turn after the current one finishes, never interrupting or becoming part of a
+human-authored turn.
 """
 
 from __future__ import annotations
@@ -70,6 +68,7 @@ def _make_runner() -> GatewayRunner:
     runner._running_agents_ts = {}
     runner._pending_messages = {}
     runner._busy_ack_ts = {}
+    runner._queued_events = {}
     runner._draining = False
     runner.adapters = {}
     runner.config = MagicMock()
@@ -85,6 +84,7 @@ def _make_runner() -> GatewayRunner:
 def _make_adapter() -> MagicMock:
     adapter = MagicMock()
     adapter._pending_messages = {}
+    adapter._internal_session_tasks = {}
     adapter._send_with_retry = AsyncMock()
     adapter.config = MagicMock()
     adapter.config.extra = {}
@@ -118,12 +118,55 @@ async def test_internal_event_does_not_interrupt_busy_session() -> None:
 
     handled = await runner._handle_active_session_busy_message(event, sk)
 
-    # Returns False so the base adapter silently queues the internal event
-    # as a cascading next turn — it must NOT be handled-with-interrupt here.
-    assert handled is False
+    assert handled is True
+    assert adapter._pending_messages[sk] is event
     # The active turn must survive.
     parent.interrupt.assert_not_called()
     # No "⚡ Interrupting current task" (or any) ack for a synthetic event.
     adapter._send_with_retry.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_non_internal_event_still_interrupts() -> None:
+    """Regression-guard the other direction: a real user message in interrupt
+    mode with no subagents still interrupts (behaviour unchanged)."""
+    runner = _make_runner()
+    runner._busy_input_mode = "interrupt"
+    adapter = _make_adapter()
+    event = _make_internal_event(text="please stop")
+    # Flip to a real user message.
+    object.__setattr__(event, "internal", False)
+    sk = build_session_key(event.source)
+    parent = _make_running_parent()
+    runner._running_agents[sk] = parent
+    runner.adapters[event.source.platform] = adapter
+
+    from unittest.mock import patch
+
+    with patch("gateway.run.merge_pending_message_event"):
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+    assert handled is True
+    parent.interrupt.assert_called_once_with("please stop")
+
+
+@pytest.mark.asyncio
+async def test_human_waits_silently_for_an_active_internal_turn() -> None:
+    """A user message does not abort a synthetic turn or get a busy ack."""
+    runner = _make_runner()
+    runner._busy_input_mode = "interrupt"
+    adapter = _make_adapter()
+    event = _make_internal_event(text="new question")
+    object.__setattr__(event, "internal", False)
+    sk = build_session_key(event.source)
+    parent = _make_running_parent()
+    runner._running_agents[sk] = parent
+    runner.adapters[event.source.platform] = adapter
+    adapter._internal_session_tasks[sk] = object()
+
+    handled = await runner._handle_active_session_busy_message(event, sk)
+
+    assert handled is True
+    parent.interrupt.assert_not_called()
+    adapter._send_with_retry.assert_not_called()
+    assert adapter._pending_messages[sk] is event

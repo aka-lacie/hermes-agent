@@ -24,7 +24,8 @@ import re
 import ssl
 import sys
 import time
-from typing import Any, Dict, List, Optional
+import uuid
+from typing import Any, Dict, List, Mapping, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.conversation_compression import (
@@ -1831,6 +1832,7 @@ def run_conversation(
     persist_user_display_kind: Optional[str] = None,
     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
     moa_config: Optional[dict[str, Any]] = None,
+    internal_notification: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -1917,6 +1919,7 @@ def run_conversation(
         # MoA turns append per-call aggregated context to the API copy of the
         # user message, so no byte-stable api_content sidecar can be stamped.
         moa_active=bool(moa_config),
+        internal_notification=internal_notification,
     )
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message

@@ -210,6 +210,22 @@ def test_returns_turn_context_with_user_message_appended():
     assert ctx.active_system_prompt == "SYSTEM"
 
 
+def test_pre_llm_hook_receives_authenticated_internal_notification_context():
+    agent = _FakeAgent()
+    notification = {
+        "kind": "webhook_completion",
+        "source": "inbox",
+        "event_id": "event-1",
+    }
+
+    with patch("hermes_cli.plugins.invoke_hook", return_value=[]) as hook:
+        _build(agent, internal_notification=notification)
+
+    hook.assert_called_once()
+    assert hook.call_args.args == ("pre_llm_call",)
+    assert hook.call_args.kwargs["internal_notification"] == notification
+
+
 def test_user_message_preserves_platform_event_timestamp():
     agent = _FakeAgent()
 

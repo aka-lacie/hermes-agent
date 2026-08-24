@@ -89,6 +89,7 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant`, `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
 | `deliver_only` | No | If `true`, skip the agent entirely — the rendered `prompt` template becomes the literal message that gets delivered. Zero LLM cost, sub-second delivery. See [Direct Delivery Mode](#direct-delivery-mode) for use cases. Requires `deliver` to be a real target (not `log`). |
+| `delivery_mode` | No | `direct` (default) posts the result as-is. `internal_turn` continues the destination's current agent conversation with the result, adding a destination-agent turn. Only live messaging targets support internal turns; `log` and `github_comment` do not. |
 
 ### Full example
 
@@ -320,6 +321,20 @@ The `deliver` field controls where the agent's response goes after processing th
 | `bluebubbles` | Routes the response to BlueBubbles (iMessage). Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 
 For cross-platform delivery, the target platform must also be enabled and connected in the gateway. If no `chat_id` is provided in `deliver_extra`, the response is sent to that platform's configured home channel.
+
+### Wake agent
+
+Set `delivery_mode: internal_turn` when the webhook agent's result should be
+interpreted inside the destination's current conversation instead of posted as
+a detached message. This runs a second agent turn: the webhook agent processes
+the payload first, then the destination agent receives that result as a
+labelled automated event with its existing conversation context.
+
+Internal turns require a live gateway messaging adapter. They are rejected for
+`log` and `github_comment`, which are output sinks rather than conversations,
+and cannot be combined with `deliver_only: true` because there would be no
+webhook-agent completion to hand off. If the destination agent has nothing
+useful to tell the user, it can respond with `[SILENT]`.
 
 ---
 

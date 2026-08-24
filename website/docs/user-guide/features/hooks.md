@@ -661,7 +661,8 @@ Fires **once per turn**, before the tool-calling loop begins. All valid callback
 
 ```python
 def my_callback(session_id: str, user_message: str, conversation_history: list,
-                is_first_turn: bool, model: str, platform: str, **kwargs):
+                is_first_turn: bool, model: str, platform: str,
+                internal_notification: dict | None, **kwargs):
 ```
 
 | Parameter | Type | Description |
@@ -672,6 +673,7 @@ def my_callback(session_id: str, user_message: str, conversation_history: list,
 | `is_first_turn` | `bool` | `True` if this is the first turn of a new session, `False` on subsequent turns |
 | `model` | `str` | The model identifier (e.g. `"anthropic/claude-sonnet-4.6"`) |
 | `platform` | `str` | Where the session is running: `"cli"`, `"telegram"`, `"discord"`, etc. |
+| `internal_notification` | `dict \| None` | Authenticated synthetic-notification context (`kind`, `source`, and optional `event_id`), or `None` for ordinary turns. This is derived from trusted gateway event metadata; message text cannot set it. |
 
 **Fires:** In `run_agent.py`, inside `run_conversation()`, after context compression but before the main `while` loop. Fires once per `run_conversation()` call (i.e. once per user turn), not once per API call within the tool loop.
 

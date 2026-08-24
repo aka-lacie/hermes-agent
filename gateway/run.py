@@ -4010,6 +4010,14 @@ import weakref as _weakref
 _gateway_runner_ref: _weakref.ref = lambda: None
 
 
+def get_active_gateway_runner():
+    """Return the process's live :class:`GatewayRunner`, if one exists."""
+    try:
+        return _gateway_runner_ref()
+    except Exception:
+        return None
+
+
 def _normalize_empty_agent_response(
     agent_result: dict,
     response: str,
@@ -6417,6 +6425,8 @@ class TurnRunner:
                 _conversation_kwargs["moa_config"] = ctx.moa_config
             if _persist_user_timestamp_override is not None:
                 _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
+            if ctx.internal_notification is not None:
+                _conversation_kwargs["internal_notification"] = ctx.internal_notification
             result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
         finally:
             unregister_gateway_notify(_approval_session_key)
@@ -9019,18 +9029,40 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     # _handle_reset_command.
 
     def _enqueue_fifo(self, session_key: str, queued_event: "MessageEvent", adapter: Any) -> None:
-        """Append a /queue event to the FIFO chain for a session."""
+        """Append an event to the per-session turn queue.
+
+        Internal notifications never interrupt the foreground turn. Real
+        human messages remain ahead of any waiting internal notifications,
+        even when they arrive later.
+        """
         if adapter is None:
             return
         pending_slot = getattr(adapter, "_pending_messages", None)
         if pending_slot is None:
             return
-        if session_key in pending_slot:
-            self._session_state(session_key).conversation.queued_events.append(
-                queued_event
-            )
-        else:
+        overflow = self._session_state(session_key).conversation.queued_events
+        if session_key not in pending_slot:
             pending_slot[session_key] = queued_event
+            return
+
+        is_internal = bool(getattr(queued_event, "internal", False))
+        pending_event = pending_slot.get(session_key)
+        if not is_internal and bool(getattr(pending_event, "internal", False)):
+            pending_slot[session_key] = queued_event
+            overflow.insert(0, pending_event)
+            return
+        if not is_internal:
+            insert_at = next(
+                (
+                    idx
+                    for idx, event in enumerate(overflow)
+                    if bool(getattr(event, "internal", False))
+                ),
+                len(overflow),
+            )
+            overflow.insert(insert_at, queued_event)
+            return
+        overflow.append(queued_event)
 
     def _promote_queued_event(
         self,
@@ -10192,6 +10224,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return (enriched_text or text).strip()
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        # Synthetic notifications retain a separate turn boundary and bypass
+        # human authorization/approval/interrupt handling. Route through the
+        # security-aware queue helper so untrusted plugin payloads cannot merge
+        # with user input or trusted internal notifications.
+        if getattr(event, "internal", False):
+            self._queue_or_replace_pending_event(session_key, event)
+            return True
+
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
         # creating a session.  The busy path must enforce the same check;
@@ -10318,26 +10358,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not adapter:
             return False  # let default path handle it
 
-        # --- Internal synthetic events must never interrupt/steer ---
-        # Async-delegation completions (delegate_task(background=true)) and
-        # background-process completions (terminal notify_on_complete) re-enter
-        # the originating session as internal MessageEvents. When the session
-        # is busy, treating them like a user TEXT message means interrupt-mode
-        # (the default busy_text_mode) aborts the active turn AND sends a "⚡
-        # Interrupting current task" ack — exactly the opposite of the design
-        # invariant that a completion surfaces as a NEW turn only when idle and
-        # never splices into a running turn. Plugin events carry untrusted
-        # payload text, so queue those through the gateway FIFO to keep their
-        # security metadata separate from pending user input.
-        if getattr(event, "internal", False) and not event.allow_gateway_control:
-            self._queue_or_replace_pending_event(session_key, event)
-            return True
-        if getattr(event, "internal", False):
-            return False
-
         _busy_state = self._peek_session_state(session_key)
         running_agent = _busy_state.turn.agent if _busy_state else None
 
+        processing_internal_turn = (
+            (getattr(adapter, "_internal_session_tasks", None) or {}).get(
+                session_key
+            )
+            is not None
+        )
+        if processing_internal_turn:
+            effective_mode = "queue"
         busy_text_mode = self._effective_busy_text_mode(event.source)
         if (
             event.message_type == MessageType.TEXT
@@ -10478,6 +10509,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 running_agent.interrupt(_interrupt_text)
             except Exception:
                 pass  # don't let interrupt failure block the ack
+
+        if processing_internal_turn:
+            # Hidden notification turns should not create a user-facing
+            # "queued while busy" acknowledgement.
+            return True
 
         # Check if busy ack is disabled — skip sending but still process the input.
         # Placed before debounce so we don't stamp a "last ack" timestamp that was
@@ -19028,6 +19064,150 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
         return source
 
+    def enqueue_internal_turn(
+        self,
+        *,
+        target: Any,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Schedule a synthetic main-agent turn on the live gateway loop."""
+        payload = str(text or "").strip()
+        if not payload:
+            return False
+        try:
+            platform = Platform(str(target.platform).strip().lower())
+            fallback_source = SessionSource(
+                platform=platform,
+                chat_id=str(target.chat_id),
+                chat_type=str(getattr(target, "chat_type", None) or "dm"),
+                thread_id=getattr(target, "thread_id", None),
+                user_id=getattr(target, "user_id", None),
+                profile=getattr(target, "profile", None),
+            )
+            source = fallback_source
+            # Prefer the most recent in-memory source, then fall back to the
+            # persisted routing index. The latter is essential immediately
+            # after a gateway restart: home-channel targets often carry only
+            # platform/chat_id, while the stored source retains the real
+            # chat_type, tenant scope, participant identity, and thread lane
+            # needed to resume the same conversation instead of minting a
+            # parallel synthetic one.
+            candidates = list(
+                reversed(
+                    list(
+                        (getattr(self, "_session_sources", None) or {}).values()
+                    )
+                )
+            )
+            session_store = getattr(self, "session_store", None)
+            if session_store is not None:
+                try:
+                    if bool(
+                        getattr(
+                            getattr(self, "config", None),
+                            "multiplex_profiles",
+                            False,
+                        )
+                    ):
+                        with _profile_runtime_scope(
+                            self._resolve_profile_home_for_source(fallback_source)
+                        ):
+                            persisted = session_store.list_sessions()
+                    else:
+                        persisted = session_store.list_sessions()
+                    candidates.extend(
+                        entry.origin
+                        for entry in persisted
+                        if getattr(entry, "origin", None) is not None
+                    )
+                except Exception:
+                    logger.debug(
+                        "Internal-turn persisted source lookup failed",
+                        exc_info=True,
+                    )
+
+            for candidate in candidates:
+                if getattr(candidate, "platform", None) != platform:
+                    continue
+                if str(getattr(candidate, "chat_id", "")) != str(target.chat_id):
+                    continue
+                target_thread = getattr(target, "thread_id", None)
+                if str(getattr(candidate, "thread_id", "") or "") != str(
+                    target_thread or ""
+                ):
+                    continue
+                target_user = getattr(target, "user_id", None)
+                if target_user is not None and str(
+                    getattr(candidate, "user_id", "") or ""
+                ) != str(target_user):
+                    continue
+                target_profile = getattr(target, "profile", None)
+                if target_profile is not None and str(
+                    getattr(candidate, "profile", "") or ""
+                ) != str(target_profile):
+                    continue
+                source = dataclasses.replace(candidate)
+                break
+            adapter = self._adapter_for_source(source)
+        except Exception:
+            logger.warning("Internal-turn target resolution failed", exc_info=True)
+            return False
+        if adapter is None:
+            logger.warning(
+                "Internal-turn enqueue skipped: no live adapter for %s",
+                platform.value,
+            )
+            return False
+
+        loop = getattr(self, "_gateway_loop", None) or getattr(
+            self, "_gateway_event_loop", None
+        )
+        if loop is None or loop.is_closed() or not loop.is_running():
+            logger.warning("Internal-turn enqueue skipped: gateway loop is not running")
+            return False
+
+        event = MessageEvent(
+            text=payload,
+            message_type=MessageType.TEXT,
+            source=source,
+            internal=True,
+            metadata=dict(metadata or {}),
+        )
+
+        def _schedule() -> None:
+            try:
+                task = loop.create_task(
+                    adapter.handle_message(event),
+                    name=f"internal-turn:{platform.value}:{source.chat_id}",
+                )
+                self._background_tasks.add(task)
+
+                def _done(completed: "asyncio.Task") -> None:
+                    self._background_tasks.discard(completed)
+                    if completed.cancelled():
+                        return
+                    exc = completed.exception()
+                    if exc is not None:
+                        logger.error(
+                            "Internal-turn dispatch failed for %s:%s: %s",
+                            platform.value,
+                            source.chat_id,
+                            exc,
+                            exc_info=(type(exc), exc, exc.__traceback__),
+                        )
+
+                task.add_done_callback(_done)
+            except Exception:
+                logger.exception(
+                    "Internal-turn scheduling failed for %s:%s",
+                    platform.value,
+                    source.chat_id,
+                )
+
+        loop.call_soon_threadsafe(_schedule)
+        return True
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -20388,6 +20568,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # against so post-run compression publication can be identity-guarded
             # below; a /new or another lifecycle transition may move
             # session_entry.session_id while the old run is still unwinding.
+            from gateway.internal_turns import trusted_internal_notification_context
+
             _run_start_session_id = session_entry.session_id
             _turn_started_monotonic = time.monotonic()
             agent_result = await self._run_agent(
@@ -20405,6 +20587,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
                 persist_user_display_kind=persist_user_display_kind,
                 message_type=event.message_type,
+                internal_notification=trusted_internal_notification_context(event),
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
 
@@ -28118,6 +28301,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None,
         message_type: Optional[str] = None,
+        internal_notification: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
@@ -28138,6 +28322,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
                 persist_user_display_kind=persist_user_display_kind,
                 message_type=message_type,
+                internal_notification=internal_notification,
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
@@ -28151,6 +28336,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
                 persist_user_display_kind=persist_user_display_kind,
                 message_type=message_type,
+                internal_notification=internal_notification,
             )
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
@@ -28294,6 +28480,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None,
         message_type: Optional[str] = None,
+        internal_notification: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -28602,6 +28789,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             moa_config=moa_config,
             persist_user_message=persist_user_message,
             persist_user_timestamp=persist_user_timestamp,
+            internal_notification=internal_notification,
             persist_user_display_kind=persist_user_display_kind,
         )
         turn_runner = TurnRunner(self, turn_ctx)
@@ -29747,6 +29935,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # recursive call so queued voice turns can stream TTS and
                 # re-mark the generation for the final delivered turn.
                 next_message_type = None
+                next_internal_notification = None
                 if pending_event is not None:
                     next_source = getattr(pending_event, "source", None) or source
                     if self._is_goal_continuation_event(pending_event) and not self._goal_still_active_for_session(session_id):
@@ -29779,6 +29968,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     next_message_id = self._reply_anchor_for_event(pending_event)
                     next_channel_prompt = getattr(pending_event, "channel_prompt", None)
                     next_message_type = getattr(pending_event, "message_type", None)
+                    from gateway.internal_turns import trusted_internal_notification_context
+
+                    next_internal_notification = (
+                        trusted_internal_notification_context(pending_event)
+                    )
 
                 # Clear the completed streaming marker from the prior logical
                 # turn so the recursive turn's streaming TTS is not suppressed
@@ -29834,6 +30028,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
                     message_type=next_message_type,
+                    internal_notification=next_internal_notification,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:
@@ -31105,8 +31300,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     atexit.register(remove_pid_file)
     atexit.register(release_gateway_runtime_lock)
 
-    # Control socket (#92091 step 1) — the gateway-owned identify/status
-    # surface. Started immediately after the PID-file claim: winning that
+    # Control socket (#92091) — the gateway-owned coordination surface.
+    # Started immediately after the PID-file claim: winning that
     # O_EXCL race is the moment this process becomes the authoritative
     # gateway for its HERMES_HOME, so from here on "does a socket answer?"
     # is a truthful liveness/identity query for updater and fleet consumers.
@@ -31115,8 +31310,15 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     _control_server = None
     try:
         from gateway.control_socket import GatewayControlServer
+        from gateway.internal_turns import handle_internal_turn_control_request
 
-        _control_server = GatewayControlServer()
+        _control_server = GatewayControlServer(
+            request_handlers={
+                "enqueue_internal_turn": lambda request: (
+                    handle_internal_turn_control_request(runner, request)
+                )
+            }
+        )
         if not await _control_server.start():
             _control_server = None
         else:

@@ -347,6 +347,33 @@ class TestWebhookEndpoints:
         subs = self.client.get("/api/webhooks").json()["subscriptions"]
         assert subs[0]["script"] == "todoist_filter.py"
 
+    @pytest.mark.asyncio
+    async def test_create_webhook_can_route_completion_through_main_agent(self):
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli import web_server
+        import hermes_cli.webhook as webhook_cli
+
+        cfg = load_config()
+        cfg.setdefault("platforms", {})["webhook"] = {
+            "enabled": True,
+            "extra": {"host": "0.0.0.0", "port": 8644},
+        }
+        save_config(cfg)
+
+        response = await web_server.create_webhook(
+            web_server.WebhookCreate(
+                name="inbox",
+                deliver="discord",
+                delivery_mode="internal_turn",
+                prompt="Review the inbox event",
+            )
+        )
+
+        assert response["delivery_mode"] == "internal_turn"
+        assert webhook_cli._load_subscriptions()["inbox"]["delivery_mode"] == (
+            "internal_turn"
+        )
+
     def test_enable_platform_starts_gateway_restart(self, monkeypatch):
         import hermes_cli.web_server as ws
         from hermes_cli.config import load_config

@@ -425,6 +425,25 @@ def test_profile_call_cannot_retarget_ticker_store_mid_write(
 
 
 
+def test_dashboard_creates_first_class_reminder(isolated_profiles):
+    from hermes_cli import web_server
+
+    job = web_server._create_cron_job_sync(
+        web_server.CronJobCreate(
+            prompt="Check whether the customer replied",
+            schedule="30m",
+            deliver="origin",
+            job_type="reminder",
+        ),
+        profile="worker_alpha",
+    )
+
+    assert job["job_type"] == "reminder"
+    assert job["delivery_mode"] == "internal_turn"
+    assert job["no_agent"] is False
+    assert job["script"] is None
+
+
 @pytest.mark.asyncio
 async def test_cron_mutation_without_profile_finds_named_profile_job(isolated_profiles):
     from hermes_cli import web_server

@@ -11,10 +11,28 @@ export interface CronJobFormState {
   base_url: string;
   script: string;
   no_agent: boolean;
+  job_type: "agent" | "script" | "reminder";
+  delivery_mode: "direct" | "internal_turn";
   context_from: string;
   continuity: boolean;
   enabled_toolsets: string[];
   workdir: string;
+}
+
+/** Whether a cron destination can be handed to a live gateway conversation.
+ * Local delivery has no conversation, while Bot Chat already performs its own
+ * agent turn through the separate profile-chat lane. */
+export function cronTargetSupportsInternalTurn(deliver: unknown): boolean {
+  const targets = splitCronList(deliver).map((target) => target.toLowerCase());
+  return (
+    targets.length > 0 &&
+    targets.every(
+      (target) =>
+        target !== "local" &&
+        target !== "bot-chat" &&
+        !target.startsWith("bot-chat:"),
+    )
+  );
 }
 
 /** Split a comma/newline list (or array) into trimmed, non-empty items. */
@@ -60,7 +78,9 @@ export function buildCronJobPayload(form: CronJobFormState): CronJobMutation {
     model: optionalText(form.model),
     base_url: optionalText(form.base_url, true),
     script: optionalText(form.script),
-    no_agent: Boolean(form.no_agent),
+    no_agent: form.job_type === "script",
+    job_type: form.job_type,
+    delivery_mode: form.delivery_mode,
     context_from: contextFrom.length > 0 ? contextFrom : null,
     enabled_toolsets: enabledToolsets.length > 0 ? enabledToolsets : null,
     workdir: optionalText(form.workdir),
@@ -96,6 +116,14 @@ export function cronJobFormFromJob(job: CronJob): CronJobFormState {
     base_url: asString(job.base_url),
     script: asString(job.script),
     no_agent: Boolean(job.no_agent),
+    job_type:
+      job.job_type === "reminder" || job.job_type === "script"
+        ? job.job_type
+        : job.no_agent
+          ? "script"
+          : "agent",
+    delivery_mode:
+      job.delivery_mode === "internal_turn" ? "internal_turn" : "direct",
     context_from: externalRefs.join("\n"),
     continuity,
     enabled_toolsets: splitCronList(job.enabled_toolsets),

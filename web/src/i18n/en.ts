@@ -255,8 +255,24 @@ export const en: Translations = {
     newJob: "New Cron Job",
     nameOptional: "Name (optional)",
     namePlaceholder: "e.g. Daily summary",
+    jobTypeLabel: "What runs",
+    jobTypes: {
+      agent: "Agent task",
+      agentHelp:
+        "Starts a fresh background agent with no access to the destination conversation.",
+      script: "Script only",
+      scriptHelp:
+        "Runs the script without a background agent and uses its stdout as the result.",
+      reminder: "Reminder",
+      reminderHelp:
+        "Produces the reminder text as-is without starting a background agent or script.",
+    },
     prompt: "Prompt",
     promptPlaceholder: "What should the agent do on each run?",
+    reminderText: "Reminder text",
+    reminderPlaceholder:
+      "What should the conversation's agent know when this fires?",
+    descriptionOptional: "Description (optional)",
     schedule: "Schedule (cron expression)",
     schedulePlaceholder: "0 9 * * *",
     scheduleMode: "Schedule",
@@ -295,6 +311,21 @@ export const en: Translations = {
       onceAt: "Once at {time}",
     },
     deliverTo: "Deliver to",
+    deliveryBehavior: {
+      label: "How it arrives",
+      direct: "Deliver directly",
+      directHelp: "No destination-agent turn is started.",
+      internalTurn: "Wake agent",
+      internalTurnAgentHelp:
+        "Starts an additional agent turn in that conversation after the background agent finishes.",
+      internalTurnNoWorkerHelp:
+        "Starts one agent turn in that conversation so it can use context, act, reply, or stay silent.",
+      needsConversation:
+        "Conversation delivery requires a messaging destination; local jobs only save their result.",
+      botChatUnsupported:
+        "Bot Chat already starts its own agent turn through a separate delivery path.",
+      badge: "wakes agent",
+    },
     scheduledJobs: "Scheduled Jobs",
     noJobs: "No cron jobs configured. Create one above.",
     last: "Last",

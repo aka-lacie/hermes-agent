@@ -41,6 +41,19 @@ Cron-run sessions cannot recursively create more cron jobs. Hermes disables cron
 
 ## Creating scheduled tasks
 
+Every scheduled task has two independent choices:
+
+| Choice | Options | What it controls |
+|--------|---------|------------------|
+| **What runs** | Agent task, script only, or reminder | Whether the schedule starts a fresh background agent, runs a script without an agent, or emits literal reminder text |
+| **How it arrives** | Deliver directly, or wake agent | Whether Hermes sends the detached result directly or gives it to the destination's current agent session as a new internal turn |
+
+An **agent task** starts in a fresh session and cannot see the destination
+conversation. **Script only** delivers the script's stdout without an LLM call.
+A **reminder** emits its text directly without first running a detached agent.
+Reminders default to continuing the destination conversation, where that agent
+can interpret the reminder with the user's current context.
+
 ### In chat with `/cron`
 
 ```bash
@@ -383,6 +396,29 @@ When scheduling jobs, you specify where the output goes:
 | `"origin,all"` | Deliver to the origin **plus** every other connected channel | Combine any tokens |
 
 The agent's final response is automatically delivered to the configured `deliver:` target — the agent does not send messages itself, so there is nothing to call in the cron prompt.
+
+### Wake agent (`internal_turn`)
+
+Set `delivery_mode: "internal_turn"` (or use **Wake agent** in the dashboard)
+when the scheduled result should become an internal turn in the target
+channel's current agent session. The target agent
+receives a clearly labelled automated event, can use the existing conversation
+context, and replies only when the user needs an update. It can return
+`[SILENT]` when no outward response is useful.
+
+This changes token use depending on what runs:
+
+- **Agent task:** one detached cron-agent turn produces the result, then a
+  second destination-agent turn interprets it.
+- **Script only or reminder:** no detached agent runs; only the destination
+  agent turn uses LLM tokens.
+
+Internal-turn delivery requires a live messaging conversation. It cannot target
+`local` because there is no conversation there, and it cannot target `bot-chat`
+because Bot Chat already starts its own agent turn. Use direct delivery for
+those targets. If the gateway is offline or the destination adapter is not
+live, the run records a delivery failure instead of silently falling back to a
+different session.
 
 ### Bot Chat delivery (`bot-chat`)
 

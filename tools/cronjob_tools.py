@@ -345,6 +345,7 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
             "platform": origin_platform,
             "chat_id": origin_chat_id,
             "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None,
+            "chat_type": get_session_env("HERMES_SESSION_CHAT_TYPE") or None,
             "thread_id": thread_id,
             # Captured so an opt-in delivery mirror (cron.mirror_delivery /
             # attach_to_session) can resolve the exact participant's session in
@@ -682,6 +683,10 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "last_run_at": job.get("last_run_at"),
         "last_status": job.get("last_status"),
         "last_delivery_error": job.get("last_delivery_error"),
+        "job_type": job.get(
+            "job_type", "script" if job.get("no_agent") else "agent"
+        ),
+        "delivery_mode": job.get("delivery_mode", "direct"),
         "last_fire_error": job.get("last_fire_error"),
         "enabled": job.get("enabled", True),
         # Derive from enabled so half-paused records never render as paused.
@@ -1278,6 +1283,8 @@ def cronjob(
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
+    job_type: Optional[str] = None,
+    delivery_mode: Optional[str] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -1294,17 +1301,46 @@ def cronjob(
             if not schedule:
                 return tool_error("schedule is required for create", success=False)
             canonical_skills = _canonical_skills(skill, skills)
-            _no_agent = bool(no_agent)
+            _job_type = str(job_type or "").strip().lower()
+            if not _job_type:
+                _job_type = "script" if bool(no_agent) else "agent"
+            if _job_type not in {"agent", "script", "reminder"}:
+                return tool_error(
+                    "job_type must be one of: agent, script, reminder",
+                    success=False,
+                )
+            if bool(no_agent) and _job_type != "script":
+                return tool_error(
+                    "no_agent=True is only compatible with job_type='script'",
+                    success=False,
+                )
+            _no_agent = _job_type == "script"
             # Job-shape validation differs by mode:
-            #   - no_agent=True → script is the job; prompt/skills are optional
-            #     (and irrelevant to execution).
-            #   - no_agent=False (default) → at least one of prompt/skills must
-            #     be set, same as before.
-            if _no_agent:
+            #   - script: script is the job.
+            #   - reminder: prompt is emitted without a detached agent.
+            #   - agent: at least one of prompt/skills must be set.
+            if _job_type == "script":
                 if not script:
+                    if no_agent is True and not job_type:
+                        return tool_error(
+                            "no_agent=True requires a script — the script is the job.",
+                            success=False,
+                        )
                     return tool_error(
-                        "create with no_agent=True requires a script — "
+                        "create with job_type='script' requires a script — "
                         "the script is the job.",
+                        success=False,
+                    )
+            elif _job_type == "reminder":
+                if not prompt:
+                    return tool_error(
+                        "create with job_type='reminder' requires reminder text "
+                        "in prompt.",
+                        success=False,
+                    )
+                if script or canonical_skills:
+                    return tool_error(
+                        "reminder jobs cannot use script or skills",
                         success=False,
                     )
             elif not prompt and not canonical_skills:
@@ -1385,6 +1421,10 @@ def cronjob(
                     workdir=_normalize_optional_job_value(workdir),
                     no_agent=_no_agent,
                     attach_to_session=attach_to_session,
+                    job_type=_job_type,
+                    delivery_mode=delivery_mode or (
+                        "internal_turn" if _job_type == "reminder" else "direct"
+                    ),
                     monitor_script=_normalize_optional_job_value(monitor_script),
                     monitor_url=_normalize_optional_job_value(monitor_url),
                     # reasoning_effort reaches here from the CLI
@@ -1681,11 +1721,38 @@ def cronjob(
                 updates["enabled_toolsets"] = enabled_toolsets or None
             if attach_to_session is not None:
                 updates["attach_to_session"] = bool(attach_to_session)
+            if delivery_mode is not None:
+                updates["delivery_mode"] = str(delivery_mode).strip().lower()
             if workdir is not None:
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
                 updates["workdir"] = _normalize_optional_job_value(workdir) or None
-            if no_agent is not None:
+            if job_type is not None:
+                target_job_type = str(job_type).strip().lower()
+                if target_job_type not in {"agent", "script", "reminder"}:
+                    return tool_error(
+                        "job_type must be one of: agent, script, reminder",
+                        success=False,
+                    )
+                if bool(no_agent) and target_job_type != "script":
+                    return tool_error(
+                        "no_agent=True is only compatible with job_type='script'",
+                        success=False,
+                    )
+                if target_job_type == "script":
+                    effective_script = (
+                        updates.get("script")
+                        if "script" in updates
+                        else job.get("script")
+                    )
+                    if not effective_script:
+                        return tool_error(
+                            "Cannot set job_type='script' without a script.",
+                            success=False,
+                        )
+                updates["job_type"] = target_job_type
+                updates["no_agent"] = target_job_type == "script"
+            elif no_agent is not None:
                 # Toggling no_agent on/off at update time. If flipping to True,
                 # we need a script to already exist on the job (or be part of
                 # the same update) — otherwise the next tick would error out.
@@ -1729,7 +1796,10 @@ CRONJOB_SCHEMA = {
     "name": "cronjob",
     "description": """Manage scheduled cron jobs with a single compressed tool.
 
-Use action='create' to schedule a new job from a prompt or one or more skills.
+Use action='create' to schedule an agent task, a disk-backed script, or a
+first-class reminder. Prefer job_type='reminder' for alarms and deferred
+follow-ups: the prompt becomes literal reminder text, no detached worker runs,
+and the result wakes the destination agent by default.
 Use action='list' to inspect jobs.
 Use action='update', 'pause', 'resume', 'remove', or 'run' to manage an existing job.
 
@@ -1737,13 +1807,18 @@ action='run' fires the job immediately in the BACKGROUND (like delegate_task): t
 
 To stop a job the user no longer wants: first action='list' to find the job_id, then action='remove' with that job_id. Never guess job IDs — always list first.
 
-Jobs run in a fresh session with no current-chat context, so prompts must be self-contained.
+Agent jobs run in a fresh session with no current-chat context, so their prompts
+must be self-contained. Reminder jobs do not run an agent.
 If skills are provided on create, the future cron run loads those skills in order, then follows the prompt as the task instruction.
 On update, passing skills=[] clears attached skills.
 
-NOTE: The agent's final response is auto-delivered to the target. Put the primary
-user-facing content in the final response. Cron jobs run autonomously with no user
-present — they cannot ask questions or request clarification.
+With delivery_mode='direct', output is delivered to the target as-is. With
+delivery_mode='internal_turn', output wakes the target channel's agent with a
+synthetic turn; that agent uses the current conversation
+context and decides whether to act, reply, or stay silent. For agent jobs this
+is a second LLM turn after the isolated cron worker; reminders and scripts do
+not run a first agent. Cron workers run autonomously with no user present and
+cannot ask questions or request clarification.
 
 Scheduling from cron-run sessions is disabled by default and enabled via cron.allow_agent_scheduling in config.yaml. When enabled, jobs created from a cron run are user-owned in the same flat job table as every other job, and their delivery resolves to the creating job's own persistent target — never to the ephemeral cron-run session. Prefer updating an existing job (list first, then update by job_id) over creating near-duplicates.""",
     "parameters": {
@@ -1759,7 +1834,7 @@ Scheduling from cron-run sessions is disabled by default and enabled via cron.al
             },
             "prompt": {
                 "type": "string",
-                "description": "For create: the full self-contained prompt. If skills are also provided, this becomes the task instruction paired with those skills. For run: optional transient context appended to the stored prompt for that single fire only (never persisted)."
+                "description": "For create: the full self-contained prompt. If skills are also provided, this becomes the task instruction paired with those skills. For job_type='reminder': the literal reminder text used to wake the destination agent. For run: optional transient context appended to the stored prompt for that single fire only (never persisted)."
             },
             "schedule": {
                 "type": "string",
@@ -1810,6 +1885,30 @@ Scheduling from cron-run sessions is disabled by default and enabled via cron.al
                     "\n\n"
                     "WHEN TO USE True: recurring script-only pings where the script itself produces the exact message text (memory/disk/GPU watchdogs, threshold alerts, heartbeats, CI notifications, API pollers with a fixed output shape). "
                     "WHEN TO USE False (default): anything that needs reasoning — summarize a feed, draft a daily briefing, pick interesting items, rephrase data for a human, follow conditional logic based on content."
+                ),
+            },
+            "job_type": {
+                "type": "string",
+                "enum": ["agent", "script", "reminder"],
+                "description": (
+                    "How the scheduled payload is produced. 'agent' runs an "
+                    "isolated cron agent from prompt (default); 'script' runs "
+                    "the disk-backed script without an LLM (legacy "
+                    "no_agent=True); 'reminder' emits prompt as reminder text "
+                    "without a detached agent or script. Prefer 'reminder' for "
+                    "alarms and deferred follow-ups."
+                ),
+            },
+            "delivery_mode": {
+                "type": "string",
+                "enum": ["direct", "internal_turn"],
+                "description": (
+                    "How a non-silent result reaches the destination. "
+                    "'direct' delivers the result as-is (existing default). "
+                    "'internal_turn' wakes the destination agent for a turn "
+                    "that can use conversation context, act, reply, or "
+                    "stay silent. This is an additional LLM turn for agent "
+                    "jobs. Reminder jobs default to internal_turn."
                 ),
             },
             "context_from": {
@@ -1909,6 +2008,9 @@ registry.register(
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
         no_agent=args.get("no_agent"),
+        job_type=args.get("job_type"),
+        delivery_mode=args.get("delivery_mode"),
+        attach_to_session=args.get("attach_to_session"),
         monitor_script=args.get("monitor_script"),
         monitor_url=args.get("monitor_url"),
         task_id=kw.get("task_id"),
