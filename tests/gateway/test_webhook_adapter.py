@@ -726,6 +726,108 @@ class TestWebhookSilenceSuppression:
 
 
 # ===================================================================
+# Internal-turn completion delivery
+# ===================================================================
+
+
+class TestInternalTurnDelivery:
+
+    def _adapter(self):
+        adapter = _make_adapter()
+        adapter.gateway_runner = MagicMock()
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_interim_output_is_suppressed(self):
+        adapter = self._adapter()
+        chat_id = "webhook:inbox:event-1"
+        adapter._delivery_info[chat_id] = {
+            "deliver": "discord",
+            "delivery_mode": "internal_turn",
+            "deliver_extra": {"chat_id": "dm-123"},
+        }
+
+        with patch(
+            "gateway.internal_turns.InternalTurnService.enqueue"
+        ) as enqueue:
+            result = await adapter.send(chat_id, "switching fallback model")
+
+        assert result.success is True
+        enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_final_output_queues_main_agent_turn(self):
+        adapter = self._adapter()
+        chat_id = "webhook:inbox:event-2"
+        adapter._delivery_info[chat_id] = {
+            "deliver": "discord",
+            "delivery_mode": "internal_turn",
+            "deliver_extra": {"chat_id": "dm-123"},
+            "route_name": "inbox",
+            "delivery_id": "event-2",
+        }
+
+        with patch(
+            "gateway.internal_turns.InternalTurnService.enqueue",
+            return_value=True,
+        ) as enqueue:
+            result = await adapter.send(
+                chat_id,
+                "A reply is needed.",
+                metadata={"_webhook_final_response": True},
+            )
+
+        assert result.success is True
+        enqueue.assert_called_once()
+        kwargs = enqueue.call_args.kwargs
+        assert kwargs["platform"] == "discord"
+        assert kwargs["chat_id"] == "dm-123"
+        assert kwargs["kind"] == "webhook_completion"
+        assert kwargs["source_label"] == "inbox"
+        assert kwargs["event_id"] == "event-2"
+
+    @pytest.mark.asyncio
+    async def test_silent_final_output_never_queues(self):
+        adapter = self._adapter()
+        chat_id = "webhook:inbox:event-3"
+        adapter._delivery_info[chat_id] = {
+            "deliver": "discord",
+            "delivery_mode": "internal_turn",
+            "deliver_extra": {"chat_id": "dm-123"},
+        }
+
+        with patch(
+            "gateway.internal_turns.InternalTurnService.enqueue"
+        ) as enqueue:
+            result = await adapter.send(
+                chat_id,
+                "[SILENT]",
+                metadata={"_webhook_final_response": True},
+            )
+
+        assert result.success is True
+        enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_github_comment_is_not_treated_as_a_live_conversation(self):
+        adapter = self._adapter()
+        chat_id = "webhook:inbox:event-4"
+        adapter._delivery_info[chat_id] = {
+            "deliver": "github_comment",
+            "delivery_mode": "internal_turn",
+        }
+
+        result = await adapter.send(
+            chat_id,
+            "Review completed.",
+            metadata={"_webhook_final_response": True},
+        )
+
+        assert result.success is False
+        assert "live gateway conversation" in result.error
+
+
+# ===================================================================
 # Delivery info cleanup
 # ===================================================================
 

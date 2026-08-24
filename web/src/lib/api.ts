@@ -1614,6 +1614,7 @@ export interface WebhookRoute {
   events: string[];
   deliver: string;
   deliver_only: boolean;
+  delivery_mode: "direct" | "internal_turn";
   prompt: string;
   skills: string[];
   created_at: string | null;
@@ -1647,6 +1648,7 @@ export interface WebhookCreate {
   skills?: string[];
   deliver?: string;
   deliver_only?: boolean;
+  delivery_mode?: "direct" | "internal_turn";
   deliver_chat_id?: string;
 }
 
@@ -2243,6 +2245,8 @@ export interface CronJobMutation {
   base_url?: string | null;
   script?: string | null;
   no_agent?: boolean;
+  job_type?: "agent" | "script" | "reminder";
+  delivery_mode?: "direct" | "internal_turn";
   context_from?: string[] | null;
   enabled_toolsets?: string[] | null;
   workdir?: string | null;
@@ -2268,6 +2272,8 @@ export interface CronJob {
   provider?: string | null;
   base_url?: string | null;
   no_agent?: boolean | null;
+  job_type?: "agent" | "script" | "reminder" | null;
+  delivery_mode?: "direct" | "internal_turn" | null;
   context_from?: string[] | string | null;
   enabled_toolsets?: string[] | null;
   workdir?: string | null;

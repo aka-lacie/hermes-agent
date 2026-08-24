@@ -13,6 +13,8 @@ Each route defines:
   - skills: optional list of skills to load for the agent
   - deliver: where to send the response (github_comment, telegram, etc.)
   - deliver_extra: additional delivery config (repo, pr_number, chat_id)
+  - delivery_mode: "direct" (default) or "internal_turn". Internal turns
+    are queued for the destination channel's active main-agent session.
   - deliver_only: if true, skip the agent — the rendered prompt IS the
     message that gets delivered.  Use for external push notifications
     (Supabase, monitoring alerts, inter-agent pings) where zero LLM cost
@@ -270,6 +272,26 @@ class WebhookAdapter(BasePlatformAdapter):
                     f"INSECURE_NO_AUTH is for local testing only. "
                     f"Refusing to start to prevent accidental exposure."
                 )
+            delivery_mode = str(route.get("delivery_mode", "direct")).strip().lower()
+            if delivery_mode not in {"direct", "internal_turn"}:
+                raise ValueError(
+                    f"[webhook] Route '{name}' has invalid delivery_mode "
+                    f"'{delivery_mode}'. Expected 'direct' or 'internal_turn'."
+                )
+            if delivery_mode == "internal_turn" and route.get("deliver_only"):
+                raise ValueError(
+                    f"[webhook] Route '{name}' combines delivery_mode="
+                    "internal_turn with deliver_only=true. Internal-turn "
+                    "delivery currently requires an agent completion."
+                )
+            if delivery_mode == "internal_turn" and str(
+                route.get("deliver") or "log"
+            ).strip().lower() in {"log", "github_comment"}:
+                raise ValueError(
+                    f"[webhook] Route '{name}' uses internal-turn delivery "
+                    f"with non-conversation target {route.get('deliver')!r}. "
+                    "Choose a live gateway messaging platform."
+                )
             # deliver_only routes bypass the agent — the POST body becomes a
             # direct push notification via the configured delivery target.
             # Validate up-front so misconfiguration surfaces at startup rather
@@ -374,6 +396,16 @@ class WebhookAdapter(BasePlatformAdapter):
 
         delivery = self._delivery_info.get(chat_id, {})
         deliver_type = delivery.get("deliver", "log")
+        delivery_mode = delivery.get("delivery_mode", "direct")
+
+        if delivery_mode == "internal_turn":
+            if not (metadata or {}).get("_webhook_final_response"):
+                logger.info(
+                    "[webhook] Suppressing non-final internal-turn output for %s",
+                    chat_id,
+                )
+                return SendResult(success=True)
+            return self._deliver_internal_turn(content, delivery)
 
         if deliver_type == "log":
             logger.info("[webhook] Response for %s: %s", chat_id, content[:200])
@@ -399,6 +431,98 @@ class WebhookAdapter(BasePlatformAdapter):
         logger.warning("[webhook] Unknown deliver type: %s", deliver_type)
         return SendResult(
             success=False, error=f"Unknown deliver type: {deliver_type}"
+        )
+
+    async def _send_with_retry(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Any = None,
+        max_retries: int = 2,
+        base_delay: float = 2.0,
+    ) -> SendResult:
+        """Mark the normal response pipeline's final webhook delivery.
+
+        Detached webhook runs can emit operational notices before they finish.
+        Internal-turn routes are completion handoffs, so ``send()`` suppresses
+        output that did not arrive through this final-response path.
+        """
+        final_metadata = dict(metadata or {})
+        final_metadata["_webhook_final_response"] = True
+        return await super()._send_with_retry(
+            chat_id=chat_id,
+            content=content,
+            reply_to=reply_to,
+            metadata=final_metadata,
+            max_retries=max_retries,
+            base_delay=base_delay,
+        )
+
+    def _deliver_internal_turn(self, content: str, delivery: dict) -> SendResult:
+        """Queue a completed webhook result for the destination's main agent."""
+        if not self.gateway_runner:
+            return SendResult(
+                success=False,
+                error="No gateway runner for internal-turn delivery",
+            )
+
+        deliver_type = str(delivery.get("deliver") or "")
+        if not deliver_type or deliver_type in {"log", "github_comment"}:
+            return SendResult(
+                success=False,
+                error=(
+                    "Internal-turn delivery requires a live gateway "
+                    "conversation platform"
+                ),
+            )
+
+        extra = delivery.get("deliver_extra", {})
+        chat_id = str(extra.get("chat_id") or "")
+        if not chat_id:
+            try:
+                target_platform = Platform(deliver_type)
+            except ValueError:
+                return SendResult(
+                    success=False,
+                    error=f"Unknown platform: {deliver_type}",
+                )
+            home = self.gateway_runner.config.get_home_channel(target_platform)
+            if not home:
+                return SendResult(
+                    success=False,
+                    error=f"No chat_id or home channel for {deliver_type}",
+                )
+            chat_id = str(home.chat_id)
+
+        try:
+            from gateway.internal_turns import InternalTurnService
+
+            accepted = InternalTurnService().enqueue(
+                content,
+                platform=deliver_type,
+                chat_id=chat_id,
+                thread_id=(
+                    extra.get("message_thread_id") or extra.get("thread_id")
+                ),
+                user_id=extra.get("user_id"),
+                chat_type=str(extra.get("chat_type") or "dm"),
+                profile=delivery.get("profile"),
+                kind="webhook_completion",
+                source_label=str(delivery.get("route_name") or "webhook"),
+                event_id=delivery.get("delivery_id"),
+                metadata={
+                    "webhook_route": delivery.get("route_name"),
+                    "webhook_delivery_id": delivery.get("delivery_id"),
+                },
+            )
+        except Exception as exc:
+            logger.exception("[webhook] Internal-turn delivery failed")
+            return SendResult(success=False, error=str(exc))
+
+        return SendResult(
+            success=bool(accepted),
+            error=None if accepted else "Internal turn was not accepted",
         )
 
     def _prune_delivery_info(self, now: float) -> None:
@@ -931,6 +1055,12 @@ class WebhookAdapter(BasePlatformAdapter):
             "deliver_extra": self._render_delivery_extra(
                 route_config.get("deliver_extra", {}), payload
             ),
+            "delivery_mode": str(
+                route_config.get("delivery_mode", "direct")
+            ).strip().lower(),
+            "route_name": route_name,
+            "delivery_id": delivery_id,
+            "profile": profile,
         }
         self._delivery_info[session_chat_id] = deliver_config
         self._delivery_info_created[session_chat_id] = now

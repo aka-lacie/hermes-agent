@@ -84,7 +84,8 @@ async def create_cron_job(body: CronJobCreate, profile: Optional[str] = None):
 async def get_cron_delivery_targets():
     """Delivery targets the cron dropdown should offer.
 
-    Always includes the implicit ``local`` option. Beyond that, the list is
+    Always includes ``local`` and ``origin`` (the profile's first configured
+    home channel). Beyond that, the list is
     derived dynamically from the configured gateway platforms via
     ``cron.scheduler.cron_delivery_targets()`` — no hardcoded platform list. A
     configured platform that hasn't set its cron home channel is still returned
@@ -102,7 +103,19 @@ async def get_cron_delivery_targets():
     try:
         from cron.scheduler import cron_delivery_targets
 
-        targets.extend(cron_delivery_targets())
+        platform_targets = cron_delivery_targets()
+        targets.append(
+            {
+                "id": "origin",
+                "name": "Profile home channel",
+                "home_target_set": any(
+                    bool(target.get("home_target_set"))
+                    for target in platform_targets
+                ),
+                "home_env_var": None,
+            }
+        )
+        targets.extend(platform_targets)
     except Exception:
         _log.exception("GET /api/cron/delivery-targets failed")
     return {"targets": targets}

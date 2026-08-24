@@ -4,6 +4,7 @@ import {
   buildCronJobPayload,
   cronJobHasExecutionContent,
   cronJobFormFromJob,
+  cronTargetSupportsInternalTurn,
   splitCronList,
   type CronJobFormState,
 } from "./cron-job";
@@ -21,6 +22,8 @@ function form(overrides: Partial<CronJobFormState> = {}): CronJobFormState {
     base_url: "",
     script: "",
     no_agent: false,
+    job_type: "agent",
+    delivery_mode: "direct",
     context_from: "",
     continuity: false,
     enabled_toolsets: [],
@@ -36,6 +39,20 @@ describe("splitCronList", () => {
       "terminal",
       "file",
     ]);
+  });
+});
+
+describe("cronTargetSupportsInternalTurn", () => {
+  it("accepts conversation-backed destinations", () => {
+    expect(cronTargetSupportsInternalTurn("origin")).toBe(true);
+    expect(cronTargetSupportsInternalTurn("discord")).toBe(true);
+    expect(cronTargetSupportsInternalTurn("discord:123,telegram")).toBe(true);
+  });
+
+  it("rejects local and Bot Chat lanes, including mixed targets", () => {
+    expect(cronTargetSupportsInternalTurn("local")).toBe(false);
+    expect(cronTargetSupportsInternalTurn("bot-chat:yuri")).toBe(false);
+    expect(cronTargetSupportsInternalTurn("discord,bot-chat:yuri")).toBe(false);
   });
 });
 
@@ -85,6 +102,25 @@ describe("buildCronJobPayload", () => {
       context_from: null,
       enabled_toolsets: null,
       workdir: null,
+    });
+  });
+
+  it("serializes a first-class reminder without legacy no_agent mode", () => {
+    const payload = buildCronJobPayload(
+      form({
+        prompt: "Check whether the customer replied",
+        deliver: "origin",
+        job_type: "reminder",
+        delivery_mode: "internal_turn",
+      }),
+    );
+
+    expect(payload).toMatchObject({
+      prompt: "Check whether the customer replied",
+      deliver: "origin",
+      job_type: "reminder",
+      delivery_mode: "internal_turn",
+      no_agent: false,
     });
   });
 });
@@ -150,6 +186,19 @@ describe("cronJobFormFromJob", () => {
 
     expect(cronJobFormFromJob(job)).toMatchObject({
       schedule: "2026-02-03T14:00:00+08:00",
+    });
+  });
+
+  it("maps legacy no_agent jobs to the script type", () => {
+    const job: CronJob = {
+      id: "legacy-script",
+      enabled: true,
+      no_agent: true,
+    };
+
+    expect(cronJobFormFromJob(job)).toMatchObject({
+      job_type: "script",
+      delivery_mode: "direct",
     });
   });
 });

@@ -407,6 +407,8 @@ def cron_create(args):
         model=getattr(args, "model", None),
         provider=getattr(args, "model_provider", None),
         no_agent=getattr(args, "no_agent", False) or None,
+        job_type=getattr(args, "job_type", None),
+        delivery_mode=getattr(args, "delivery_mode", None),
         monitor_script=getattr(args, "monitor_script", None),
         monitor_url=getattr(args, "monitor_url", None),
         continuity=getattr(args, "continuity", None),
@@ -427,8 +429,19 @@ def cron_create(args):
         print(f"  Monitor: {job_data['monitor_script']} (agent runs only on output change)")
     if job_data.get("monitor_url"):
         print(f"  Monitor: {job_data['monitor_url']} (agent runs only on output change)")
-    if job_data.get("no_agent"):
+    resolved_job_type = job_data.get("job_type") or (
+        "script" if job_data.get("no_agent") or getattr(args, "no_agent", False) else "agent"
+    )
+    if resolved_job_type == "script" and not job_data.get("job_type"):
         print("  Mode: no-agent (script stdout delivered directly)")
+    else:
+        print(f"  Mode: {resolved_job_type}")
+    delivery_label = (
+        "wake agent (additional agent turn)"
+        if job_data.get("delivery_mode") == "internal_turn"
+        else "deliver directly"
+    )
+    print(f"  Delivery: {delivery_label}")
     if job_data.get("continuity"):
         print("  Continuity: on (each run sees the previous run's output)")
     if job_data.get("workdir"):
@@ -482,6 +495,8 @@ def cron_edit(args):
         model=getattr(args, "model", None),
         provider=getattr(args, "model_provider", None),
         no_agent=getattr(args, "no_agent", None),
+        job_type=getattr(args, "job_type", None),
+        delivery_mode=getattr(args, "delivery_mode", None),
         monitor_script=getattr(args, "monitor_script", None),
         monitor_url=getattr(args, "monitor_url", None),
         continuity=getattr(args, "continuity", None),
@@ -505,8 +520,19 @@ def cron_edit(args):
         print(f"  Monitor: {updated['monitor_script']} (agent runs only on output change)")
     if updated.get("monitor_url"):
         print(f"  Monitor: {updated['monitor_url']} (agent runs only on output change)")
-    if updated.get("no_agent"):
+    resolved_job_type = updated.get("job_type") or (
+        "script" if updated.get("no_agent") else "agent"
+    )
+    if resolved_job_type == "script" and not updated.get("job_type"):
         print("  Mode: no-agent (script stdout delivered directly)")
+    else:
+        print(f"  Mode: {resolved_job_type}")
+    delivery_label = (
+        "wake agent (additional agent turn)"
+        if updated.get("delivery_mode") == "internal_turn"
+        else "deliver directly"
+    )
+    print(f"  Delivery: {delivery_label}")
     if updated.get("continuity"):
         print("  Continuity: on (each run sees the previous run's output)")
     if updated.get("workdir"):

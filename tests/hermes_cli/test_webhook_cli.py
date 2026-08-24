@@ -34,6 +34,7 @@ def _make_args(**kwargs):
         "skills": "",
         "deliver": "log",
         "deliver_chat_id": "",
+        "delivery_mode": "direct",
         "secret": "",
         "payload": "",
         "script": "",
@@ -60,6 +61,31 @@ class TestSubscribe:
         ))
         assert _load_subscriptions()["s"]["secret"] == "my-secret"
 
+
+    def test_internal_turn_delivery_mode_is_persisted(self):
+        webhook_command(
+            _make_args(
+                webhook_action="subscribe",
+                name="inbox",
+                deliver="discord",
+                delivery_mode="internal_turn",
+            )
+        )
+
+        assert _load_subscriptions()["inbox"]["delivery_mode"] == "internal_turn"
+
+    def test_internal_turn_rejects_non_conversation_target(self, capsys):
+        webhook_command(
+            _make_args(
+                webhook_action="subscribe",
+                name="review-comment",
+                deliver="github_comment",
+                delivery_mode="internal_turn",
+            )
+        )
+
+        assert "not live Hermes conversations" in capsys.readouterr().out
+        assert "review-comment" not in _load_subscriptions()
 
     def test_auto_secret(self):
         webhook_command(_make_args(webhook_action="subscribe", name="s"))
@@ -152,4 +178,3 @@ class TestWebhookEnabledGate:
         )
         import hermes_cli.webhook as wh_mod
         assert wh_mod._is_webhook_enabled() is False
-

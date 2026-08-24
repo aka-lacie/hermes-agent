@@ -2320,11 +2320,15 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
 
     if deliver_value == "origin":
         if origin:
-            return {
+            target = {
                 "platform": origin["platform"],
                 "chat_id": str(origin["chat_id"]),
                 "thread_id": _origin_delivery_thread(origin),
             }
+            for identity_key in ("user_id", "chat_type"):
+                if origin.get(identity_key) is not None:
+                    target[identity_key] = origin[identity_key]
+            return target
         # Origin missing (e.g. job created via API/script) — try each
         # platform's home channel as a fallback instead of silently dropping.
         for platform_name in _iter_home_target_platforms():
@@ -2398,6 +2402,8 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
             "platform": platform_name,
             "chat_id": str(origin["chat_id"]),
             "thread_id": origin.get("thread_id"),
+            "user_id": origin.get("user_id"),
+            "chat_type": origin.get("chat_type"),
         }
 
     if not _is_known_delivery_platform(platform_name):
@@ -2864,9 +2870,17 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     Returns None on success, or an error string on failure.
     """
+    delivery_mode = str(job.get("delivery_mode") or "direct").strip().lower()
     targets = _resolve_delivery_targets(job)
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
+        if delivery_mode == "internal_turn":
+            msg = (
+                "internal-turn delivery requires a resolvable live gateway "
+                f"conversation; no target resolved for deliver={deliver_value}"
+            )
+            logger.warning("Job '%s': %s", job["id"], msg)
+            return msg
         if deliver_value == "local":
             return None  # local-only jobs don't deliver — not a failure
         # deliver=origin with no resolvable origin and no configured home
@@ -2885,6 +2899,62 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         msg = f"no delivery target resolved for deliver={deliver_value}"
         logger.warning("Job '%s': %s", job["id"], msg)
         return msg
+
+    if delivery_mode == "internal_turn":
+        from gateway.internal_turns import InternalTurnService
+
+        service = InternalTurnService()
+        errors = []
+        job_type = str(job.get("job_type") or "").strip().lower()
+        notification_kind = (
+            "reminder" if job_type == "reminder" else "cron_completion"
+        )
+        target_profile = None
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            active_profile = str(get_active_profile_name() or "").strip()
+            if active_profile and active_profile != "default":
+                target_profile = active_profile
+        except Exception:
+            logger.debug(
+                "Job '%s': could not resolve internal-turn target profile",
+                job.get("id", "?"),
+                exc_info=True,
+            )
+        for target in targets:
+            if str(target.get("platform") or "").lower() == BOT_CHAT_PLATFORM:
+                errors.append(
+                    "internal-turn delivery cannot target Bot Chat because "
+                    "Bot Chat already starts its own agent turn"
+                )
+                continue
+            accepted = service.enqueue(
+                content,
+                platform=str(target.get("platform") or ""),
+                chat_id=str(target.get("chat_id") or ""),
+                thread_id=target.get("thread_id"),
+                user_id=target.get("user_id"),
+                chat_type=target.get("chat_type") or (
+                    "thread" if target.get("thread_id") else "dm"
+                ),
+                profile=target_profile,
+                kind=notification_kind,
+                source_label="cron",
+                event_id=str(job.get("id") or "") or None,
+                metadata={
+                    "cron_job_id": str(job.get("id") or ""),
+                    "cron_job_name": str(job.get("name") or ""),
+                },
+            )
+            if not accepted:
+                errors.append(
+                    f"internal turn to {target.get('platform')}:{target.get('chat_id')} "
+                    "was not accepted by a live gateway"
+                )
+        if errors:
+            return "; ".join(errors)
+        return None
 
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
@@ -5108,7 +5178,25 @@ def run_job(
     #   - wakeAgent=false gate    → treated like empty stdout (silent), since
     #                               the whole point of no_agent is that there
     #                               is no agent to wake
-    if job.get("no_agent"):
+    job_type = str(job.get("job_type") or "").strip().lower()
+    if job_type == "reminder":
+        reminder_text = str(job.get("prompt") or "").strip()
+        if not reminder_text:
+            err = "reminder job has no reminder text"
+            logger.error("Job '%s': %s", job_id, err)
+            return False, "", "", err
+        now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
+        doc = (
+            f"# Cron Reminder: {job_name}\n\n"
+            f"**Job ID:** {job_id}\n"
+            f"**Run Time:** {now_iso}\n"
+            f"**Mode:** reminder (no detached agent)\n\n"
+            f"---\n\n"
+            f"{reminder_text}\n"
+        )
+        return True, doc, reminder_text, None
+
+    if job.get("no_agent") or job_type == "script":
         # Load .env before the script runs so auto-delivery can resolve home
         # channels. A standalone cron tick process typically starts WITHOUT
         # TELEGRAM_HOME_CHANNEL/DISCORD_HOME_CHANNEL in its environment, and

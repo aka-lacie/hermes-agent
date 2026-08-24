@@ -95,6 +95,8 @@ class AutomationBlueprint:
     prompt_template: str
     slots: List[BlueprintSlot] = field(default_factory=list)
     deliver_default: str = "origin"
+    job_type: str = "agent"
+    delivery_mode: str = "direct"
     skills: tuple = ()        # skills the job loads before running
     tags: tuple = ()
 
@@ -217,6 +219,8 @@ CATALOG: List[AutomationBlueprint] = [
         category="general",
         schedule_template="{minute} {hour} * * {dow}",
         prompt_template="Remind the user: {what}",
+        job_type="reminder",
+        delivery_mode="internal_turn",
         slots=[
             BlueprintSlot(name="what", type="text", label="Remind me to…",
                        default="take a break and stretch"),
@@ -791,6 +795,8 @@ def fill_blueprint(
         "schedule": schedule,
         "name": blueprint.title,
         "deliver": resolved.get("deliver", blueprint.deliver_default),
+        "job_type": blueprint.job_type,
+        "delivery_mode": blueprint.delivery_mode,
     }
     if blueprint.skills:
         spec["skills"] = list(blueprint.skills)

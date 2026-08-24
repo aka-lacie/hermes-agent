@@ -12774,8 +12774,29 @@ def _validate_dashboard_cron_effective_job(job: Dict[str, Any]) -> None:
     script = _cron_optional_text(job.get("script"))
     skills = _cron_string_list(job.get("skills")) or _cron_string_list(job.get("skill"))
     no_agent = bool(job.get("no_agent"))
+    job_type = str(
+        job.get("job_type") or ("script" if no_agent else "agent")
+    ).strip().lower()
 
-    if no_agent:
+    if job_type not in {"agent", "script", "reminder"}:
+        raise HTTPException(
+            status_code=400,
+            detail="job_type must be one of: agent, script, reminder",
+        )
+    if job_type == "reminder":
+        if not prompt:
+            raise HTTPException(
+                status_code=400,
+                detail="reminder jobs require reminder text",
+            )
+        if script or skills:
+            raise HTTPException(
+                status_code=400,
+                detail="reminder jobs cannot use script or skills",
+            )
+        return
+
+    if no_agent or job_type == "script":
         if not script:
             raise HTTPException(
                 status_code=400,
@@ -12816,6 +12837,14 @@ def _normalize_dashboard_cron_updates(
         )
     if "deliver" in normalized:
         normalized["deliver"] = _cron_optional_text(normalized["deliver"]) or "local"
+    if "job_type" in normalized:
+        normalized["job_type"] = (
+            _cron_optional_text(normalized["job_type"]) or "agent"
+        ).lower()
+    if "delivery_mode" in normalized:
+        normalized["delivery_mode"] = (
+            _cron_optional_text(normalized["delivery_mode"]) or "direct"
+        ).lower()
     if "context_from" in normalized:
         normalized["context_from"] = _cron_string_list(normalized["context_from"])
     if "enabled_toolsets" in normalized:
@@ -13150,11 +13179,13 @@ def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
         context_from = _cron_string_list(body.context_from)
         _validate_dashboard_cron_context_from(context_from, profile_name)
         no_agent = bool(body.no_agent)
+        job_type = body.job_type or ("script" if no_agent else "agent")
         _validate_dashboard_cron_effective_job({
             "prompt": body.prompt,
             "skills": skills,
             "script": script,
             "no_agent": no_agent,
+            "job_type": job_type,
         })
         return _mutate_cron_for_profile(
             profile_name,
@@ -13172,6 +13203,8 @@ def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
             enabled_toolsets=_cron_string_list(body.enabled_toolsets),
             workdir=_cron_optional_text(body.workdir),
             no_agent=no_agent,
+            job_type=body.job_type,
+            delivery_mode=body.delivery_mode,
         )
     except HTTPException:
         raise
@@ -13203,7 +13236,9 @@ def _update_cron_job_sync(job_id: str, body: CronJobUpdate, profile: Optional[st
                 updates.get("context_from"),
                 profile_name,
             )
-        execution_fields = {"prompt", "skill", "skills", "script", "no_agent"}
+        execution_fields = {
+            "prompt", "skill", "skills", "script", "no_agent", "job_type"
+        }
         if execution_fields.intersection(updates):
             effective = {**existing, **updates}
             if "skills" in updates and "skill" not in updates:
@@ -13949,6 +13984,7 @@ def _webhook_route_summary(name: str, route: Dict[str, Any], base_url: str) -> D
         "events": list(route.get("events") or []),
         "deliver": route.get("deliver", "log"),
         "deliver_only": bool(route.get("deliver_only")),
+        "delivery_mode": route.get("delivery_mode", "direct"),
         "prompt": route.get("prompt", ""),
         "script": route.get("script", ""),
         "skills": list(route.get("skills") or []),
@@ -14023,6 +14059,25 @@ async def create_webhook(body: WebhookCreate):
             status_code=400,
             detail="Direct delivery requires a real target (telegram, discord, …), not 'log'.",
         )
+    delivery_mode = str(body.delivery_mode or "direct").strip().lower()
+    if delivery_mode not in {"direct", "internal_turn"}:
+        raise HTTPException(
+            status_code=400,
+            detail="delivery_mode must be 'direct' or 'internal_turn'.",
+        )
+    if body.deliver_only and delivery_mode == "internal_turn":
+        raise HTTPException(
+            status_code=400,
+            detail="internal_turn delivery requires an agent completion.",
+        )
+    internal_turn_error = wh._internal_turn_target_error(
+        delivery_mode, body.deliver
+    )
+    if internal_turn_error:
+        raise HTTPException(
+            status_code=400,
+            detail=internal_turn_error,
+        )
 
     secret = body.secret or _secrets.token_urlsafe(32)
     route: Dict[str, Any] = {
@@ -14032,6 +14087,7 @@ async def create_webhook(body: WebhookCreate):
         "prompt": body.prompt or "",
         "skills": [s.strip() for s in body.skills if s.strip()],
         "deliver": body.deliver or "log",
+        "delivery_mode": delivery_mode,
         "created_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
     }
     if body.script and body.script.strip():

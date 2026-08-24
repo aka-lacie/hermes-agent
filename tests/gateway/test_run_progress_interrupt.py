@@ -129,6 +129,25 @@ class PartialTruncationAgent:
         }
 
 
+class NotificationCapturingAgent:
+    last_run_kwargs = None
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+        self._interrupt_requested = False
+
+    @property
+    def is_interrupted(self) -> bool:
+        return self._interrupt_requested
+
+    def run_conversation(
+        self, message, conversation_history=None, task_id=None, **kwargs
+    ):
+        type(self).last_run_kwargs = kwargs
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
 def _make_runner(adapter):
     gateway_run = importlib.import_module("gateway.run")
     GatewayRunner = gateway_run.GatewayRunner
@@ -153,7 +172,14 @@ def _make_runner(adapter):
     return runner
 
 
-async def _run_once(monkeypatch, tmp_path, agent_cls, session_id):
+async def _run_once(
+    monkeypatch,
+    tmp_path,
+    agent_cls,
+    session_id,
+    *,
+    internal_notification=None,
+):
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
 
     fake_dotenv = types.ModuleType("dotenv")
@@ -186,8 +212,34 @@ async def _run_once(monkeypatch, tmp_path, agent_cls, session_id):
         source=source,
         session_id=session_id,
         session_key="agent:main:telegram:group:-1001:17585",
+        internal_notification=internal_notification,
     )
     return adapter, result
+
+
+@pytest.mark.asyncio
+async def test_run_agent_forwards_internal_notification_to_conversation(
+    monkeypatch, tmp_path
+):
+    notification = {
+        "kind": "reminder",
+        "source": "cron",
+        "event_id": "job-1",
+    }
+    NotificationCapturingAgent.last_run_kwargs = None
+
+    _, result = await _run_once(
+        monkeypatch,
+        tmp_path,
+        NotificationCapturingAgent,
+        "sess-notification",
+        internal_notification=notification,
+    )
+
+    assert result["final_response"] == "done"
+    assert NotificationCapturingAgent.last_run_kwargs == {
+        "internal_notification": notification
+    }
 
 
 @pytest.mark.asyncio

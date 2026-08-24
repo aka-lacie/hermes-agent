@@ -74,6 +74,9 @@ export default function WebhooksPage() {
   const [events, setEvents] = useState("");
   const [deliver, setDeliver] = useState("log");
   const [deliverOnly, setDeliverOnly] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState<
+    "direct" | "internal_turn"
+  >("direct");
   const [prompt, setPrompt] = useState("");
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<CreatedWebhook | null>(null);
@@ -180,6 +183,7 @@ export default function WebhooksPage() {
     setEvents("");
     setDeliver("log");
     setDeliverOnly(false);
+    setDeliveryMode("direct");
     setPrompt("");
   }, []);
 
@@ -200,6 +204,7 @@ export default function WebhooksPage() {
         events: eventsList.length ? eventsList : undefined,
         deliver,
         deliver_only: deliverOnly,
+        delivery_mode: deliveryMode,
         prompt: prompt.trim() || undefined,
       });
       showToast("Created ✓", "success");
@@ -398,13 +403,18 @@ export default function WebhooksPage() {
                   />
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid gap-4">
                   <div className="grid gap-2">
                     <Label htmlFor="webhook-deliver">Deliver to</Label>
                     <Select
                       id="webhook-deliver"
                       value={deliver}
-                      onValueChange={(v) => setDeliver(v)}
+                      onValueChange={(v) => {
+                        setDeliver(v);
+                        if (v === "log" || v === "github_comment") {
+                          setDeliveryMode("direct");
+                        }
+                      }}
                     >
                       <SelectOption value="log">Log</SelectOption>
                       <SelectOption value="telegram">Telegram</SelectOption>
@@ -418,18 +428,65 @@ export default function WebhooksPage() {
                   </div>
 
                   <div className="grid gap-2">
-                    <Label htmlFor="webhook-deliver-only">Deliver only</Label>
-                    <label className="flex items-center gap-2 text-sm text-muted-foreground h-9">
-                      <input
-                        id="webhook-deliver-only"
-                        type="checkbox"
-                        checked={deliverOnly}
-                        onChange={(e) => setDeliverOnly(e.target.checked)}
-                      />
-                      Skip the agent, deliver payload directly
-                    </label>
+                    <Label htmlFor="webhook-processing">Processing</Label>
+                    <Select
+                      id="webhook-processing"
+                      value={deliverOnly ? "forward" : "agent"}
+                      onValueChange={(value) => {
+                        const forwardOnly = value === "forward";
+                        setDeliverOnly(forwardOnly);
+                        if (forwardOnly) setDeliveryMode("direct");
+                      }}
+                    >
+                      <SelectOption value="agent">
+                        Process with background agent
+                      </SelectOption>
+                      <SelectOption value="forward">
+                        Forward payload only (no agent)
+                      </SelectOption>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      {deliverOnly
+                        ? "Posts the rendered payload without an LLM call."
+                        : "Starts a fresh background agent to process the webhook first."}
+                    </p>
                   </div>
                 </div>
+
+                {!deliverOnly && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="webhook-delivery-mode">
+                      How the agent result arrives
+                    </Label>
+                    <Select
+                      id="webhook-delivery-mode"
+                      value={deliveryMode}
+                      onValueChange={(value) =>
+                        setDeliveryMode(
+                          value as "direct" | "internal_turn",
+                        )
+                      }
+                    >
+                      <SelectOption value="direct">
+                        Deliver directly
+                      </SelectOption>
+                      {deliver !== "log" && deliver !== "github_comment" && (
+                        <SelectOption value="internal_turn">
+                          Wake agent
+                        </SelectOption>
+                      )}
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      {deliver === "log"
+                        ? "Logging has no destination conversation to continue."
+                        : deliver === "github_comment"
+                          ? "GitHub comments are direct outputs, not live Hermes conversations."
+                          : deliveryMode === "internal_turn"
+                            ? "Runs a second agent turn in the destination conversation so it can use context, act, reply, or stay silent."
+                            : "No destination-agent turn is started."}
+                    </p>
+                  </div>
+                )}
 
                 <div className="grid gap-2">
                   <Label htmlFor="webhook-prompt">Prompt</Label>
@@ -552,6 +609,9 @@ export default function WebhooksPage() {
                   <Badge tone="outline">{sub.deliver}</Badge>
                   {sub.deliver_only && (
                     <Badge tone="secondary">deliver only</Badge>
+                  )}
+                  {sub.delivery_mode === "internal_turn" && (
+                    <Badge tone="secondary">wakes agent</Badge>
                   )}
                   {!sub.enabled && <Badge tone="warning">disabled</Badge>}
                 </div>

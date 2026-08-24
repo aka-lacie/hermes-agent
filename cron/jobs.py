@@ -458,6 +458,61 @@ def fire_claim_fence(job_id: str, *, expected_owner: str):
 # updated lets an unsafe value (``../escape``, absolute path, nested) leak
 # into output writes/deletes.
 _IMMUTABLE_JOB_FIELDS = frozenset({"id"})
+_CRON_JOB_TYPES = frozenset({"agent", "script", "reminder"})
+_CRON_DELIVERY_MODES = frozenset({"direct", "internal_turn"})
+
+
+def _normalize_job_type(value: Any, *, no_agent: bool = False) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "script" if no_agent else "agent"
+    if text not in _CRON_JOB_TYPES:
+        raise ValueError(
+            f"Unknown cron job_type {value!r}; expected agent, script, or reminder."
+        )
+    return text
+
+
+def _normalize_delivery_mode(value: Any) -> str:
+    text = str(value or "direct").strip().lower() or "direct"
+    if text not in _CRON_DELIVERY_MODES:
+        raise ValueError(
+            f"Unknown cron delivery_mode {value!r}; expected direct or internal_turn."
+        )
+    return text
+
+
+def _validate_delivery_mode_target(delivery_mode: Any, deliver: Any) -> None:
+    """Reject delivery-mode/target pairs that cannot share one runtime lane.
+
+    ``internal_turn`` is a handoff to a live gateway conversation. ``local``
+    has no conversation to wake, and ``bot-chat`` already invokes an agent via
+    its own profile-chat subprocess. Mixed target lists are rejected too: one
+    stored delivery mode applies to every target, so silently treating only
+    some entries as internal turns would make the job's behavior ambiguous.
+    """
+    if _normalize_delivery_mode(delivery_mode) != "internal_turn":
+        return
+
+    if isinstance(deliver, (list, tuple)):
+        raw_targets = [str(value).strip() for value in deliver]
+    else:
+        raw_targets = str(deliver or "").split(",")
+    targets = [target.strip().lower() for target in raw_targets if target.strip()]
+
+    if not targets or "local" in targets:
+        raise ValueError(
+            "delivery_mode='internal_turn' requires a messaging conversation; "
+            "deliver='local' only saves the result."
+        )
+    if any(
+        target == "bot-chat" or target.startswith("bot-chat:")
+        for target in targets
+    ):
+        raise ValueError(
+            "delivery_mode='internal_turn' cannot target Bot Chat because "
+            "Bot Chat already starts its own agent turn. Use delivery_mode='direct'."
+        )
 
 
 def _job_output_dir(job_id: str) -> Path:
@@ -571,6 +626,13 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     prompt = _coerce_job_text(normalized.get("prompt"))
     normalized["id"] = job_id
     normalized["prompt"] = prompt
+    normalized["job_type"] = _normalize_job_type(
+        normalized.get("job_type"),
+        no_agent=bool(normalized.get("no_agent")),
+    )
+    normalized["delivery_mode"] = _normalize_delivery_mode(
+        normalized.get("delivery_mode")
+    )
 
     name = _coerce_job_text(normalized.get("name")).strip()
     if not name:
@@ -1836,6 +1898,7 @@ def _compute_provider_model_snapshots(
     model: Any,
     base_url: Any,
     no_agent: Any,
+    job_type: Any = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Snapshot unpinned inference axes for the provider/model drift guard.
 
@@ -1850,7 +1913,8 @@ def _compute_provider_model_snapshots(
         base_url,
         strip_trailing_slash=True,
     )
-    if bool(no_agent):
+    normalized_job_type = _normalize_job_type(job_type, no_agent=bool(no_agent))
+    if normalized_job_type != "agent":
         return None, None
 
     provider_snapshot: Optional[str] = None
@@ -1875,13 +1939,13 @@ def _compute_provider_model_snapshots(
     return provider_snapshot, model_snapshot
 
 
-def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
+def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     """Return the stored inference-routing fields in their semantic form."""
     return (
         _normalize_job_optional_text(job.get("provider")),
         _normalize_job_optional_text(job.get("model")),
         _normalize_job_optional_text(job.get("base_url"), strip_trailing_slash=True),
-        bool(job.get("no_agent")),
+        _normalize_job_type(job.get("job_type"), no_agent=bool(job.get("no_agent"))),
     )
 
 
@@ -1890,6 +1954,7 @@ def _validate_job_mode_invariants(
     monitor_url: Optional[str],
     no_agent: bool,
     script: Optional[str],
+    job_type: Optional[str] = None,
 ) -> None:
     """Shared create/update validation for job execution-mode invariants.
 
@@ -1907,6 +1972,12 @@ def _validate_job_mode_invariants(
             "monitor_script/monitor_url cannot be combined with no_agent=True — "
             "the whole point of a monitor job is to suppress or wake the AGENT "
             "based on source changes. Use a plain no_agent script job instead."
+        )
+    normalized_job_type = _normalize_job_type(job_type, no_agent=no_agent)
+    if (monitor_script or monitor_url) and normalized_job_type != "agent":
+        raise ValueError(
+            "monitor_script/monitor_url can only be combined with "
+            "job_type='agent'."
         )
     if no_agent and not script:
         raise ValueError(NO_AGENT_WITHOUT_SCRIPT_ERROR)
@@ -1930,6 +2001,8 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    job_type: Optional[str] = None,
+    delivery_mode: Optional[str] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -2016,7 +2089,8 @@ def create_job(
 
     # Default delivery to origin if available, otherwise local
     if deliver is None:
-        deliver = "origin" if origin else "local"
+        requested_job_type = str(job_type or "").strip().lower()
+        deliver = "origin" if origin or requested_job_type == "reminder" else "local"
 
     job_id = uuid.uuid4().hex[:12]
     now = _hermes_now().isoformat()
@@ -2030,7 +2104,15 @@ def create_job(
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
-    normalized_no_agent = bool(no_agent)
+    normalized_job_type = _normalize_job_type(job_type, no_agent=bool(no_agent))
+    if bool(no_agent) and normalized_job_type != "script":
+        raise ValueError("no_agent=True is only compatible with job_type='script'.")
+    normalized_no_agent = normalized_job_type == "script"
+    normalized_delivery_mode = _normalize_delivery_mode(
+        delivery_mode or (
+            "internal_turn" if normalized_job_type == "reminder" else "direct"
+        )
+    )
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
     normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
     normalized_monitor_script = str(monitor_script).strip() if isinstance(monitor_script, str) else None
@@ -2049,6 +2131,7 @@ def create_job(
         normalized_monitor_url,
         normalized_no_agent,
         normalized_script,
+        normalized_job_type,
     )
 
     # Normalize context_from: accept str or list of str, store as list or None
@@ -2060,9 +2143,17 @@ def create_job(
         context_from = None
 
     prompt_text = _coerce_job_text(prompt).strip()
-
-    if not prompt_text and not normalized_script and not normalized_skills:
+    if normalized_job_type == "reminder":
+        if not prompt_text.strip():
+            raise ValueError("job_type='reminder' requires reminder text in prompt.")
+        if normalized_script or normalized_skills:
+            raise ValueError(
+                "Reminder jobs cannot use script or skills; they emit their prompt directly."
+            )
+    elif not prompt_text and not normalized_script and not normalized_skills:
         raise ValueError(EMPTY_PAYLOAD_ERROR)
+
+    _validate_delivery_mode_target(normalized_delivery_mode, deliver)
 
     # Reject cron jobs that schedule gateway-lifecycle commands. Prevents
     # agent-driven SIGTERM-respawn loops under launchd/systemd KeepAlive
@@ -2079,6 +2170,7 @@ def create_job(
         model=normalized_model,
         base_url=normalized_base_url,
         no_agent=normalized_no_agent,
+        job_type=normalized_job_type,
     )
 
     next_run_at = compute_next_run(parsed_schedule)
@@ -2111,6 +2203,7 @@ def create_job(
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
+        "job_type": normalized_job_type,
         "monitor_script": normalized_monitor_script,
         "monitor_url": normalized_monitor_url,
         # Hash-suppression state for monitor jobs: {"last_output_hash": ...,
@@ -2136,6 +2229,7 @@ def create_job(
         "failure_streak": 0,
         # Delivery configuration
         "deliver": deliver,
+        "delivery_mode": normalized_delivery_mode,
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
@@ -2238,6 +2332,25 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             if job["id"] != job_id:
                 continue
 
+            if "delivery_mode" in updates:
+                updates["delivery_mode"] = _normalize_delivery_mode(
+                    updates["delivery_mode"]
+                )
+            if "job_type" in updates:
+                requested_type = _normalize_job_type(
+                    updates["job_type"],
+                    no_agent=bool(updates.get("no_agent", job.get("no_agent"))),
+                )
+                if bool(updates.get("no_agent")) and requested_type != "script":
+                    raise ValueError(
+                        "no_agent=True is only compatible with job_type='script'."
+                    )
+                updates["job_type"] = requested_type
+                updates["no_agent"] = requested_type == "script"
+            elif "no_agent" in updates:
+                # Preserve the legacy toggle as an alias for agent/script.
+                updates["job_type"] = "script" if bool(updates["no_agent"]) else "agent"
+
             # Validate / normalize workdir if present in updates.  Empty string
             # or None both mean "clear the field" (restore old behaviour).
             if "workdir" in updates:
@@ -2284,7 +2397,13 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             # monitor: the scheduler's no_agent short-circuit runs before
             # the monitor gate). Scoped to changed fields so legacy records
             # untouched by this update keep loading.
-            if {"monitor_script", "monitor_url", "no_agent", "script"}.intersection(updates):
+            if {
+                "monitor_script",
+                "monitor_url",
+                "no_agent",
+                "script",
+                "job_type",
+            }.intersection(updates):
                 _upd_script = updated.get("script")
                 _upd_script = str(_upd_script).strip() if isinstance(_upd_script, str) else None
                 _validate_job_mode_invariants(
@@ -2292,6 +2411,7 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     updated.get("monitor_url") or None,
                     bool(updated.get("no_agent")),
                     _upd_script or None,
+                    updated.get("job_type"),
                 )
 
             if any(k in updates for k in _PAYLOAD_FIELDS):
@@ -2299,13 +2419,41 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     raise ValueError(EMPTY_PAYLOAD_ERROR)
             schedule_changed = "schedule" in updates
             inference_fields_changed = bool(
-                {"provider", "model", "base_url", "no_agent"}.intersection(updates)
+                {"provider", "model", "base_url", "no_agent", "job_type"}.intersection(updates)
             ) and _normalized_inference_axes(updated) != previous_inference_axes
 
             if "skills" in updates or "skill" in updates:
                 normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
                 updated["skills"] = normalized_skills
                 updated["skill"] = normalized_skills[0] if normalized_skills else None
+
+            effective_type = _normalize_job_type(
+                updated.get("job_type"),
+                no_agent=bool(updated.get("no_agent")),
+            )
+            updated["job_type"] = effective_type
+            updated["no_agent"] = effective_type == "script"
+            updated["delivery_mode"] = _normalize_delivery_mode(
+                updated.get("delivery_mode")
+            )
+            if {"delivery_mode", "deliver"}.intersection(updates):
+                _validate_delivery_mode_target(
+                    updated["delivery_mode"], updated.get("deliver")
+                )
+            if effective_type == "script" and not _normalize_job_optional_text(
+                updated.get("script")
+            ):
+                raise ValueError("job_type='script' requires a script.")
+            if effective_type == "reminder":
+                if not _coerce_job_text(updated.get("prompt")).strip():
+                    raise ValueError(
+                        "job_type='reminder' requires reminder text in prompt."
+                    )
+                if _normalize_job_optional_text(updated.get("script")) or updated.get("skills"):
+                    raise ValueError(
+                        "Reminder jobs cannot use script or skills; "
+                        "they emit their prompt directly."
+                    )
 
             if schedule_changed:
                 updated_schedule = updated["schedule"]
@@ -2350,6 +2498,7 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     model=updated.get("model"),
                     base_url=updated.get("base_url"),
                     no_agent=updated.get("no_agent"),
+                    job_type=updated.get("job_type"),
                 )
                 updated["provider_snapshot"] = provider_snapshot
                 updated["model_snapshot"] = model_snapshot

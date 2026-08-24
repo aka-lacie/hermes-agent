@@ -388,6 +388,8 @@ class CronJobCreate(BaseModel):
     enabled_toolsets: Optional[List[str]] = None
     workdir: Optional[str] = None
     no_agent: bool = False
+    job_type: Optional[str] = None
+    delivery_mode: Optional[str] = None
 
 
 class CronJobUpdate(BaseModel):
@@ -466,6 +468,7 @@ class WebhookCreate(BaseModel):
     skills: List[str] = []
     deliver: str = "log"
     deliver_only: bool = False
+    delivery_mode: str = "direct"
     deliver_chat_id: Optional[str] = None
     # secret: omit to auto-generate
     secret: Optional[str] = None
@@ -738,4 +741,3 @@ class _PluginProvidersPutBody(BaseModel):
 
 class _PluginVisibilityBody(BaseModel):
     hidden: bool
-

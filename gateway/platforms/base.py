@@ -3052,6 +3052,10 @@ class BasePlatformAdapter(ABC):
         # Without the owner-task map, an old task's finally block could delete
         # a newer task's guard, leaving stale busy state.
         self._active_sessions: Dict[str, asyncio.Event] = {}
+        # Current synthetic/internal processing owner per session.  This lets
+        # the runner keep real user input ahead of background notification
+        # work without interrupting a synthetic turn that has already begun.
+        self._internal_session_tasks: Dict[str, asyncio.Task] = {}
         self._pending_messages: Dict[str, MessageEvent] = {}
         self._session_tasks: Dict[str, asyncio.Task] = {}
         # Legacy busy_text_mode env var; when unset the runner syncs the
@@ -6288,6 +6292,16 @@ class BasePlatformAdapter(ABC):
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         """Background task that actually processes the message."""
+        current_processing_task = asyncio.current_task()
+        internal_session_tasks = getattr(self, "_internal_session_tasks", None)
+        if internal_session_tasks is None:
+            internal_session_tasks = {}
+            self._internal_session_tasks = internal_session_tasks
+        if getattr(event, "internal", False) and current_processing_task is not None:
+            internal_session_tasks[session_key] = current_processing_task
+        else:
+            internal_session_tasks.pop(session_key, None)
+
         # Track delivery outcomes for the processing-complete hook
         delivery_attempted = False
         delivery_succeeded = False
@@ -6905,6 +6919,11 @@ class BasePlatformAdapter(ABC):
             # callbacks may perform platform I/O; a stuck callback must not
             # leave the typing refresh task running indefinitely.
             await _stop_typing_task()
+            if (
+                internal_session_tasks.get(session_key)
+                is current_processing_task
+            ):
+                internal_session_tasks.pop(session_key, None)
             # Fire any one-shot post-delivery callback registered for this
             # session (e.g. deferred background-review notifications).
             #

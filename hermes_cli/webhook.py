@@ -17,7 +17,7 @@ import secrets
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, Optional
 
 from hermes_constants import display_hermes_home
 from utils import atomic_replace
@@ -137,6 +137,24 @@ def _require_webhook_enabled() -> bool:
     return False
 
 
+def _internal_turn_target_error(delivery_mode: Any, deliver: Any) -> Optional[str]:
+    """Return a configuration error for non-conversation delivery targets."""
+    if str(delivery_mode or "direct").strip().lower() != "internal_turn":
+        return None
+    target = str(deliver or "log").strip().lower()
+    if target == "log":
+        return (
+            "--delivery-mode internal_turn requires --deliver to be a live "
+            "gateway platform such as discord or telegram."
+        )
+    if target == "github_comment":
+        return (
+            "--delivery-mode internal_turn cannot target github_comment; "
+            "GitHub comments are direct outputs, not live Hermes conversations."
+        )
+    return None
+
+
 def webhook_command(args):
     """Entry point for 'hermes webhook' subcommand."""
     sub = getattr(args, "webhook_action", None)
@@ -178,6 +196,7 @@ def _cmd_subscribe(args):
         "prompt": args.prompt or "",
         "skills": [s.strip() for s in args.skills.split(",")] if args.skills else [],
         "deliver": args.deliver or "log",
+        "delivery_mode": getattr(args, "delivery_mode", "direct") or "direct",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
@@ -188,7 +207,19 @@ def _cmd_subscribe(args):
                 "(telegram, discord, slack, github_comment, etc.) — not 'log'."
             )
             return
+        if route["delivery_mode"] == "internal_turn":
+            print(
+                "Error: --deliver-only cannot be combined with "
+                "--delivery-mode internal_turn."
+            )
+            return
         route["deliver_only"] = True
+    internal_turn_error = _internal_turn_target_error(
+        route["delivery_mode"], route["deliver"]
+    )
+    if internal_turn_error:
+        print(f"Error: {internal_turn_error}")
+        return
 
     script = getattr(args, "script", "") or ""
     if script.strip():
@@ -211,6 +242,8 @@ def _cmd_subscribe(args):
     else:
         print("  Events: (all)")
     print(f"  Deliver: {route['deliver']}")
+    if route.get("delivery_mode") == "internal_turn":
+        print("  Completion: wake agent (second agent turn)")
     if route.get("deliver_only"):
         print("  Mode: direct delivery (no agent, zero LLM cost)")
     if route.get("prompt"):
@@ -238,6 +271,8 @@ def _cmd_list(args):
         deliver = route.get("deliver", "log")
         if route.get("deliver_only"):
             deliver = f"{deliver} (direct — no agent)"
+        elif route.get("delivery_mode") == "internal_turn":
+            deliver = f"{deliver} (wakes agent; second agent turn)"
         desc = route.get("description", "")
         print(f"  ◆ {name}")
         if desc:

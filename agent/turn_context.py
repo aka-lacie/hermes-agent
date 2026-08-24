@@ -474,6 +474,7 @@ def build_turn_context(
     set_current_write_origin,
     ra,
     moa_active: bool = False,
+    internal_notification: Optional[Mapping[str, str]] = None,
 ) -> TurnContext:
     """Run the once-per-turn setup and return the loop's input context.
 
@@ -1287,6 +1288,9 @@ def build_turn_context(
             platform=getattr(agent, "platform", None) or "",
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
+            internal_notification=(
+                dict(internal_notification) if internal_notification else None
+            ),
         )
         _ctx_parts: list[str] = []
         # Spill oversized per-hook context to disk so a runaway plugin

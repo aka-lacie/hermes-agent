@@ -264,6 +264,29 @@ For **Telegram topics**, use `telegram:<chat_id>:<thread_id>` (e.g., `telegram:-
 
 **Bot Chat** (`bot-chat`, `bot-chat:<profile>`) is a machine-local pseudo-platform, not a gateway adapter: the scheduler delivers by running `hermes [-p <profile>] chat --in ~ -c "Bot Chat" --create-if-missing -Q --query-file <tmp>` — the same lane Bot Mode agent-to-agent messages use — so the output arrives as a real inbound turn in the profile's canonical Bot Chat and the bot runs a full agent turn on it (alternation-safe by construction; this is the chat command lane, not a transcript mirror). The bare token targets the job's own profile; the named form is validated against `~/.hermes/profiles/` at create time and again at fire time, and never resolves across machines. Bot-chat targets are excluded from the `all` routing token and from delivery preflight (no gateway credentials involved). The per-delivery subprocess timeout is `cron.bot_chat_delivery_timeout_seconds` (default 600).
 
+### Delivery modes
+
+`delivery_mode` controls what happens after the job has produced its result:
+
+- `direct` (default) posts the result through the target adapter without
+  starting another agent turn.
+- `internal_turn` submits a trusted synthetic event to the live gateway so the
+  target conversation's current main agent can interpret the result in context.
+
+Internal turns are routed through the active gateway runner, or through its
+authenticated local control socket when the scheduler is in another process.
+Resolution prefers the runner's most recent exact conversation source and then
+the persisted session routing index. Platform, chat, thread, user (when
+specified), and profile (when specified) must match; this avoids resuming a
+different thread or profile after a gateway restart. The event is marked
+`internal=True` with service-owned metadata, so inbound text cannot spoof the
+trusted notification context merely by including its model-visible marker.
+
+`internal_turn` is invalid for `local` and `bot-chat` targets. The former has no
+gateway conversation; the latter already starts a Bot Chat agent turn. An
+unavailable gateway or adapter is a delivery failure, not a direct-delivery
+fallback.
+
 ### Response Wrapping
 
 By default (`cron.wrap_response: true`), cron deliveries are wrapped with:

@@ -271,8 +271,20 @@ export interface Translations {
     newJob: string;
     nameOptional: string;
     namePlaceholder: string;
+    jobTypeLabel?: string;
+    jobTypes?: {
+      agent: string;
+      agentHelp: string;
+      script: string;
+      scriptHelp: string;
+      reminder: string;
+      reminderHelp: string;
+    };
     prompt: string;
     promptPlaceholder: string;
+    reminderText?: string;
+    reminderPlaceholder?: string;
+    descriptionOptional?: string;
     schedule: string;
     schedulePlaceholder: string;
     scheduleMode: string;
@@ -310,6 +322,17 @@ export interface Translations {
       onceAt: string;
     };
     deliverTo: string;
+    deliveryBehavior?: {
+      label: string;
+      direct: string;
+      directHelp: string;
+      internalTurn: string;
+      internalTurnAgentHelp: string;
+      internalTurnNoWorkerHelp: string;
+      needsConversation: string;
+      botChatUnsupported: string;
+      badge: string;
+    };
     scheduledJobs: string;
     noJobs: string;
     last: string;

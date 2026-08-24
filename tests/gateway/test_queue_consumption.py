@@ -169,6 +169,130 @@ class TestQueueConsumptionAfterCompletion:
         # gets the next-in-line item.
         assert adapter._pending_messages[session_key].text == "Q2"
 
+    def test_queue_depth_counts_slot_plus_overflow(self):
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._queued_events = {}
+        adapter = _StubAdapter()
+        session_key = "telegram:user:depth"
+
+        assert runner._queue_depth(session_key, adapter=adapter) == 0
+
+        runner._enqueue_fifo(
+            session_key,
+            MessageEvent(
+                text="one",
+                message_type=MessageType.TEXT,
+                source=MagicMock(),
+                message_id="q1",
+            ),
+            adapter,
+        )
+        assert runner._queue_depth(session_key, adapter=adapter) == 1
+
+        for text in ("two", "three"):
+            runner._enqueue_fifo(
+                session_key,
+                MessageEvent(
+                    text=text,
+                    message_type=MessageType.TEXT,
+                    source=MagicMock(),
+                    message_id=f"q-{text}",
+                ),
+                adapter,
+            )
+        assert runner._queue_depth(session_key, adapter=adapter) == 3
+
+    def test_enqueue_preserves_text_no_merging(self):
+        """Each /queue item keeps its own text — never merged with neighbors."""
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._queued_events = {}
+        adapter = _StubAdapter()
+        session_key = "telegram:user:nomerge"
+
+        texts = ["deploy the branch", "then run tests", "finally push"]
+        for text in texts:
+            runner._enqueue_fifo(
+                session_key,
+                MessageEvent(
+                    text=text,
+                    message_type=MessageType.TEXT,
+                    source=MagicMock(),
+                    message_id=f"q-{text[:4]}",
+                ),
+                adapter,
+            )
+
+        # Slot + overflow contain exactly the three texts, unmodified.
+        collected = [adapter._pending_messages[session_key].text] + [
+            e.text for e in runner._queued_events[session_key]
+        ]
+        assert collected == texts
+
+    def test_human_replaces_internal_head_without_dropping_it(self):
+        """A real message gets the next turn even if a notification queued first."""
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._queued_events = {}
+        adapter = _StubAdapter()
+        session_key = "discord:dm:priority"
+        source = MagicMock()
+        internal = MessageEvent(
+            text="background completion",
+            message_type=MessageType.TEXT,
+            source=source,
+            internal=True,
+        )
+        human = MessageEvent(
+            text="one moment, new question",
+            message_type=MessageType.TEXT,
+            source=source,
+        )
+
+        runner._enqueue_fifo(session_key, internal, adapter)
+        runner._enqueue_fifo(session_key, human, adapter)
+
+        assert adapter._pending_messages[session_key] is human
+        assert runner._queued_events[session_key] == [internal]
+
+    def test_humans_stay_ahead_of_waiting_internal_turns(self):
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._queued_events = {}
+        adapter = _StubAdapter()
+        session_key = "discord:dm:priority-many"
+        source = MagicMock()
+
+        def event(text: str, *, internal: bool = False) -> MessageEvent:
+            return MessageEvent(
+                text=text,
+                message_type=MessageType.TEXT,
+                source=source,
+                internal=internal,
+            )
+
+        for queued in (
+            event("human-1"),
+            event("internal-1", internal=True),
+            event("internal-2", internal=True),
+            event("human-2"),
+        ):
+            runner._enqueue_fifo(session_key, queued, adapter)
+
+        ordered = [adapter._pending_messages[session_key]] + runner._queued_events[
+            session_key
+        ]
+        assert [item.text for item in ordered] == [
+            "human-1",
+            "human-2",
+            "internal-1",
+            "internal-2",
+        ]
 
 class TestBusyInputModeQueueFifo:
     """Regression coverage for issue #28503.
@@ -218,5 +342,4 @@ class TestBusyInputModeQueueFifo:
             "five",
         ]
         assert runner._queue_depth(session_key, adapter=adapter) == len(texts)
-
 

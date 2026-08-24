@@ -1405,6 +1405,8 @@ class PluginContext:
         self._manager = manager
         # Lazy-built host-owned LLM facade — see ctx.llm property below.
         self._llm: Any = None
+        # Lazy-built live-gateway internal-turn facade.
+        self._internal_turns: Any = None
         self._subagent_lifecycle: Any = None
         self._state: PluginState | None = None
         # Lazy-built capability-gated platform action facade (#64176).
@@ -1597,6 +1599,20 @@ class PluginContext:
             plugin_id = self.manifest.key or self.manifest.name
             self._llm = PluginLlm(plugin_id=plugin_id)
         return self._llm
+
+    @property
+    def internal_turns(self) -> Any:
+        """Return the host-owned internal-notification delivery facade.
+
+        Plugins use this to hand completed background work to the main agent
+        in a live HOME/current channel.  It does not send the payload directly
+        to the user and does not pin a historical session id.
+        """
+        if self._internal_turns is None:
+            from gateway.internal_turns import InternalTurnService
+
+            self._internal_turns = InternalTurnService()
+        return self._internal_turns
 
     @property
     def subagent_lifecycle(self) -> Any:
