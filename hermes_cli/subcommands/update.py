@@ -85,6 +85,15 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
         ),
     )
     update_parser.add_argument(
+        "--remote",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Fetch the update branch from this git remote instead of origin. "
+            "Defaults to updates.remote in config, then origin."
+        ),
+    )
+    update_parser.add_argument(
         "--switch-branch",
         action="store_true",
         default=False,

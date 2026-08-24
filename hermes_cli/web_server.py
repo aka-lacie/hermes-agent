@@ -1285,6 +1285,21 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         ),
         "options": ["stash", "discard"],
     },
+    "updates.remote": {
+        "type": "text",
+        "description": "Git remote used by hermes update (normally origin).",
+    },
+    "updates.branch": {
+        "type": "text",
+        "description": "Remote branch used by hermes update (normally main).",
+    },
+    "updates.integration_branch": {
+        "type": "text",
+        "description": (
+            "Optional local branch that should stay checked out and merge the "
+            "configured update target."
+        ),
+    },
     "updates.refresh_cua_driver": {
         "type": "boolean",
         "description": (

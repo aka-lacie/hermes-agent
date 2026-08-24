@@ -10284,15 +10284,39 @@ def _finalize_update_output(state):
             pass
 
 
-def _resolve_update_branch(args) -> str:
-    """Normalize ``args.branch`` into a non-empty branch name.
+def _configured_update_target_value(key: str, default: str) -> str:
+    """Read one optional ``updates`` target value from config."""
+    try:
+        from hermes_cli.config import load_config
 
-    Centralizes the "default to main, accept --branch override, treat empty
-    or whitespace-only values as the default" parsing so every consumer of
-    ``--branch`` (check path, git-update path, ZIP-fallback path) agrees on
-    the same answer.
-    """
-    return (getattr(args, "branch", None) or "main").strip() or "main"
+        updates = (load_config() or {}).get("updates", {})
+        if isinstance(updates, dict):
+            value = str(updates.get(key, "") or "").strip()
+            if value:
+                return value
+    except Exception:
+        pass
+    return default
+
+
+def _resolve_update_branch(args) -> str:
+    """Resolve an explicit or configured upstream branch."""
+    explicit = str(getattr(args, "branch", None) or "").strip()
+    return explicit or _configured_update_target_value("branch", "main")
+
+
+def _resolve_update_remote(args) -> str:
+    """Resolve an explicit or configured upstream remote."""
+    explicit = str(getattr(args, "remote", None) or "").strip()
+    return explicit or _configured_update_target_value("remote", "origin")
+
+
+def _resolve_update_integration_branch(args) -> Optional[str]:
+    """Return the local branch that should merge the update target."""
+    if str(getattr(args, "branch", None) or "").strip():
+        return None
+    value = _configured_update_target_value("integration_branch", "")
+    return value or None
 
 
 def _size_delta_label(saved_mb: float) -> str:
@@ -10360,12 +10384,16 @@ def cmd_update(args):
         sys.exit(1)
 
     if getattr(args, "check", False):
-        # --check honors --branch so the "any new commits?" answer matches
-        # what a subsequent `hermes update --branch=<x>` would actually pull.
+        # --check honors the configured/explicit target so its answer matches
+        # a subsequent plain update.
         branch = _resolve_update_branch(args)
+        remote = _resolve_update_remote(args)
         _self()._cmd_update_check(
             branch=branch,
+            remote=remote,
             branch_explicit=bool(getattr(args, "branch", None)),
+            remote_explicit=bool(getattr(args, "remote", None))
+            or remote != "origin",
         )
         return
 

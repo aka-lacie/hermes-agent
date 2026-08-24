@@ -724,6 +724,49 @@ class TestCmdUpdateBranchFlag:
         assert "nonexistent" in out
 
 
+class TestCmdUpdateIntegrationBranch:
+    """A configured personal branch merges upstream without being switched."""
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    @patch("hermes_cli.main._configured_update_target_value")
+    def test_plain_update_merges_target_into_integration_branch(
+        self, mock_target, mock_run, _mock_which
+    ):
+        def target_value(key, default):
+            return {
+                "remote": "origin",
+                "branch": "main",
+                "integration_branch": "feat/internal-turn-delivery",
+            }.get(key, default)
+
+        mock_target.side_effect = target_value
+
+        def run_side_effect(cmd, **kwargs):
+            joined = " ".join(str(c) for c in cmd)
+            if "rev-parse" in joined and "--abbrev-ref" in joined:
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="feat/internal-turn-delivery\n", stderr=""
+                )
+            if "rev-list" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="2\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        mock_run.side_effect = run_side_effect
+
+        cmd_update(SimpleNamespace(branch=None, remote=None))
+
+        commands = [
+            " ".join(str(a) for a in call.args[0])
+            for call in mock_run.call_args_list
+        ]
+        assert any(
+            "merge --no-edit origin/main" in command for command in commands
+        )
+        assert not any("checkout main" in command for command in commands)
+        assert not any("pull --ff-only" in command for command in commands)
+
+
 class TestCmdUpdateCheckBranchFlag:
     """``hermes update --check --branch <name>`` honors the branch override.
 

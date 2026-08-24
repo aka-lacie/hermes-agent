@@ -1056,7 +1056,11 @@ def _branch_head_suffix(git_cmd=None, cwd=None) -> str:
 
 
 def _assess_parked_branch_switch(
-    git_cmd: list[str], cwd: Path, current_branch: str, target_branch: str
+    git_cmd: list[str],
+    cwd: Path,
+    current_branch: str,
+    target_branch: str,
+    remote: str = "origin",
 ) -> tuple[bool, str]:
     """Decide whether it is safe to auto-switch a parked feature branch back
     to the update target.
@@ -1067,7 +1071,7 @@ def _assess_parked_branch_switch(
     while the running code stayed days behind main. The guard's contract:
 
     - (True, "") when the working tree + index are clean AND every commit on
-      the parked branch is already contained in ``origin/<target_branch>``
+      the parked branch is already contained in ``<remote>/<target_branch>``
       (``git cherry`` reports no ``+`` lines).
     - (True, "unmerged:<count>") when the tree is clean but the branch has
       commits not yet in the target. Switching is safe — ``git checkout``
@@ -1108,7 +1112,7 @@ def _assess_parked_branch_switch(
         return False, "dirty"
 
     cherry = subprocess.run(
-        git_cmd + ["cherry", f"origin/{target_branch}"],
+        git_cmd + ["cherry", f"{remote}/{target_branch}"],
         cwd=cwd, capture_output=True,
         text=True, encoding="utf-8", errors="replace",
     )
@@ -1131,13 +1135,14 @@ def _print_parked_branch_skip_warning(
     current_branch: str,
     target_branch: str,
     reason: str,
+    remote: str = "origin",
 ) -> None:
     """LOUD block explaining why the code update was skipped on a parked
     branch, with the behind-count and the exact commands to resolve."""
     behind = None
     try:
         behind_result = subprocess.run(
-            git_cmd + ["rev-list", f"HEAD..origin/{target_branch}", "--count"],
+            git_cmd + ["rev-list", f"HEAD..{remote}/{target_branch}", "--count"],
             cwd=cwd, capture_output=True,
             text=True, encoding="utf-8", errors="replace",
         )
@@ -1153,7 +1158,7 @@ def _print_parked_branch_skip_warning(
     else:
         why = (
             f"the branch state could not be verified against "
-            f"origin/{target_branch}"
+            f"{remote}/{target_branch}"
         )
 
     bar = "=" * 68
@@ -1164,7 +1169,7 @@ def _print_parked_branch_skip_warning(
     if behind is not None and behind > 0:
         print(
             f"  This checkout is {behind} commit(s) BEHIND "
-            f"origin/{target_branch} — the code you are running is stale."
+            f"{remote}/{target_branch} — the code you are running is stale."
         )
     print()
     print("  To resolve, inspect the branch and switch back yourself:")
@@ -1178,7 +1183,10 @@ def _print_parked_branch_skip_warning(
 
 
 def _print_parked_branch_kept_notice(
-    current_branch: str, target_branch: str, unmerged_count: str
+    current_branch: str,
+    target_branch: str,
+    unmerged_count: str,
+    remote: str = "origin",
 ) -> None:
     """LOUD notice printed when a clean parked branch with unmerged commits
     is auto-switched back to the update target.
@@ -1194,7 +1202,7 @@ def _print_parked_branch_kept_notice(
     print(bar)
     print(
         f"⚠ Checkout was parked on '{current_branch}' with "
-        f"{unmerged_count} commit(s) not merged into origin/{target_branch}."
+        f"{unmerged_count} commit(s) not merged into {remote}/{target_branch}."
     )
     print(
         f"  Switching to {target_branch} so the update can proceed — your "
@@ -1520,16 +1528,24 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # bug --branch was added to prevent. Refuse to proceed in that case
     # rather than lie.
     branch = _m()._resolve_update_branch(args)
-    if branch != "main":
+    remote = _m()._resolve_update_remote(args)
+    integration_branch = _m()._resolve_update_integration_branch(args)
+    if branch != "main" or remote != "origin" or integration_branch:
+        target = (
+            f"{integration_branch} <- {remote}/{branch}"
+            if integration_branch
+            else f"{remote}/{branch}"
+        )
         print(
-            f"✗ --branch={branch} is not supported on the Windows ZIP-fallback "
-            "update path."
+            f"✗ Update target {target} is not supported on the Windows "
+            "ZIP-fallback update path."
         )
         print(
             "  This path runs when git file I/O is broken on the system. "
             "Either resolve the git-side breakage (typically an antivirus "
             "or NTFS filter holding files open) and rerun `hermes update "
-            f"--branch {branch}`, or update against main with `hermes update`."
+            f"--remote {remote} --branch {branch}`, or update against "
+            "origin/main after clearing the configured update target."
         )
         _m().sys.exit(1)
     _abort_zip_update_if_dirty_tree()
@@ -3206,7 +3222,7 @@ def _run_logged_subprocess(cmd, *, cwd=None, env=None):
     _log_only_write(result.stdout or "")
     return result
 
-def _classify_fetch_failure(stderr: str) -> str:
+def _classify_fetch_failure(stderr: str, *, remote: str = "origin") -> str:
     """Map git-fetch stderr to a one-line, user-facing diagnosis.
 
     Order matters: curl surfaces HTTP failures as
@@ -3238,18 +3254,24 @@ def _classify_fetch_failure(stderr: str) -> str:
         return "✗ Network error — cannot reach the remote repository."
     if "Authentication failed" in stderr or "could not read Username" in stderr:
         return "✗ Authentication failed — check your git credentials or SSH key."
-    return "✗ Failed to fetch updates from origin."
+    return f"✗ Failed to fetch updates from {remote}."
 
 
-def _print_fetch_failure(stderr: str) -> None:
+def _print_fetch_failure(stderr: str, *, remote: str = "origin") -> None:
     """Print the classified diagnosis plus the first raw stderr line."""
     stderr = (stderr or "").strip()
-    print(_classify_fetch_failure(stderr))
+    print(_classify_fetch_failure(stderr, remote=remote))
     if stderr:
         print(f"  {stderr.splitlines()[0]}")
 
 
-def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
+def _cmd_update_check(
+    branch: str = "main",
+    *,
+    remote: str = "origin",
+    branch_explicit: bool = False,
+    remote_explicit: bool = False,
+):
     """Implement ``hermes update --check``: fetch and report without installing.
 
     ``branch`` selects which branch the check compares against. Default is
@@ -3320,7 +3342,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     )
     depth_args = ["--depth", "1"] if is_shallow else []
 
-    if branch == "main":
+    if branch == "main" and remote == "origin" and not remote_explicit:
         # Probe locally (~6 ms) whether an 'upstream' remote exists at all
         # before spending a network fetch on it. Non-fork installs have no
         # 'upstream' remote, and the old flow burned a failed network attempt
@@ -3358,19 +3380,19 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             upstream_exists = False
             compare_branch = f"origin/{branch}"
     else:
-        # Non-default branch: compare against origin/<branch> directly.
-        print("→ Fetching from origin...")
+        # Explicit/configured targets compare against the selected remote.
+        print(f"→ Fetching from {remote}...")
         fetch_result = subprocess.run(
-            git_cmd + ["fetch"] + depth_args + ["origin", branch],
+            git_cmd + ["fetch"] + depth_args + [remote, branch],
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
         )
         upstream_exists = False
-        compare_branch = f"origin/{branch}"
+        compare_branch = f"{remote}/{branch}"
 
     if fetch_result.returncode != 0:
-        _print_fetch_failure(fetch_result.stderr)
+        _print_fetch_failure(fetch_result.stderr, remote=remote)
         sys.exit(1)
 
     # Verify the compare ref actually exists before asking rev-list about it.
@@ -6075,6 +6097,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # minutes on a non-single-branch checkout. Fetch only what we update
         # against.
         branch = _m()._resolve_update_branch(args)
+        remote = _m()._resolve_update_remote(args)
+        integration_branch = _m()._resolve_update_integration_branch(args)
 
         # Self-heal abandoned git lock files (e.g. .git/shallow.lock left by a
         # crashed fetch) before the fetch — otherwise the update fails with
@@ -6088,13 +6112,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         print("→ Fetching updates...")
         fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin", branch],
+            git_cmd + ["fetch", remote, branch],
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
         )
         if fetch_result.returncode != 0:
-            _print_fetch_failure(fetch_result.stderr)
+            _print_fetch_failure(fetch_result.stderr, remote=remote)
             sys.exit(1)
 
         # Get current branch (returns literal "HEAD" when detached)
@@ -6136,9 +6160,30 @@ def _cmd_update_impl(args, gateway_mode: bool):
         #                    stale tree.
         parked_branch_switched = False
         in_place_update = False
-        if current_branch != branch and current_branch != "HEAD":
+        if integration_branch:
+            # A configured integration branch is an explicit in-place update
+            # destination, not an accidentally parked checkout. Refuse to
+            # switch away from it: the running feature branch must remain the
+            # active checkout throughout the update.
+            if current_branch != integration_branch:
+                print(
+                    "✗ This install is configured to update integration branch "
+                    f"'{integration_branch}', but the checkout is on "
+                    f"'{current_branch}'."
+                )
+                print(
+                    f"  Switch this checkout to {integration_branch}, or clear "
+                    "updates.integration_branch in config.yaml."
+                )
+                sys.exit(1)
+            in_place_update = True
+        elif current_branch != branch and current_branch != "HEAD":
             switch_safe, switch_block_reason = _m()._assess_parked_branch_switch(
-                git_cmd, _m().PROJECT_ROOT, current_branch, branch
+                git_cmd,
+                _m().PROJECT_ROOT,
+                current_branch,
+                branch,
+                remote=remote,
             )
             if not switch_safe:
                 _m()._print_parked_branch_skip_warning(
@@ -6147,6 +6192,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     current_branch,
                     branch,
                     switch_block_reason,
+                    remote=remote,
                 )
                 print()
                 print(
@@ -6177,18 +6223,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     # previously surfaced through the checkout failing, which
                     # does not run on this path.
                     verify_ref = subprocess.run(
-                        git_cmd + ["rev-parse", "--verify", "--quiet", f"origin/{branch}"],
+                        git_cmd
+                        + ["rev-parse", "--verify", "--quiet", f"{remote}/{branch}"],
                         cwd=_m().PROJECT_ROOT,
                         capture_output=True,
                         text=True, encoding="utf-8", errors="replace",
                     )
                     if verify_ref.returncode != 0:
-                        print(f"✗ Branch '{branch}' does not exist locally or on origin.")
+                        print(
+                            f"✗ Branch '{branch}' does not exist locally or on {remote}."
+                        )
                         sys.exit(1)
                     in_place_update = True
                     print(
                         f"  ℹ On branch '{current_branch}' — updating it in place from "
-                        f"origin/{branch} (no branch switch; local commits preserved)."
+                        f"{remote}/{branch} (no branch switch; local commits preserved)."
                     )
                 else:
                     parked_branch_switched = True
@@ -6196,6 +6245,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         current_branch,
                         branch,
                         switch_block_reason.split(":", 1)[1],
+                        remote=remote,
                     )
             else:
                 parked_branch_switched = True
@@ -6220,11 +6270,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
             )
             if checkout_result.returncode != 0:
                 # Local checkout doesn't have this branch yet. Try to set
-                # it up as a tracking branch of origin/<branch>. This is
+                # it up as a tracking branch of <remote>/<branch>. This is
                 # the common case when the requested branch exists upstream
                 # but was never checked out locally.
                 track_result = subprocess.run(
-                    git_cmd + ["checkout", "-B", branch, f"origin/{branch}"],
+                    git_cmd + ["checkout", "-B", branch, f"{remote}/{branch}"],
                     cwd=_m().PROJECT_ROOT,
                     capture_output=True,
                     text=True, encoding="utf-8", errors="replace",
@@ -6240,7 +6290,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             prompt_user=False,
                             input_fn=gw_input_fn,
                         )
-                    print(f"✗ Branch '{branch}' does not exist locally or on origin.")
+                    print(
+                        f"✗ Branch '{branch}' does not exist locally or on {remote}."
+                    )
                     if track_result.stderr.strip():
                         print(f"  {track_result.stderr.strip().splitlines()[0]}")
                     sys.exit(1)
@@ -6260,7 +6312,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # 0), so keep it, but treat the shallow NUMBER as unknown and recover
         # the real one via the GitHub compare API when possible.
         result = subprocess.run(
-            git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
+            git_cmd + ["rev-list", f"HEAD..{remote}/{branch}", "--count"],
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
@@ -6286,7 +6338,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 text=True, encoding="utf-8", errors="replace",
             ).stdout.strip()
             target_sha = subprocess.run(
-                git_cmd + ["rev-parse", f"origin/{branch}"],
+                git_cmd + ["rev-parse", f"{remote}/{branch}"],
                 cwd=_m().PROJECT_ROOT, capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
             ).stdout.strip()
@@ -6303,7 +6355,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # commit_count == 0 branch, which returns immediately after: an update
         # that pulled hundreds of upstream commits printed "Already up to
         # date!" and verified nothing).
-        if commit_count == 0 and is_fork and branch == "main":
+        if (
+            commit_count == 0
+            and not in_place_update
+            and is_fork
+            and branch == "main"
+            and remote == "origin"
+        ):
             pre_sync_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
             _m()._sync_with_upstream_if_needed(git_cmd, _m().PROJECT_ROOT)
             post_sync_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
@@ -6346,7 +6404,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         f"  ✓ Checkout was parked on '{current_branch}' (fully "
                         f"merged) — switched back to {branch}."
                     )
-            elif current_branch not in {branch, "HEAD"}:
+            elif not in_place_update and current_branch not in {branch, "HEAD"}:
                 subprocess.run(
                     git_cmd + ["checkout", current_branch],
                     cwd=_m().PROJECT_ROOT,
@@ -6490,16 +6548,59 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # `merge --ff-only origin/<branch>` is byte-identical in effect to
             # `pull --ff-only origin <branch>` given the fresh tracking ref;
             # the divergence fallback below is unchanged.
-            pull_result = subprocess.run(
-                git_cmd + ["merge", "--ff-only", f"origin/{branch}"],
-                cwd=_m().PROJECT_ROOT,
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-            )
+            if in_place_update:
+                pull_result = subprocess.run(
+                    git_cmd + ["merge", "--no-edit", f"{remote}/{branch}"],
+                    cwd=_m().PROJECT_ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            else:
+                pull_result = subprocess.run(
+                    git_cmd + ["merge", "--ff-only", f"{remote}/{branch}"],
+                    cwd=_m().PROJECT_ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
             if pull_result.returncode != 0:
+                if in_place_update:
+                    subprocess.run(
+                        git_cmd + ["merge", "--abort"],
+                        cwd=_m().PROJECT_ROOT,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        check=False,
+                    )
+                    destination = integration_branch or current_branch
+                    print(
+                        f"✗ Could not merge {remote}/{branch} into "
+                        f"{destination}; the merge was aborted."
+                    )
+                    if pull_result.stderr.strip():
+                        print(f"  {pull_result.stderr.strip().splitlines()[0]}")
+                    if auto_stash_ref is not None:
+                        _m()._restore_stashed_changes(
+                            git_cmd,
+                            _m().PROJECT_ROOT,
+                            auto_stash_ref,
+                            prompt_user=False,
+                            input_fn=gw_input_fn,
+                        )
+                        auto_stash_ref = None
+                    print(
+                        "  Resolve the upstream integration manually, then "
+                        "run hermes update again."
+                    )
+                    sys.exit(1)
                 # ff-only failed — local and remote have diverged. Before
                 # assuming an upstream force-push, check WHY: a checkout on a
-                # custom branch (local commits on top of origin/<branch>) also
+                # custom branch (local commits on top of <remote>/<branch>) also
                 # cannot fast-forward, and `reset --hard` here would silently
                 # discard that work. Merge instead and stop cleanly on
                 # conflict — an update must never destroy local commits.
@@ -6515,7 +6616,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 if _cur_branch and _cur_branch != branch:
                     print(
                         f"  ⚠ Checkout is on custom branch '{_cur_branch}' — "
-                        f"merging origin/{branch} instead of resetting so local commits survive..."
+                        f"merging {remote}/{branch} instead of resetting so local commits survive..."
                     )
                     # Best-effort safety tag; recovery anchor if anything goes wrong.
                     subprocess.run(
@@ -6526,7 +6627,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         check=False,
                     )
                     merge_result = subprocess.run(
-                        git_cmd + ["merge", "--no-edit", f"origin/{branch}"],
+                        git_cmd + ["merge", "--no-edit", f"{remote}/{branch}"],
                         cwd=_m().PROJECT_ROOT,
                         capture_output=True,
                         text=True, encoding="utf-8", errors="replace",
@@ -6544,7 +6645,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         )
                         print(
                             f"  Resolve manually: cd {_m().PROJECT_ROOT} && "
-                            f"git merge origin/{branch}"
+                            f"git merge {remote}/{branch}"
                         )
                         print(
                             "  Then re-run the update. Local work is untouched."
@@ -6558,17 +6659,18 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
                     )
                     reset_result = subprocess.run(
-                        git_cmd + ["reset", "--hard", f"origin/{branch}"],
+                        git_cmd + ["reset", "--hard", f"{remote}/{branch}"],
                         cwd=_m().PROJECT_ROOT,
                         capture_output=True,
                         text=True, encoding="utf-8", errors="replace",
                     )
                     if reset_result.returncode != 0:
-                        print(f"✗ Failed to reset to origin/{branch}.")
+                        print(f"✗ Failed to reset to {remote}/{branch}.")
                         if reset_result.stderr.strip():
                             print(f"  {reset_result.stderr.strip()}")
                         print(
-                            f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
+                            f"  Try manually: git fetch {remote} && "
+                            f"git reset --hard {remote}/{branch}"
                         )
                         sys.exit(1)
 
@@ -6689,19 +6791,25 @@ def _cmd_update_impl(args, gateway_mode: bool):
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
         ).stdout.strip()
+        expected_branch = integration_branch or branch
         if (
             not in_place_update
             and post_pull_branch
-            and post_pull_branch not in {branch, "HEAD"}
+            and post_pull_branch not in {expected_branch, "HEAD"}
         ):
             print()
+            update_action = (
+                f"merged {remote}/{branch} into {integration_branch}"
+                if integration_branch
+                else f"pulled {remote}/{branch}"
+            )
             print(
-                f"✗ Update pulled origin/{branch}, but the checkout is on "
+                f"✗ Update {update_action}, but the checkout is on "
                 f"'{post_pull_branch}' — not claiming success."
             )
             print(
                 "  Switch to the target branch and retry: "
-                f"git -C {_m().PROJECT_ROOT} checkout {branch} && hermes update"
+                f"git -C {_m().PROJECT_ROOT} checkout {expected_branch} && hermes update"
             )
             _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
             sys.exit(1)
@@ -6718,7 +6826,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _m()._refresh_bootstrap_cache_scripts(branch)
 
         # Fork upstream sync logic (only for main branch on forks)
-        if is_fork and branch == "main":
+        if (
+            not integration_branch
+            and is_fork
+            and branch == "main"
+            and remote == "origin"
+        ):
             _m()._sync_with_upstream_if_needed(git_cmd, _m().PROJECT_ROOT)
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra

@@ -3306,6 +3306,13 @@ DEFAULT_CONFIG = {
 
     # ``hermes update`` behaviour.
     "updates": {
+        # Git target used by ``hermes update``. Most installs stay on
+        # origin/main. A personal integration checkout can set
+        # ``integration_branch`` to keep that local branch checked out and
+        # merge the target into it instead of switching branches.
+        "remote": "origin",
+        "branch": "main",
+        "integration_branch": "",
         # Pre-update safety backup — ONE consolidated mechanism, three modes:
         #
         #   quick (default) — snapshot critical small state files (pairing
