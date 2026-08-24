@@ -349,6 +349,36 @@ def _resolve_node_runtime_npm() -> str | None:
     return None if _is_windows_npm_path(npm) else npm
 
 
+def _configured_update_target_value(key: str, default: str) -> str:
+    """Read one optional ``updates`` target value from config."""
+    try:
+        from hermes_cli.config import load_config
+
+        updates = (load_config() or {}).get("updates", {})
+        if isinstance(updates, dict):
+            value = str(updates.get(key, "") or "").strip()
+            if value:
+                return value
+    except Exception:
+        pass
+    return default
+
+
 def _resolve_update_branch(args) -> str:
-    """Normalize ``args.branch`` to a non-empty name (default ``main``; blank/whitespace = default)."""
-    return (getattr(args, "branch", None) or "main").strip() or "main"
+    """Resolve an explicit or configured upstream branch."""
+    explicit = str(getattr(args, "branch", None) or "").strip()
+    return explicit or _configured_update_target_value("branch", "main")
+
+
+def _resolve_update_remote(args) -> str:
+    """Resolve an explicit or configured upstream remote."""
+    explicit = str(getattr(args, "remote", None) or "").strip()
+    return explicit or _configured_update_target_value("remote", "origin")
+
+
+def _resolve_update_integration_branch(args) -> str | None:
+    """Return the local branch that should merge the update target."""
+    if str(getattr(args, "branch", None) or "").strip():
+        return None
+    value = _configured_update_target_value("integration_branch", "")
+    return value or None

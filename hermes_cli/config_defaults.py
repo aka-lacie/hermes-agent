@@ -2341,6 +2341,9 @@ DEFAULT_CONFIG = {
     },
 
     "updates": {
+        "remote": "origin",
+        "branch": "main",
+        "integration_branch": "",
         # Passive version/banner checks only; explicit `hermes update --check` remains enabled.
         "check": True,
         # Pre-update backup. quick = snapshot small critical state (pairing JSONs, cron jobs,

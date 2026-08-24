@@ -624,8 +624,11 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False,
     # The static archive would silently ignore --branch — the exact silent-divergence bug it exists to
     # prevent. Refuse rather than lie.
     branch = _m()._resolve_update_branch(args)
-    if branch != "main":
-        print(f"✗ --branch={branch} is not supported on the Windows ZIP-fallback update path.")
+    remote = _m()._resolve_update_remote(args)
+    integration_branch = _m()._resolve_update_integration_branch(args)
+    if branch != "main" or remote != "origin" or integration_branch:
+        print(f"✗ Update target {integration_branch or ''} <- {remote}/{branch} "
+              "is not supported on the Windows ZIP-fallback update path.")
         print(
             "  This path runs when git file I/O is broken on the system. "
             "Either resolve the git-side breakage (typically an antivirus "

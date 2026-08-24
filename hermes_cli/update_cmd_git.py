@@ -175,7 +175,7 @@ def _branch_head_suffix(git_cmd=None, cwd=None) -> str:
     return f" [{label}]" if label else ""
 
 
-def _assess_parked_branch_switch(git_cmd: list[str], cwd: Path, current_branch: str, target_branch: str) -> tuple[bool, str]:
+def _assess_parked_branch_switch(git_cmd: list[str], cwd: Path, current_branch: str, target_branch: str, *, remote: str = "origin") -> tuple[bool, str]:
     """Decide whether a parked feature branch may be auto-switched back to the update target.
 
     - (True, "") — tree clean and every parked commit is in ``origin/<target>`` (no ``git cherry +``).
@@ -203,7 +203,7 @@ def _assess_parked_branch_switch(git_cmd: list[str], cwd: Path, current_branch: 
     # patch-id walk needs upstream-side trees and lazy-fetches them in many promisor
     # batches; one failed batch failed the whole verification and skipped a clean
     # checkout (#124767).
-    ahead = _git_run(git_cmd, ["rev-list", "--count", f"origin/{target_branch}..HEAD"], cwd)
+    ahead = _git_run(git_cmd, ["rev-list", "--count", f"{remote}/{target_branch}..HEAD"], cwd)
     if ahead.returncode != 0 or not ahead.stdout.strip().isdigit():
         return False, "unverifiable"
     ahead_count = int(ahead.stdout.strip())
@@ -219,7 +219,7 @@ def _assess_parked_branch_switch(git_cmd: list[str], cwd: Path, current_branch: 
     # a tree batch per commit and, with nothing bounding it, one such walk wrote 332 packs /
     # 180 GiB over 7 h on Windows (#131444). With lazy fetch off a missing object fails the
     # command fast and the commit count below stands in.
-    cherry = _git_run(git_cmd, ["cherry", f"origin/{target_branch}"], cwd,
+    cherry = _git_run(git_cmd, ["cherry", f"{remote}/{target_branch}"], cwd,
                       env={**noninteractive_git_env(), **NO_LAZY_FETCH_ENV})
     if cherry.returncode != 0:
         # Patch-equivalence only refines the count for rebase/squash-merged branches;
@@ -236,18 +236,18 @@ _PARKED_SKIP_WHY = {
 }
 
 
-def _print_parked_branch_skip_warning(git_cmd: list[str], cwd: Path, current_branch: str, target_branch: str, reason: str) -> None:
+def _print_parked_branch_skip_warning(git_cmd: list[str], cwd: Path, current_branch: str, target_branch: str, reason: str, *, remote: str = "origin") -> None:
     """LOUD block: why the update was skipped on a parked branch, behind-count, fix commands."""
     behind = None
     with suppress(Exception):
-        behind_text = _git_stdout(git_cmd, ["rev-list", f"HEAD..origin/{target_branch}", "--count"], cwd)
+        behind_text = _git_stdout(git_cmd, ["rev-list", f"HEAD..{remote}/{target_branch}", "--count"], cwd)
         if behind_text:
             behind = int(behind_text)
-    why = _PARKED_SKIP_WHY.get(reason, f"the branch state could not be verified against origin/{target_branch}")
+    why = _PARKED_SKIP_WHY.get(reason, f"the branch state could not be verified against {remote}/{target_branch}")
     print(f"\n{_BAR}\n⚠ CODE UPDATE SKIPPED — checkout is parked on '{current_branch}'")
     print(f"  Not auto-switching to {target_branch}: {why}.")
     if behind is not None and behind > 0:
-        print(f"  This checkout is {behind} commit(s) BEHIND origin/{target_branch} — the code you are running is stale.")
+        print(f"  This checkout is {behind} commit(s) BEHIND {remote}/{target_branch} — the code you are running is stale.")
     print(
         f"\n  To resolve, inspect the branch and switch back yourself:\n"
         f"    git -C {cwd} status\n"
@@ -256,7 +256,7 @@ def _print_parked_branch_skip_warning(git_cmd: list[str], cwd: Path, current_bra
     )
 
 
-def _print_parked_branch_kept_notice(current_branch: str, target_branch: str, unmerged_count: str) -> None:
+def _print_parked_branch_kept_notice(current_branch: str, target_branch: str, unmerged_count: str, *, remote: str = "origin") -> None:
     """LOUD notice when a clean parked branch with unmerged commits is auto-switched.
 
     Non-interactive callers can't resolve a skip, so we proceed — but the unmerged work
@@ -264,7 +264,7 @@ def _print_parked_branch_kept_notice(current_branch: str, target_branch: str, un
     print(
         f"\n{_BAR}\n"
         f"⚠ Checkout was parked on '{current_branch}' with "
-        f"{unmerged_count} commit(s) not merged into origin/{target_branch}.\n"
+        f"{unmerged_count} commit(s) not merged into {remote}/{target_branch}.\n"
         f"  Switching to {target_branch} so the update can proceed — your "
         f"commit(s) are safe on '{current_branch}'.\n\n"
         f"  To pick the work back up later:\n    git checkout {current_branch}\n{_BAR}"
@@ -559,13 +559,13 @@ def _classify_fetch_failure(stderr: str) -> str:
     return next((message for matches, message in _FETCH_FAILURE_RULES if matches(stderr)), "✗ Failed to fetch updates from origin.")
 
 
-def _print_fetch_failure(stderr: str, *, git_cmd=None, root: Optional[Path] = None) -> None:
+def _print_fetch_failure(stderr: str, *, remote: str = "origin", git_cmd=None, root: Optional[Path] = None) -> None:
     """Print the classified diagnosis plus bounded raw stderr for diagnosis. With *root*, a checkout
     git rejects (no fetch can ever work; the ZIP fallback cannot tell user edits apart) gets the
     installer repair instead."""
     stderr = (stderr or "").strip()
     damaged = root is not None and _checkout_rejected_by_git(stderr, git_cmd, Path(root))
-    print(_damaged_checkout_message(Path(root)) if damaged else _classify_fetch_failure(stderr))
+    print(_damaged_checkout_message(Path(root)) if damaged else _classify_fetch_failure(stderr).replace("origin", remote))
     if stderr:
         lines = stderr.splitlines()
         for line in lines[:15]:

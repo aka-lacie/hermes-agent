@@ -884,6 +884,8 @@ from hermes_cli.main_install_repair import (  # frozen updater surface: update_c
     _reexec_dependency_sync_off_windows_shim,
     _resolve_node_runtime_npm,
     _resolve_update_branch,
+    _resolve_update_remote,
+    _resolve_update_integration_branch,
     _update_marker_path,
     _venv_scripts_dir,
 )
@@ -2334,11 +2336,15 @@ def _update_preflight_handled(args) -> bool:
     if getattr(args, "check", False):
         # --check honors --branch so its answer matches what update would pull.
         branch = _resolve_update_branch(args)
+        remote = _resolve_update_remote(args)
         from hermes_cli.update_cmd import _cmd_update_check
 
         _cmd_update_check(
             branch=branch,
+            remote=remote,
             branch_explicit=bool(getattr(args, "branch", None)),
+            remote_explicit=bool(getattr(args, "remote", None))
+            or remote != "origin",
             **({"channel": args.channel} if getattr(args, "channel", None) else {}),
         )
         return True

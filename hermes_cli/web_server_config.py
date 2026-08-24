@@ -160,6 +160,12 @@ _SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
         "Terminal updates always ask, regardless of this setting.",
         "stash", "discard",
     ),
+    "updates.remote": {"type": "text", "description": "Git remote used by hermes update (normally origin)."},
+    "updates.branch": {"type": "text", "description": "Remote branch used by hermes update (normally main)."},
+    "updates.integration_branch": {
+        "type": "text",
+        "description": "Optional local branch that stays checked out and merges the update target.",
+    },
     "updates.refresh_cua_driver": {
         "type": "boolean",
         "description": (
