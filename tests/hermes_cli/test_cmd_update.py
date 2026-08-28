@@ -40,6 +40,21 @@ def mock_args():
     return SimpleNamespace()
 
 
+@pytest.fixture(autouse=True)
+def _patch_update_target_config():
+    """Keep update-target tests independent of the host's config.yaml.
+
+    The dev2 runtime intentionally configures an integration branch, but most
+    tests in this module exercise the stock origin/main path. Tests for custom
+    targets apply their own inner patch over this neutral default.
+    """
+    with patch(
+        "hermes_cli.main._configured_update_target_value",
+        side_effect=lambda _key, default: default,
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Managed-uv compatibility for tests that patch shutil.which
 # ---------------------------------------------------------------------------
@@ -83,9 +98,23 @@ def _patch_gateway_discovery():
     Discovery returning nothing makes the phase a clean no-op for every test
     in this module (none of them assert on gateway restarts).
     """
-    with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
-         patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
-         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
+    from hermes_cli.update_inventory import UpdatePlan
+
+    with (
+        patch(
+            "hermes_cli.main._purge_stale_hermes_modules",
+            # Purging cached Hermes modules would discard the safety mocks below
+            # and re-import live gateway discovery from disk mid-test.
+            return_value=None,
+        ),
+        patch("hermes_cli.gateway.find_gateway_pids", return_value=[]),
+        patch("hermes_cli.gateway.supports_systemd_services", return_value=False),
+        patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]),
+        patch(
+             "hermes_cli.update_inventory.collect_runtime_inventory",
+             return_value=UpdatePlan(),
+        ),
+    ):
         yield
 
 
