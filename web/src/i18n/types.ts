@@ -574,6 +574,7 @@ export interface Translations {
     copyCliCommand: string;
     connect: string;
     sessionExpires: string;
+    sessionExpiredNoError: string;
     initiatingLogin: string;
     exchangingCode: string;
     connectedClosing: string;
