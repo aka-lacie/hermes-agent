@@ -111,7 +111,7 @@ def test_run_reminder_returns_literal_text_without_agent(hermes_env):
         "prompt": "Check whether the customer replied",
     }
 
-    with patch("cron.scheduler._run_job_script") as script:
+    with patch("cron.scheduler_script._run_job_script") as script:
         success, document, response, error = run_job(job)
 
     assert success is True
@@ -119,6 +119,37 @@ def test_run_reminder_returns_literal_text_without_agent(hermes_env):
     assert response == "Check whether the customer replied"
     assert "no detached agent" in document
     script.assert_not_called()
+
+
+def test_reminder_failure_delivery_can_be_suppressed(hermes_env):
+    from cron.scheduler_delivery import _deliver_result
+
+    assert _deliver_result(
+        {"id": "reminder-1", "job_type": "reminder", "delivery_mode": "internal_turn",
+         "deliver": "discord:123", "failure_deliver": "local"},
+        "Failure notice", for_failure=True,
+    ) is None
+
+
+def test_restart_safe_internal_delivery_uses_gateway_queue(hermes_env, monkeypatch):
+    from cron.scheduler_delivery import _deliver_result
+
+    monkeypatch.setenv("_HERMES_CRON_EXTERNAL_WORKER", "attempt-1")
+    job = {"id": "reminder-1", "execution_id": "attempt-1", "job_type": "reminder",
+           "delivery_mode": "internal_turn", "deliver": "discord:123"}
+    with patch("cron.delivery_queue.enqueue_and_wait", return_value=None) as queue, \
+         patch("gateway.internal_turns.InternalTurnService.enqueue") as enqueue:
+        assert _deliver_result(job, "Reminder") is None
+    queue.assert_called_once_with("attempt-1", job, "Reminder", for_failure=False)
+    enqueue.assert_not_called()
+
+
+def test_reminder_rejects_monitor_mode(hermes_env):
+    from cron.jobs import create_job
+
+    with pytest.raises(ValueError, match="job_type='agent'"):
+        create_job(prompt="Check reply", schedule="30m", job_type="reminder",
+                   monitor_url="https://example.com/status")
 
 
 def test_internal_delivery_enqueues_main_agent_turn(hermes_env):
