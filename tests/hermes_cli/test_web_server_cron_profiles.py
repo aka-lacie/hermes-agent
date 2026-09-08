@@ -428,13 +428,15 @@ def test_profile_call_cannot_retarget_ticker_store_mid_write(
 
 
 
-def test_dashboard_creates_first_class_reminder(isolated_profiles):
+@pytest.mark.parametrize("paused", [False, True])
+def test_dashboard_creates_first_class_reminder(isolated_profiles, paused):
     job = _web_server_cron._create_cron_job_sync(
         _web_models.CronJobCreate(
             prompt="Check whether the customer replied",
             schedule="30m",
             deliver="origin",
             job_type="reminder",
+            paused=paused,
         ),
         profile="worker_alpha",
     )
@@ -443,6 +445,10 @@ def test_dashboard_creates_first_class_reminder(isolated_profiles):
     assert job["delivery_mode"] == "internal_turn"
     assert job["no_agent"] is False
     assert job["script"] is None
+    assert job["enabled"] is not paused
+    if paused:
+        assert job["state"] == "paused"
+        assert job["next_run_at"] is None
 
 
 @pytest.mark.asyncio

@@ -12,11 +12,10 @@ from unittest.mock import MagicMock
 from gateway.run import _dequeue_pending_event
 from gateway.platforms.base import (
     BasePlatformAdapter,
-    MessageEvent,
-    MessageType,
     PlatformConfig,
     Platform,
 )
+from gateway.platforms.event import MessageEvent, MessageType
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +257,7 @@ class TestQueueConsumptionAfterCompletion:
 
         assert adapter._pending_messages[session_key] is human
         assert runner._queued_events[session_key] == [internal]
+        assert human._gateway_accepted and internal._gateway_accepted
 
     def test_humans_stay_ahead_of_waiting_internal_turns(self):
         from gateway.run import GatewayRunner
@@ -293,6 +293,7 @@ class TestQueueConsumptionAfterCompletion:
             "internal-1",
             "internal-2",
         ]
+        assert all(item._gateway_accepted for item in ordered)
 
 class TestBusyInputModeQueueFifo:
     """Regression coverage for issue #28503.
@@ -342,4 +343,3 @@ class TestBusyInputModeQueueFifo:
             "five",
         ]
         assert runner._queue_depth(session_key, adapter=adapter) == len(texts)
-
