@@ -556,9 +556,7 @@ class WebhookAdapter(BasePlatformAdapter):
         """deliver_only: the rendered prompt IS the message — skip the agent, reuse the same
         auth/rate-limit/idempotency/template pipeline."""
         delivery = {"deliver": route_config.get("deliver", "log"), "payload": payload,
-                    "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload),
-            "delivery_mode": str(route_config.get("delivery_mode", "direct")).strip().lower(),
-            "route_name": route_name, "delivery_id": delivery_id, "profile": profile}
+                    "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload)}
         logger.info("[webhook] direct-deliver event=%s route=%s target=%s msg_len=%d delivery=%s", event_type,
                     route_name, delivery["deliver"], len(prompt), delivery_id)
         failed = {"status": "error", "error": "Delivery failed", "delivery_id": delivery_id}
@@ -673,7 +671,13 @@ class WebhookAdapter(BasePlatformAdapter):
         session_chat_id = f"webhook:{route_name}:{delivery_id}"
         self._delivery_info[session_chat_id] = {
             "deliver": route_config.get("deliver", "log"),
-            "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload)}
+            "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload),
+            # Completion routing must survive the detached worker's session boundary.
+            "delivery_mode": str(route_config.get("delivery_mode", "direct")).strip().lower(),
+            "route_name": route_name,
+            "delivery_id": delivery_id,
+            "profile": profile,
+        }
         self._delivery_info_created[session_chat_id] = now
         self._delivery_info_order.append((now, session_chat_id))
         self._prune_delivery_info(now)

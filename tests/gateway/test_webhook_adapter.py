@@ -762,6 +762,81 @@ class TestWebhookSilenceSuppression:
 
 class TestInternalTurnDelivery:
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("delivery_mode", ["internal_turn", "direct"])
+    @pytest.mark.parametrize("accepted", [True, False])
+    async def test_dispatch_preserves_completion_routing(
+        self, tmp_path, monkeypatch, delivery_mode, accepted
+    ):
+        route = {
+            "profile": "worker",
+            "secret": "routing-test-secret",
+            "prompt": "Inspect {subject}",
+            "deliver": "discord",
+            "delivery_mode": delivery_mode,
+            "deliver_extra": {"chat_id": "{destination}"},
+        }
+        adapter = _make_adapter(routes={"inbox": route}, host="127.0.0.1")
+        TestMultiplexProfileWebhookAuthentication._configure_profiles(adapter, tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "hermes_cli.profiles.get_profile_dir",
+            lambda name: tmp_path / "profiles" / name,
+        )
+        target = AsyncMock()
+        target.send.return_value = SendResult(success=True)
+        adapter.gateway_runner.adapters = {Platform.DISCORD: target}
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        adapter.handle_message = capture
+        body = json.dumps({"subject": "test message", "destination": "dm-123"}).encode()
+        async with TestClient(TestServer(TestMultiplexProfileWebhookAuthentication._app(adapter))) as cli:
+            response = await cli.post(
+                "/p/worker/webhooks/inbox",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Hub-Signature-256": _github_signature(body, route["secret"]),
+                    "X-GitHub-Delivery": "routing-event",
+                },
+            )
+            assert response.status == 202
+            await asyncio.gather(*list(adapter._background_tasks))
+
+        assert len(events) == 1
+        assert events[0].source.profile == route["profile"]
+        with patch(
+            "gateway.internal_turns.InternalTurnService.enqueue", return_value=accepted
+        ) as enqueue:
+            if delivery_mode == "internal_turn":
+                await adapter.send(events[0].source.chat_id, "worker progress")
+                enqueue.assert_not_called()
+                target.send.assert_not_awaited()
+            result = await adapter._send_with_retry(
+                events[0].source.chat_id, "Verified worker result", max_retries=0
+            )
+
+        if delivery_mode == "internal_turn":
+            assert result.success is accepted
+            target.send.assert_not_awaited()
+            expected_context = {
+                "platform": route["deliver"], "chat_id": "dm-123",
+                "thread_id": None, "user_id": None, "chat_type": "dm",
+                "profile": route["profile"], "kind": "webhook_completion",
+                "source_label": "inbox", "event_id": "routing-event",
+                "metadata": {"webhook_route": "inbox", "webhook_delivery_id": "routing-event"},
+            }
+            assert enqueue.call_args_list[0].args == ("Verified worker result",)
+            assert all(call.kwargs == expected_context for call in enqueue.call_args_list)
+            if accepted:
+                enqueue.assert_called_once()
+        else:
+            assert result.success is True
+            enqueue.assert_not_called()
+            target.send.assert_awaited_once()
+
     def _adapter(self):
         adapter = _make_adapter()
         adapter.gateway_runner = MagicMock()
