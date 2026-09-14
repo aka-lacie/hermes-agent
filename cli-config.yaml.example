@@ -905,6 +905,11 @@ memory:
   memory_char_limit: 2200   # ~800 tokens
   user_char_limit: 1375     # ~500 tokens
 
+  # Require approval for additions and replacements (foreground and background).
+  # Unattended removals always stage for approval, including the whole batch when
+  # any operation is a removal.
+  write_approval: false
+
   # Periodic memory nudge: remind the agent to consider saving memories
   # every N user turns. Set to 0 to disable. Only active when memory is enabled.
   nudge_interval: 10        # Nudge every 10 user turns (0 = disabled)

@@ -763,9 +763,8 @@ class TestBatchRefusesToEmptyNonEmptyStore:
 # =========================================================================
 
 class TestBackgroundReviewDeleteGate:
-    """An unattended background-review fork may append, never delete: the near-limit
-    'consolidate now' hint is otherwise an instruction to decide what to forget,
-    executed with no human in the loop. Denied ops are staged as pending proposals
+    """An unattended background-review fork may consolidate, but raw removals require
+    approval. Protected ops are staged as pending proposals
     (surfaced via /memory pending) instead of silently dropped — the fork's own review
     summary is never published back."""
 
@@ -790,19 +789,18 @@ class TestBackgroundReviewDeleteGate:
         assert record["payload"]["action"] == "remove"
         assert record["origin"] == "background_review"
 
-    def test_replace_staged_in_background_review(self, store, tmp_path, monkeypatch):
+    def test_replace_applies_in_background_review(self, store, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        store.add("memory", "entry the fork must not rewrite")
+        store.add("memory", "entry the fork may consolidate")
         token = set_current_write_origin("background_review")
         try:
             result = json.loads(memory_tool(
                 action="replace", old_text="entry the fork", content="rewritten by fork", store=store))
         finally:
             reset_current_write_origin(token)
-        assert result["staged"] is True
-        assert result["proposal_staged"] is True
-        # Fail-closed: the original entry is untouched.
-        assert "entry the fork must not rewrite" in store._entries_for("memory")
+        assert result["success"] is True
+        assert not result.get("staged")
+        assert store._entries_for("memory") == ["rewritten by fork"]
 
     def test_batch_containing_remove_staged_whole_batch(self, store, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

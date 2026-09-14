@@ -783,6 +783,12 @@ memory:
 
 With `memory.write_approval: true`, memory writes need your approval before they land: interactive CLI turns prompt inline; messaging sessions and the background self-improvement review stage the write for `/memory pending` → `/memory approve <id>` / `/memory reject <id>` review. Toggle at runtime with `/memory approval on|off`. See [Controlling memory writes](/user-guide/features/memory#controlling-memory-writes-write_approval).
 
+Unattended background reviews consolidate memory through the same approval setting:
+replacements and batches containing only additions and replacements apply by default
+(`memory.write_approval: false`) and stage with `memory.write_approval: true`. Explicit
+`remove` operations always stage in unattended reviews, including the whole batch
+if any operation is a removal.
+
 ## Context File Truncation
 
 Controls how much content Hermes loads from each automatic context file before applying head/tail truncation. This applies to files injected into the system prompt such as `SOUL.md`, `.hermes.md`, `AGENTS.md`, `CLAUDE.md`, and `.cursorrules`. It does **not** affect the `read_file` tool.
