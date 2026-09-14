@@ -714,6 +714,7 @@ class TestWebhookSilenceSuppression:
         mock_target.send = AsyncMock(return_value=SendResult(success=True))
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("telegram"): mock_target}
+        mock_runner._authorization_adapter = lambda platform, profile=None: mock_runner.adapters.get(platform)
         mock_runner.config.get_home_channel.return_value = None
         adapter.gateway_runner = mock_runner
 
@@ -784,7 +785,17 @@ class TestInternalTurnDelivery:
         )
         target = AsyncMock()
         target.send.return_value = SendResult(success=True)
-        adapter.gateway_runner.adapters = {Platform.DISCORD: target}
+        from gateway.authz_mixin import GatewayAuthorizationMixin
+
+        class RoutingRunner(GatewayAuthorizationMixin):
+            pass
+
+        runner = RoutingRunner()
+        runner.config = adapter.gateway_runner.config
+        adapter.gateway_runner = runner
+        adapter.gateway_runner.adapters = {}
+        adapter.gateway_runner._profile_adapters = {"worker": {Platform.DISCORD: target}}
+        adapter.gateway_runner._primary_profile_name = "default"
         events = []
 
         async def capture(event):
@@ -1018,6 +1029,7 @@ class TestDeliverCrossPlatformThreadId:
 
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("telegram"): mock_target}
+        mock_runner._authorization_adapter = lambda platform, profile=None: mock_runner.adapters.get(platform)
         mock_runner.config.get_home_channel.return_value = None
 
         adapter.gateway_runner = mock_runner
@@ -1149,7 +1161,7 @@ class TestMultiplexProfileWebhookAuthentication:
         adapter.gateway_runner = runner
         monkeypatch.setattr(
             "hermes_cli.profiles.profiles_to_serve",
-            lambda multiplex, profile_allowlist=None: [
+            lambda multiplex: [
                 ("default", tmp_path),
                 ("worker", tmp_path / "profiles" / "worker"),
                 ("other", tmp_path / "profiles" / "other"),

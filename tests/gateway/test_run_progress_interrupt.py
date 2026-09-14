@@ -237,8 +237,9 @@ async def test_run_agent_forwards_internal_notification_to_conversation(
     )
 
     assert result["final_response"] == "done"
-    assert NotificationCapturingAgent.last_run_kwargs == {
-        "internal_notification": notification
+    assert NotificationCapturingAgent.last_run_kwargs["internal_notification"] == notification
+    assert NotificationCapturingAgent.last_run_kwargs["turn_author"] == {
+        "id": None, "name": None, "is_bot": False,
     }
 
 

@@ -56,6 +56,20 @@ def test_reminder_without_explicit_target_defaults_to_origin(hermes_env):
     assert job["delivery_mode"] == "internal_turn"
 
 
+def test_resnapshot_keeps_reminders_out_of_inference_resolution(hermes_env):
+    from cron.jobs import create_job, resnapshot_job, resnapshot_all_unpinned
+
+    job = create_job(prompt="Follow up", schedule="30m", job_type="reminder")
+    with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as provider, \
+         patch("cron.jobs._resolve_default_model_snapshot") as model:
+        refreshed = resnapshot_job(job["id"])
+        assert refreshed["provider_snapshot"] is None
+        assert refreshed["model_snapshot"] is None
+        assert resnapshot_all_unpinned() == []
+        provider.assert_not_called()
+        model.assert_not_called()
+
+
 def test_reminder_rejects_script_and_skills(hermes_env):
     from cron.jobs import create_job
 
