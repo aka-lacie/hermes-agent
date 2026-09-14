@@ -328,14 +328,15 @@ for the configuration details.
 
 ## Controlling memory writes (`write_approval`)
 
-By default the agent saves memory freely — including from the background
-self-improvement review that runs after a turn. If you'd rather approve saves
-first, set `memory.write_approval: true`. It's a simple on/off gate applied to
+By default the agent saves and consolidates memory freely, including from the
+background self-improvement review. Explicit removals in unattended reviews always
+stage for approval, including any batch containing a removal. To approve all saves first, set
+`memory.write_approval: true`. It's a simple on/off gate applied to
 **both** foreground turns and the background review:
 
 | `write_approval` | Behaviour |
 |------------------|-----------|
-| `false` (default) | Write freely — the gate is off (the pre-gate behaviour). |
+| `false` (default) | Saves and replacements apply freely. Unattended removals and any batch containing a removal still stage for approval. |
 | `true` | Require approval before anything is saved. In the interactive CLI, foreground writes prompt you inline (entries are small enough to read in full). Everywhere else — messaging platforms, scripts, and the background self-improvement review — writes are **staged** for review with `/memory pending`. |
 
 > To turn memory off entirely (not just gate it), set both `memory_enabled: false` and `user_profile_enabled: false`. When both built-in stores are disabled, the built-in `memory` tool is automatically hidden.
@@ -353,7 +354,21 @@ This is the answer to "the agent saved a wrong assumption about me": set
 `write_approval: true`, and every save — especially the unprompted background
 ones — waits for your yes/no before it ever enters your profile.
 
-A staged `patch` or `remove` (the background review stages these even with the
+## Passive background consolidation
+
+Unattended reviews normally consolidate existing entries through a `patch`
+operation or a batch containing only `add` and `patch`. These follow
+`memory.write_approval`: they apply when it is `false` (the default) and stage for
+approval when it is `true`. Explicit `remove` operations always stage in
+unattended reviews; any batch containing one stages
+as a whole, so none of its additions or patches apply early.
+
+This behavior covers both built-in stores (`MEMORY.md` and `USER.md`). Foreground
+writes and user-requested `/refine` reviews follow the ordinary approval setting.
+Memory writes continue to affect future sessions without changing the current
+conversation's frozen memory snapshot.
+
+A staged `patch` or `remove` (background removal stages even with the
 gate off) records the full entry it targets, and `/memory pending` shows it.
 Approval applies to exactly that entry: if it changed after the write was staged,
 the write is refused and stays pending for you to reject. A `replace`/`patch`/`remove`

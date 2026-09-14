@@ -176,17 +176,18 @@ def destructive_ops(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [op for op in ops if (op or {}).get("action") in _BG_DELETE_ACTIONS]
 
 
-def _background_delete_gate(store, action, operations, target="memory", content=None,
-                            old_text=None) -> Optional[str]:
-    """Fail-closed operation gate for unattended background-review forks (#105921): ``add``
-    stays available (it is all any review prompt asks for), while ``patch``/``remove`` —
-    single or inside a batch — are never applied unattended. The op is staged in the pending
-    store instead of merely denied: the fork's own review summary is never published back, so
-    a plain denial would drop the consolidation request with no surfacing path at all. A
-    staging failure fails closed to a plain denial."""
+def _background_remove_gate(store, action, operations, target="memory", content=None, old_text=None) -> Optional[str]:
+    """Protect raw removal in unattended reviews; consolidation via patch follows the
+    canonical memory.write_approval setting. A removal stages the whole request.
+    Persist proposals because the fork's own summary is never published back (#105921).
+    A staging failure fails closed to a plain denial."""
     from tools.skill_provenance import is_unattended_review
 
     if not is_unattended_review():
+        return None
+    hit = action == "remove" or any(
+        isinstance(op, dict) and op.get("action") == "remove" for op in (operations or []))
+    if not hit:
         return None
     payload = ({"action": "batch", "target": target, "operations": operations}
                if operations is not None else
@@ -202,21 +203,21 @@ def _background_delete_gate(store, action, operations, target="memory", content=
         FAILURE_CLASS.set("staged")
         record = wa.stage_write(
             wa.MEMORY, payload,
-            summary=(f"background review consolidation ({'batch' if operations is not None else action} "
+            summary=(f"background review removal ({'batch' if operations is not None else action} "
                      f"on {target}): {detail}")[:200],
             origin=wa.current_origin())
         return json.dumps({
             "success": True, "staged": True, "proposal_staged": True, "pending_id": record["id"],
-            "message": ("Background review may not delete memory entries unattended. The proposed "
+            "message": ("Background review may not remove memory entries unattended. The proposed "
                         f"{'batch' if operations is not None else action} was staged for your approval — "
                         "review it with /memory pending (approve to apply, discard to drop)."),
         }, ensure_ascii=False)
     except Exception:
-        logger.warning("Failed to stage background-review consolidation; denying", exc_info=True)
+        logger.warning("Failed to stage background-review removal; denying", exc_info=True)
         FAILURE_CLASS.set("gate_refused")
         return tool_error(
-            "Background review may not delete memory entries ('patch'/'remove', including in a "
-            "batch); 'add' is still available.", success=False)
+            "Background review may not remove memory entries unattended (including in a "
+            "batch); 'add' and 'patch' follow memory.write_approval.", success=False)
 
 
 def memory_tool(action: str | None = None, target: str = "memory", content: str | None = None, old_text: str | None = None,
@@ -260,7 +261,7 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
             return _invalid("operations must be a list of {action, content?, old_text?} objects.")
         if any(isinstance(op, dict) and op.get("action") == "replace" for op in operations):
             return _invalid(_REPLACE_REMOVED)
-        denied = _background_delete_gate(store, action, operations, target)
+        denied = _background_remove_gate(store, action, operations, target)
         if denied is not None:
             return "rejected", denied
         # Approval gate: stages (background/gateway) or prompts inline (CLI); off by default.
@@ -282,7 +283,7 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
     if action not in _STORE_ACTIONS:
         return _invalid(f"Unknown action '{action}'. Use: add, patch, remove")
     invalid = (_validate_single_op(store, action, target, content, old_text)
-               or _background_delete_gate(store, action, None, target, content, old_text)
+               or _background_remove_gate(store, action, None, target, content, old_text)
                or _apply_write_gate(store, action, target, content, old_text))
     if invalid is not None:
         return "rejected", invalid
