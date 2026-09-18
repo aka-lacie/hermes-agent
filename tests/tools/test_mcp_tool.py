@@ -1101,7 +1101,7 @@ class TestMCPServerTask:
         p_stdio, p_cs, _, _ = self._mock_stdio_and_session(mock_session)
 
         async def _test():
-            with patch("tools.mcp_tool.StdioServerParameters") as params, p_stdio, p_cs:
+            with patch("tools.mcp_tool.StdioServerParameters") as params, p_stdio, p_cs as client_session:
                 server = MCPServerTask("test_srv")
                 await server.start(
                     {"command": "npx", "args": ["-y", "test"], "cwd": "/plugin"}
@@ -1111,6 +1111,7 @@ class TestMCPServerTask:
                 assert len(server._tools) == 1
                 assert server._tools[0].name == "echo"
                 mock_session.initialize.assert_called_once()
+                assert client_session.call_args.kwargs["client_info"].name == "hermes-agent"
                 assert params.call_args.kwargs["cwd"] == "/plugin"
 
                 await server.shutdown()

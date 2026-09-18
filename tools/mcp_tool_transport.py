@@ -105,7 +105,11 @@ class MCPServerTransportMixin:
 
     def _session_kwargs(self) -> dict:
         """ClientSession kwargs: sampling, elicitation, notification + logging callbacks."""
-        kwargs = {}
+        from mcp.types import Implementation
+        from hermes_cli import __version__
+
+        # Transport-independent harness identity; never send profile/user metadata.
+        kwargs = {"client_info": Implementation(name="hermes-agent", version=__version__)}
         for handler in (self._sampling, self._elicitation):
             if handler:
                 kwargs.update(handler.session_kwargs())
