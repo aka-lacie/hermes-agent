@@ -333,6 +333,36 @@ async def test_base_adapter_rejects_derived_session_mismatch():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("multiplex", [None, False, True])
+async def test_completion_reenters_persisted_named_profile_session(tmp_path, multiplex):
+    """Persisted origin profile is credential ownership, not always a key namespace."""
+    config = GatewayConfig(multiplex_profiles=multiplex)
+    store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+    source = _entry().origin
+    source.profile = "research"
+    entry = store.get_or_create_session(source)
+    assert entry.session_key.startswith("agent:research:" if multiplex else "agent:main:")
+    adapter = _RoutingAdapter()
+    adapter.set_session_store(store)
+    adapter.set_message_handler(AsyncMock())
+    adapter._active_sessions[entry.session_key] = asyncio.Event()
+    runner = _runner(entry, adapter)
+    runner.config = config
+    runner.session_store = store
+    runner._resolve_injection_adapter = lambda platform, origin: adapter
+
+    accepted = await runner._inject_watch_notification(
+        "Background research completed", {"type": "delegation_complete", "session_key": entry.session_key})
+
+    assert accepted is True
+    queued = adapter._pending_messages[entry.session_key]
+    assert queued.source.profile == "research"
+    assert queued.metadata["gateway_session_key"] == entry.session_key
+    assert queued._gateway_accepted is True
+    adapter._message_handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_submits_dispatch_on_live_gateway_loop():
     runner = _runner(_entry())
     runner._gateway_loop = asyncio.get_running_loop()

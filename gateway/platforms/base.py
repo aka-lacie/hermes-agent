@@ -2313,13 +2313,18 @@ class BasePlatformAdapter(ABC):
         stamps ``source.profile``, so without this every bot in a multiplexed gateway shares one
         ``agent:main:`` lane. Order: ``source.profile`` → ``_owner_profile`` → session-store
         resolver; getattr-guarded (object.__new__ in tests), type-checked (no MagicMock in the
-        key)."""
+        key). Standalone stores retain the legacy namespace even when a persisted
+        origin carries its named profile for credentials/egress. This must agree
+        with SessionStore, including for background completion admission."""
+        store = getattr(self, "_session_store", None)
+        multiplex = getattr(getattr(store, "config", None), "multiplex_profiles", True)
+        if multiplex is False or multiplex is None:
+            return None
         for candidate in (
             getattr(source, "profile", None) if source is not None else None,
             getattr(self, "_owner_profile", None)):
             if isinstance(candidate, str) and candidate.strip():
                 return candidate
-        store = getattr(self, "_session_store", None)
         resolver = getattr(store, "_resolve_profile_for_key", None) if store else None
         if not callable(resolver):
             return None
@@ -3824,6 +3829,7 @@ class BasePlatformAdapter(ABC):
             await asyncio.to_thread(self._apply_topic_recovery, event)
         session_key = self._event_session_key(event)
         if expected_session_key and session_key != expected_session_key:
+            event._gateway_route_mismatch = True
             logger.warning("Dropping internally routed event: expected session=%s derived=%s",
                            expected_session_key, session_key)
             return

@@ -1438,7 +1438,7 @@ class GatewayNotificationsMixin:
     async def _deliver_completion_notification_scoped(
         self, synth_text: str, evt: dict, *, sibling_claims=(),
     ) -> Optional[bool]:
-        from gateway.wake import WakeNotAccepted
+        from gateway.wake import WakeNotAccepted, WakeRouteMismatch
         identity = self._completion_delivery_identity(evt)
         claim = self._CompletionClaim()
         accepted = identity_claimed = refused = False
@@ -1458,6 +1458,11 @@ class GatewayNotificationsMixin:
                 with self._completion_delivery_lock:
                     self._mark_completions_delivered_locked((identity,))
             return True
+        except WakeRouteMismatch:
+            # Unlike a busy/full queue or missing handler, replaying an identical
+            # bad route cannot help. Spend the existing bounded retry budget;
+            # exhaustion drops delivery, never the queryable completion result.
+            return False
         except WakeNotAccepted:
             refused = True
             return False

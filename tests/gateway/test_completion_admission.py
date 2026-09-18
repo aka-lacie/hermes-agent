@@ -29,10 +29,13 @@ async def drain(adapter):
 
 @pytest.mark.asyncio
 async def test_completion_ack_requires_admission_and_replay_never_repeats(tmp_path):
-    runner = GatewayRunner(GatewayConfig())
+    runner = GatewayRunner(GatewayConfig(multiplex_profiles=False))
+    runner._primary_profile_name = "research"
     adapter = DiscordAdapter(PlatformConfig(enabled=True, typing_indicator=False))
     runner.adapters = {Platform.DISCORD: adapter}
-    source = SessionSource(platform=Platform.DISCORD, chat_type="dm", chat_id="42", user_id="42")
+    source = SessionSource(platform=Platform.DISCORD, chat_type="dm", chat_id="42", user_id="42", profile="research")
+    runner.session_store.get_or_create_session(source)
+    adapter.set_session_store(runner.session_store)
     key = build_session_key(source)
     events = [pending(key, f"admission-{i}") for i in range(2)]
     received = []
@@ -89,6 +92,28 @@ async def test_completion_ack_requires_admission_and_replay_never_repeats(tmp_pa
         release.set()
         await drain(adapter)
         await runner._cancel_process_completion_batch_tasks()
+
+
+@pytest.mark.asyncio
+async def test_permanent_route_mismatch_exhausts_budget_without_false_ack():
+    runner = GatewayRunner(GatewayConfig())
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, typing_indicator=False))
+    runner.adapters = {Platform.DISCORD: adapter}
+    received = []
+
+    async def handler(event):
+        received.append(event)
+
+    adapter.set_message_handler(handler)
+    event = pending("agent:main:discord:dm:other", "bad-route-budget")
+    event.update(platform="discord", chat_type="dm", chat_id="42")
+    for _ in range(delegation._MAX_DELIVERY_ATTEMPTS):
+        assert await runner._deliver_completion_notification("completion", event) is False
+    row = delegation.get_durable_delegation(event["delegation_id"])
+    assert row["delivery_state"] == "dropped"
+    assert row["delivery_attempts"] == delegation._MAX_DELIVERY_ATTEMPTS
+    assert await runner._deliver_completion_notification("completion", event) is None
+    assert not received and not runner._completion_deliveries_delivered
 
 
 @pytest.mark.asyncio
