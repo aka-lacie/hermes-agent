@@ -481,6 +481,20 @@ def _capped_structured_content(result):
     return _truncate_mcp_text_result(as_json) if len(as_json) > _MCP_HARD_RESULT_CAP_CHARS else structured
 
 
+def _sanitize_structured_error(value):
+    """Keep machine-readable recovery details while applying text-error redaction."""
+    if isinstance(value, str):
+        return _sanitize_error(strip_unicode_tags(value))
+    if isinstance(value, dict):
+        return {_sanitize_structured_error(str(key)): _sanitize_structured_error(item)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_structured_error(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _sanitize_structured_error(str(value))
+
+
 def _render_call_tool_result(result, server_name: str) -> str:
     """Pure: ``CallToolResult`` -> handler JSON. ``content`` and ``structuredContent`` are
     ALTERNATIVES, never both forwarded (kimi-code#3234): spec-following servers already render
@@ -489,7 +503,12 @@ def _render_call_tool_result(result, server_name: str) -> str:
     fills in only when the blocks rendered effectively empty, keeping structuredContent-only
     servers working. ``_meta`` minus reserved keys is always surfaced."""
     if mcp_field(result, "is_error", "isError", False):
-        return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
+        # Error prose is often only a generic summary; unlike successful dual-emits,
+        # structured error details carry actionable retry fields absent from text.
+        structured = _capped_structured_content(result)
+        extra = {"structuredContent": _sanitize_structured_error(structured)} if structured is not None else {}
+        return tool_error(_sanitize_error(_truncate_mcp_text_result(
+            _error_result_text(result) or "MCP tool returned an error")), **extra)
     text_result, usable_parts = _render_content_blocks(result, server_name)
     structured = _capped_structured_content(result)
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))

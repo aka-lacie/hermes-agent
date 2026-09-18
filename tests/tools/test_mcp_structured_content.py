@@ -69,6 +69,27 @@ def _patch_mcp_server():
 class TestStructuredContentPreservation:
     """Ensure structuredContent from CallToolResult is forwarded."""
 
+    def test_error_preserves_structured_retry_details(self, _patch_mcp_server):
+        details = {"results": [{"error": {"retry_action": "retry_with_revision", "expected_revision": 7}}]}
+        _patch_mcp_server.call_tool = AsyncMock(return_value=_FakeCallToolResult(
+            content=[_FakeContentBlock("Request failed")], is_error=True,
+            structuredContent=details))
+        handler = _mcp_handlers._make_tool_handler("test-server", "my-tool", 30.0)
+        data = json.loads(handler({}))
+        assert data["error"] == "Request failed"
+        assert data["structuredContent"] == details
+
+    def test_structured_error_is_redacted_and_capped(self):
+        result = _FakeCallToolResult(content=[], is_error=True,
+            structuredContent={"retry_action": "retry", "detail": "Bearer private-secret"})
+        data = json.loads(_mcp_handlers._render_call_tool_result(result, "test-server"))
+        assert data["error"]
+        assert data["structuredContent"] == {"retry_action": "retry", "detail": "[REDACTED]"}
+        cap = _mcp_handlers._MCP_HARD_RESULT_CAP_CHARS
+        result.structuredContent = {"detail": "x" * (cap * 2)}
+        data = json.loads(_mcp_handlers._render_call_tool_result(result, "test-server"))
+        assert len(str(data["structuredContent"])) < cap + 1000
+
     def test_text_only_result(self, _patch_mcp_server):
         """When no structuredContent, result is text-only (existing behaviour)."""
         session = _patch_mcp_server
