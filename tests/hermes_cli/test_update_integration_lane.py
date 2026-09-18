@@ -17,6 +17,22 @@ def test_integration_guard_never_switches_even_when_fully_merged():
     git.assert_not_called()
 
 
+def test_post_swap_integration_tail_never_syncs_main():
+    class ReachedDependencySync(Exception):
+        pass
+
+    with patch.object(update_cmd._m(), "_sync_with_upstream_if_needed") as sync, \
+         patch.object(update_cmd, "_sync_python_dependencies_after_pull", side_effect=ReachedDependencySync), \
+         pytest.raises(ReachedDependencySync):
+        update_cmd._finish_pulled_update(
+            ["git"], "main", "before", SimpleNamespace(active_lazy_features=[], active_tool_dependencies={}),
+            gateway_mode=False, is_fork=True, desktop_dir=None,
+            had_desktop_app_before_update=False, pre_update_snapshot_id=None,
+            _pre_update_plan=None, _windows_gateway_resume=None,
+            remote="origin", in_place_update=True)
+    sync.assert_not_called()
+
+
 @pytest.mark.parametrize("current", ["main", "HEAD", "feat/example"])
 def test_integration_guard_refuses_wrong_checkout(current):
     with patch.object(update_cmd, "_git_run") as git, \

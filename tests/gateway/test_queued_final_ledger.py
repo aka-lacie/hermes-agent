@@ -212,7 +212,8 @@ def _chain_runner_and_ctx(followup_return):
         _interrupt_depth=0, history=[], _status_thread_metadata={"thread_id": "7"},
         context_prompt=None, result_holder=[None])
     pending_event = SimpleNamespace(
-        source=topic, message_id="6002", channel_prompt=None, message_type=None)
+        source=topic, message_id="6002", channel_prompt=None, message_type=None,
+        internal=False, metadata={})
     return GatewayRunner, runner, turn_ctx, pending_event
 
 

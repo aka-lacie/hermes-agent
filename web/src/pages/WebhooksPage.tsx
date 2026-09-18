@@ -27,6 +27,7 @@ import { Input } from "@nous-research/ui/ui/components/input";
 import { Label } from "@nous-research/ui/ui/components/label";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn, themedBody } from "@/lib/utils";
+import { errorMessage } from "@/lib/api-error";
 
 interface CreatedWebhook {
   url: string;
@@ -144,8 +145,8 @@ export default function WebhooksPage() {
       void watchRestartOutcome();
     } catch (e) {
       setRestartNeeded(true);
-      setRestartError(String(e));
-      showToast(`Failed to restart: ${e}`, "error");
+      setRestartError(errorMessage(e));
+      showToast(`Failed to restart: ${errorMessage(e)}`, "error");
     } finally {
       setRestarting(false);
     }
@@ -171,7 +172,7 @@ export default function WebhooksPage() {
         showToast(`Webhooks enabled; gateway restart failed${detail}`, "error");
       }
     } catch (e) {
-      showToast(`Failed to enable webhooks: ${e}`, "error");
+      showToast(`Failed to enable webhooks: ${errorMessage(e)}`, "error");
     } finally {
       setEnabling(false);
     }
@@ -212,7 +213,7 @@ export default function WebhooksPage() {
       resetForm();
       loadWebhooks();
     } catch (e) {
-      showToast(`Failed to create: ${e}`, "error");
+      showToast(`Failed to create: ${errorMessage(e)}`, "error");
     } finally {
       setCreating(false);
     }
@@ -231,7 +232,7 @@ export default function WebhooksPage() {
         );
         loadWebhooks();
       } catch (e) {
-        showToast(`Error: ${e}`, "error");
+        showToast(`Error: ${errorMessage(e)}`, "error");
       } finally {
         setTogglingName(null);
       }
@@ -247,7 +248,7 @@ export default function WebhooksPage() {
           showToast(`Deleted: "${name}"`, "success");
           loadWebhooks();
         } catch (e) {
-          showToast(`Error: ${e}`, "error");
+          showToast(`Error: ${errorMessage(e)}`, "error");
           throw e;
         }
       },

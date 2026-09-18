@@ -24,6 +24,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter, ExecApprovalPrompt, SendResult,
 )
+from gateway.platforms.base_exec_approval import EA_HEADER_TEXT
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from gateway.relay.descriptor import CapabilityDescriptor
 from gateway.relay.egress import (
@@ -211,6 +212,11 @@ class RelayAdapter(BasePlatformAdapter):
     def _chat_platform(self, chat_id: str) -> Optional[str]:
         """The chat's underlying platform as seen inbound, else the primary's."""
         return self._platform_by_chat.get(str(chat_id)) or self.descriptor.platform
+
+    def warning_notifications_enabled(self, logical_platform=None, *, chat_id=None, metadata=None) -> bool:
+        platform = (logical_platform or (metadata or {}).get("_relay_logical_platform")
+                    or self._chat_platform(chat_id))
+        return super().warning_notifications_enabled(platform)
 
     def _descriptor_for_chat(self, chat_id: str) -> CapabilityDescriptor:
         """The descriptor governing a specific chat. Platform caps genuinely differ
@@ -1991,7 +1997,7 @@ class RelayAdapter(BasePlatformAdapter):
 
     _PROMPT_UNAVAILABLE = SendResult(success=False, error="relay prompt op unavailable")
 
-    _EA_HEADER = "⚠️ **Command Approval Required**\n\n"
+    _EA_HEADER = f"⚠️ **{EA_HEADER_TEXT}**\n\n"
     _EA_SMART_DENY_LINE = "\n\n**Smart DENY:** owner override applies to this one operation only."
     _EA_CMD_BUDGET = 1500
 

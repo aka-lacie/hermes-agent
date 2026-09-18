@@ -63,6 +63,7 @@ import { $marketplaceInstalls, isUserTheme, removeUserTheme } from '@/themes/use
 
 import { setHermesConfigCache, useHermesConfigRecord } from '../hooks/use-config-record'
 
+import { ChatFontSetting } from './chat-font-setting'
 import { MODE_OPTIONS } from './constants'
 import { setNested } from './helpers'
 import { PetSettings } from './pet-settings'
@@ -588,7 +589,6 @@ export function AppearanceSettings() {
                                     setTheme(theme.name)
                                   }
                                 }}
-                                title={a.removeTheme}
                                 type="button"
                               >
                                 <Trash2 className="size-3.5" />
@@ -641,6 +641,8 @@ export function AppearanceSettings() {
             id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.uiScale)}
             title={a.uiScaleTitle}
           />
+
+          <ChatFontSetting />
 
           <TerminalFontSetting />
 

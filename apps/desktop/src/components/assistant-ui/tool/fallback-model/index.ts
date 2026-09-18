@@ -2,9 +2,10 @@ import { stripAnsi } from '@hermes/shared/ansi'
 
 import { type ToolTitleKey, translateNow } from '@/i18n'
 import { normalizeExternalUrl } from '@/lib/external-link'
+import { isFileMediaPath, mediaKind } from '@/lib/media'
 import { summarizeShellCommand } from '@/lib/summarize-command'
 import { capitalize, firstStringField, normalize } from '@/lib/text'
-import { isCardTool, isFileEditTool, isSilentTool } from '@/lib/tool-render-class'
+import { CONNECTION_CARD_KEY, isCardTool, isFileEditTool, isSilentTool } from '@/lib/tool-render-class'
 import { envelopeErrorText, toolResultRecord } from '@/lib/tool-result-metadata'
 import { extractToolErrorMessage, formatToolResultSummary } from '@/lib/tool-result-summary'
 
@@ -41,7 +42,7 @@ export * from './types'
 // The transcript's render budget prices a turn by the same classification, so
 // it lives in `@/lib/tool-render-class` where both sides can reach it without
 // pulling this module's formatting/i18n weight into the cost path.
-export { isCardTool, isFileEditTool, isSilentTool }
+export { CONNECTION_CARD_KEY, isCardTool, isFileEditTool, isSilentTool }
 
 export interface DiffLineStats {
   added: number
@@ -781,14 +782,14 @@ function toolImageUrl(args: Record<string, unknown>, result: Record<string, unkn
     return ''
   }
 
-  // Only inline-render images the renderer can actually fetch: data URLs or
-  // remote http(s). A bare filesystem path (e.g. vision_analyze's input image)
-  // resolves against the dev-server origin and 404s — fall back to the tool's
-  // codicon instead of a broken <img>.
+  // Filesystem images are resolved by the activity renderer through the
+  // authenticated media pipeline before they reach an <img>. This matters for
+  // vision_analyze, whose input commonly lives on the local or remote gateway.
   const isDataImage = candidate.toLowerCase().startsWith('data:image/')
   const isRemoteImage = /^https?:\/\//i.test(candidate) && /\.(png|jpe?g|gif|webp|bmp|svg)(\?|#|$)/i.test(candidate)
+  const isLocalImage = isFileMediaPath(candidate) && mediaKind(candidate) === 'image'
 
-  return isDataImage || isRemoteImage ? candidate : ''
+  return isDataImage || isRemoteImage || isLocalImage ? candidate : ''
 }
 
 export function stripInlineDiffChrome(value: string): string {
