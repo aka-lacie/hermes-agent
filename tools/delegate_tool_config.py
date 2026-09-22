@@ -365,7 +365,7 @@ def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
 DIFFICULTY_LEVELS = ("easy", "medium", "hard")
 _DIFFICULTY_ROUTE_KEYS = frozenset({
     "model", "provider", "base_url", "api_key", "api_mode", "request_overrides",
-    "command", "args", "fallback_providers", "reasoning_effort",
+    "fallback_providers", "reasoning_effort",
 })
 
 

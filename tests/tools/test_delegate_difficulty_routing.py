@@ -132,3 +132,22 @@ def test_route_validation_and_copies_preserve_default_and_transport():
     cfg["difficulty_routes"]["hard"]["reasoning_effort"] = "typo"
     with pytest.raises(ValueError, match="reasoning_effort"):
         _task_route_configs([{"difficulty": "hard"}], cfg)
+
+
+@pytest.mark.parametrize("setting,value", [("command", "/missing/route-command"), ("args", ["--route"])])
+def test_unsupported_transport_route_refuses_batch_before_construction(monkeypatch, setting, value):
+    from tools import delegate_tool as dt
+    from tools.registry import registry
+    from tests.tools.test_delegate import _make_mock_parent
+
+    monkeypatch.setattr(dt, "_load_config", lambda: {
+        "difficulty_routes": {"easy": {}, "hard": {setting: value}},
+    })
+    with patch.object(dt, "_build_children") as build:
+        response = json.loads(registry.dispatch("delegate_task", {"tasks": [
+            {"goal": "Perform the valid first assignment", "difficulty": "easy"},
+            {"goal": "Perform the unsupported second assignment", "difficulty": "hard"},
+        ]}, parent_agent=_make_mock_parent()))
+    assert "Unsupported delegation route settings" in response["error"]
+    assert setting in response["error"]
+    build.assert_not_called()

@@ -379,9 +379,10 @@ A child may discover more complexity and select a different route for its own su
 Omitting difficulty uses the ordinary delegation configuration, including for nested children.
 An explicit category must be configured; invalid categories refuse the whole call before spawning
 children. Each route overlays the default configuration. Supported overrides are `model`, `provider`,
-`base_url`, `api_key`, `api_mode`, `request_overrides`, `command`, `args`, `fallback_providers`, and
+`base_url`, `api_key`, `api_mode`, `request_overrides`, `fallback_providers`, and
 `reasoning_effort`. Nested values replace the default value rather than being recursively merged;
 use `null` to clear an inherited setting, such as a direct `base_url` when switching providers.
+Transport `command` and `args` belong in the provider configuration; difficulty routes reject them.
 Reasoning `false` disables reasoning; omitted effort uses the default delegation effort.
 Routes are resolved independently without modifying shared configuration. Existing deployments
 without `difficulty_routes` retain their current routing and do not advertise the new argument.
