@@ -100,6 +100,18 @@ restarting the gateway from inside its own supervised process. A self-restart ca
 terminate the tool before it finishes and cause a supervisor/auto-resume loop.
 User approval, YOLO mode, and `force=True` do not bypass this guard.
 
+The guard also refuses process killers aimed at the interpreter image the gateway
+runs as — `taskkill /F /IM python.exe`, `taskkill /FI "IMAGENAME eq python.exe"`,
+`Stop-Process -Name python`, `pkill -9 python3`, `killall python`, `pkill -f python`,
+and name-derived kills such as `pgrep python | xargs kill` — because a supervised
+gateway is literally a `python` process and such a command takes it (and the agent's
+own turn) down. Kills scoped to a process the agent owns pass: the `proc_*` id of a
+background job (`process(action="kill", …)`) or an explicit PID
+(`taskkill /F /PID <pid>`, `kill <pid>`). Other image names (`taskkill /F /IM notepad.exe`)
+are unaffected. The guard is active under every generated launcher — systemd unit,
+launchd plist, s6 run script and the Windows Scheduled Task — via the
+`HERMES_SUPERVISED_CHILD` marker they export.
+
 On macOS, executed `launchctl submit` and `launchctl bootstrap` commands are
 restricted **regardless of the job label**. This is a conservative registration
 restriction intended to catch indirect restart helpers with neutral labels, not
@@ -233,7 +245,7 @@ In the interactive CLI, dangerous commands show an inline approval prompt:
 
 ```
   ⚠️  DANGEROUS COMMAND: recursive delete
-      rm -rf /tmp/old-project
+      rm -rf ~/old-project
 
       [o]nce  |  [s]ession  |  [a]lways  |  [d]eny
 
@@ -388,7 +400,7 @@ Unset the variable to restore unrestricted writes (subject to the protected-path
 
 ### Cron and other Hermes state
 
-Do not ask the agent to `patch` `~/.hermes/cron/jobs.json` directly. Use the `cronjob` tool, [`hermes cron`](./features/cron.md), or `/cron` — they update the job store through the supported API. The same applies to other Hermes control files when write safety blocks direct edits.
+Do not ask the agent to `patch` `~/.hermes/cron/jobs.json` directly. Use the `cronjob_manage` tool, [`hermes cron`](./features/cron.md), or `/cron` — they update the job store through the supported API. The same applies to other Hermes control files when write safety blocks direct edits.
 
 :::note Defense-in-depth, not a hard boundary
 Write guards apply to `write_file` and `patch` only, with one exception: the Windows NT/device-namespace row is also enforced on reads — `read_file`, `search_files`, `@file:`/`@folder:` context references and the ACP file bridge all refuse those paths on the raw string, before anything resolves them. The `terminal` tool runs as the same OS user and can still `cat` or overwrite denied paths via shell commands. The denylist reduces accidental damage and gives models a clear stop signal; it does not sandbox a hostile or compromised agent.
@@ -536,6 +548,7 @@ _BASE_SECURITY_ARGS = [
     "--cap-add", "FOWNER",                        # Package managers need file ownership
     "--security-opt", "no-new-privileges",         # Block privilege escalation
     "--pids-limit", "256",                         # Limit process count
+    # no-tmp: ok — configures the sandbox's own tmpfs
     "--tmpfs", "/tmp:rw,nosuid,size=512m",         # Size-limited /tmp
     "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",  # No-exec /var/tmp
 ]
@@ -653,6 +666,17 @@ terminal:
 
 Paths are relative to `~/.hermes/`. Files are mounted to `/root/.hermes/` inside the container. This list is read by `tools/credential_files.py` (`terminal.credential_files`) — it lives under the `terminal:` block but is loaded by the credential-files module, not the core terminal backend, so it isn't part of the bundled `DEFAULT_CONFIG` snapshot.
 
+### Borrowed CLI logins (Codex CLI, Claude Code) {#borrowed-cli-logins}
+
+When Hermes has no usable login of its own for `openai-codex` or `anthropic`, it can borrow the Codex CLI's `~/.codex/auth.json` and Claude Code's `~/.claude/.credentials.json` (or Keychain entry) and refresh them on your behalf. Both use single-use, rotating refresh tokens: once two programs hold one token family, whichever refreshes first invalidates the other's copy, which shows up as "I logged in once in the terminal and Hermes keeps failing" (or the reverse). If you run those CLIs alongside Hermes, give Hermes its own login and turn adoption off:
+
+```yaml
+auth:
+  adopt_external_logins: false   # default: true
+```
+
+With the switch off Hermes never reads or refreshes those files: the `claude_code` credential-pool row disappears, `hermes auth list` prints one line saying so, and the log carries one INFO line per process. Only automatic adoption is affected — `hermes auth add openai-codex` still asks before importing an existing Codex CLI login. Automatic recovery also only repairs the credential Hermes already holds: a Codex CLI/Desktop login into a different ChatGPT workspace is refused with a warning (re-authenticate with `hermes auth add openai-codex`), and a login you complete while recovery is running is never overwritten. Add your own logins with `hermes auth add anthropic` / `hermes auth add openai-codex`.
+
 ### What Each Sandbox Filters
 
 | Sandbox | Default Filter | Passthrough Override |
@@ -724,7 +748,7 @@ security:
 
 When a blocked URL is requested, the tool returns an error explaining the domain is blocked by policy. The blocklist is enforced across `web_search`, `web_extract`, `browser_navigate`, and all URL-capable tools.
 
-See [Website Blocklist](/user-guide/configuration#website-blocklist) in the configuration guide for full details.
+See [Website Blocklist](./configuration.md#website-blocklist) in the configuration guide for full details.
 
 ### SSRF Protection
 
@@ -881,6 +905,16 @@ TERMINAL_SSH_KEY=~/.ssh/hermes_agent_key
 ```
 
 The SSH connection details live in `.env` (not `config.yaml`) so they aren't checked in or shared along with profile exports. This keeps the gateway's messaging connections separate from the agent's command execution.
+
+## Trusted-by-placement extension points {#trusted-by-placement}
+
+Most third-party code Hermes can run is gated by an explicit allow-list: general plugins need `plugins.enabled`, shell hooks need a first-use approval (or `hooks_auto_accept`), MCP servers are listed in config. One surface is deliberately different:
+
+| Extension point | Loaded from | Loaded when | Opt-in |
+|-----------------|-------------|-------------|--------|
+| [Gateway event hooks](./features/hooks.md#gateway-event-hooks) | `<profile home>/hooks/<name>/` (`HOOK.yaml` + `handler.py`) | Gateway startup (`HookRegistry.discover_and_load()`), per served profile | **Placing the directory.** No `plugins.enabled` entry, no prompt; `HERMES_SAFE_MODE` does not skip it. |
+
+The gateway imports every valid hook directory in-process, with the gateway's own privileges. This is the documented contract (since `3988c3c245f`), not an oversight: the profile home is operator-owned configuration, and anyone who can write into it can already run code as you through `config.yaml` shell hooks or by editing `plugins.enabled`, so a separate consent gate for `hooks/` would add friction without moving the trust boundary. Treat the contents of `~/.hermes/hooks/` like the contents of `config.yaml` — review a `handler.py` before you place it, and include `ls ~/.hermes/hooks/` whenever you audit the rest of the profile home (the directory is not on the [protected-paths denylist](#file-write-safety), so it is ordinary writable state). Full details: [gateway hook trust model](./features/hooks.md#gateway-hook-trust).
 
 ## Supply-chain advisory checking
 

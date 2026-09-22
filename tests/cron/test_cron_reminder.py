@@ -39,8 +39,8 @@ def test_create_reminder_defaults_to_internal_turn(hermes_env):
     assert job["job_type"] == "reminder"
     assert job["delivery_mode"] == "internal_turn"
     assert job["no_agent"] is False
-    assert job["provider_snapshot"] is None
-    assert job["model_snapshot"] is None
+    assert job.get("provider") is None
+    assert job.get("model") is None
 
 
 def test_reminder_without_explicit_target_defaults_to_origin(hermes_env):
@@ -56,17 +56,15 @@ def test_reminder_without_explicit_target_defaults_to_origin(hermes_env):
     assert job["delivery_mode"] == "internal_turn"
 
 
-def test_resnapshot_keeps_reminders_out_of_inference_resolution(hermes_env):
-    from cron.jobs import create_job, resnapshot_job, resnapshot_all_unpinned
+def test_reminder_create_and_update_do_not_resolve_inference(hermes_env):
+    from cron.jobs import create_job, update_job
 
-    job = create_job(prompt="Follow up", schedule="30m", job_type="reminder")
-    with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as provider, \
-         patch("cron.jobs._resolve_default_model_snapshot") as model:
-        refreshed = resnapshot_job(job["id"])
-        assert refreshed["provider_snapshot"] is None
-        assert refreshed["model_snapshot"] is None
-        assert resnapshot_all_unpinned() == []
-        provider.assert_not_called()
+    with patch("cron.jobs._main_model_pin") as model:
+        job = create_job(prompt="Follow up", schedule="30m", job_type="reminder")
+        refreshed = update_job(job["id"], {"prompt": "Follow up tomorrow"})
+        assert refreshed["job_type"] == "reminder"
+        assert refreshed.get("provider") is None
+        assert refreshed.get("model") is None
         model.assert_not_called()
 
 

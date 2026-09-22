@@ -370,6 +370,9 @@ def test_collect_fleet_versions_falls_back_to_state_file(tmp_path: Path, monkeyp
 
     import hermes_cli.update_receipt as ur
 
+    # This fixture models the same checkout; the test interpreter may live in a shared venv.
+    monkeypatch.setattr(ur, "_gateway_code_root", lambda pid, home: ur._updater_code_root())
+
     home = tmp_path / ".hermes"
     home.mkdir()
 

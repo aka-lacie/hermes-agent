@@ -31,7 +31,7 @@ def restore_leftover_inputs(runner, result, source, session_key):
             event.timestamp = datetime.fromisoformat(origin["timestamp"])
         runner._queue_or_replace_pending_event(session_key, event)
     if events:
-        adapter = runner._adapter_for_source(source)
+        adapter = runner._delivery_adapter_for(source)
         slot = adapter._pending_messages.get(session_key) if adapter else None
         overflow = runner._overflow_queue(session_key)
         waiting = ([slot] if slot else []) + list(overflow or [])

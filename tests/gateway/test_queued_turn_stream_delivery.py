@@ -33,7 +33,7 @@ async def test_depth_limit_preserves_final_delivery(delivery, pending_kind):
     runner._MAX_INTERRUPT_DEPTH = 3
     runner._draining = False
     runner._delivery_adapter_for = lambda source: adapter
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
     runner._get_proxy_url = lambda: None
     runner._release_running_agent_state = Mock()
     runner._should_send_voice_reply = lambda *args, **kwargs: False

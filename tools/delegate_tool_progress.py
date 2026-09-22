@@ -170,11 +170,12 @@ _ORCHESTRATOR_BLOCK = (
     "for the final summary, not your workers.\n\n"
 )
 _LEAF_CHILDREN_NOTE = (
-    "Your own children will be leaves (cannot delegate further) because they will reach the depth limit."
+    "Your own children MUST be leaves (cannot delegate further) because they will reach the maximum nesting depth. "
+    "The system manages this automatically; no parameter override is available."
 )
 _NESTED_CHILDREN_NOTE = (
-    "Your own children's ability to delegate is determined by their available tools and remaining depth, "
-    "not by a requested role."
+    "Your own children can themselves delegate because depth remains. The system determines this automatically "
+    "from the nesting depth; children at the maximum depth cannot delegate further. No parameter override is available."
 )
 
 def _build_child_system_prompt(

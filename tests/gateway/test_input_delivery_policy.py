@@ -41,7 +41,7 @@ def setup_runner(monkeypatch, tmp_path):
     runner._send_busy_ack_reply = AsyncMock()
     runner._busy_steer_ack_enabled = lambda *args: False
     adapter = SimpleNamespace(_pending_messages={}, _internal_session_tasks={"s": object()})
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
     agent = Agent()
     runner._session_state("s").turn.agent = agent
     return runner, adapter, agent

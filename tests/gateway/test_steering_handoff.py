@@ -35,7 +35,7 @@ async def test_final_handoff_rejects_late_input_into_gateway_queue(monkeypatch, 
     runner._busy_steer_ack_enabled = lambda *args: False
     adapter = SimpleNamespace(_pending_messages={}, _internal_session_tasks={"s": object()})
     adapter.get_pending_message = lambda key: adapter._pending_messages.pop(key, None)
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
     agent = bare_agent()
     runner._session_state("s").turn.agent = agent
     source = SessionSource(platform=Platform.DISCORD, chat_id="c", user_id="u", chat_type="dm")
@@ -112,7 +112,7 @@ async def test_failed_worker_requeues_accepted_input_before_adapter_cleanup(monk
     runner = GatewayRunner(config=GatewayConfig())
     runner._busy_input_mode = "steer"
     adapter = SimpleNamespace(_pending_messages={})
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
     agent = bare_agent()
     source = SessionSource(platform=Platform.DISCORD, chat_id="c", user_id="u", chat_type="dm")
     ctx = SimpleNamespace(agent_holder=[agent], session_key="s", session_id="test-session",

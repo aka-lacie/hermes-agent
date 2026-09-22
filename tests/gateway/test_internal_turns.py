@@ -208,7 +208,7 @@ async def test_runner_dispatches_to_most_recent_matching_channel_source():
     )
     runner._session_sources = OrderedDict([("session-key", cached_source)])
     adapter = types.SimpleNamespace(handle_message=AsyncMock())
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
 
     accepted = runner.enqueue_internal_turn(
         target=InternalTurnTarget(
@@ -251,7 +251,7 @@ async def test_runner_recovers_persisted_conversation_source_after_restart():
     )
     runner.config = types.SimpleNamespace(multiplex_profiles=False)
     adapter = types.SimpleNamespace(handle_message=AsyncMock())
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
 
     accepted = runner.enqueue_internal_turn(
         target=InternalTurnTarget(
@@ -291,7 +291,7 @@ async def test_runner_does_not_reuse_thread_for_top_level_target():
     )
     runner.config = types.SimpleNamespace(multiplex_profiles=False)
     adapter = types.SimpleNamespace(handle_message=AsyncMock())
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
 
     accepted = runner.enqueue_internal_turn(
         target=InternalTurnTarget(

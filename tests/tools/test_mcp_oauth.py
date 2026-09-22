@@ -315,6 +315,29 @@ class TestBuildOAuthAuth:
         assert "access-secret" not in str(exc_info.value)
 
     @pytest.mark.asyncio
+    async def test_failed_token_exchange_carries_a_bounded_redacted_excerpt(self, tmp_path, monkeypatch):
+        """A non-2xx body names the cause (WAF "Request blocked" vs ``invalid_grant``) without HTML,
+        beyond 200 characters or credential-shaped spans (#115329)."""
+        import httpx
+        from mcp.client.auth.oauth2 import OAuthTokenError
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
+        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
+        waf = ("<HTML><HEAD><TITLE>ERROR</TITLE></HEAD><BODY><H1>403 ERROR</H1>\n  Request blocked.\n"
+               "Bearer leaked-bearer-token <PRE>" + "x" * 400 + "</PRE></BODY></HTML>")
+
+        with pytest.raises(OAuthTokenError) as exc_info:
+            await provider._handle_token_response(httpx.Response(403, content=waf.encode()))
+
+        message = str(exc_info.value)
+        assert message.startswith("Token exchange failed (403): ERROR 403 ERROR Request blocked.")
+        assert "[REDACTED]" in message
+        assert "<" not in message and "leaked-bearer-token" not in message
+        assert len(message) <= len("Token exchange failed (403): ") + 200
+        assert provider.context.current_tokens is None
+
+    @pytest.mark.asyncio
     async def test_token_read_error_does_not_expose_body(self, tmp_path, monkeypatch):
         import httpx
         from mcp.client.auth.oauth2 import OAuthTokenError
@@ -1247,6 +1270,32 @@ def test_wait_for_callback_port_in_use_reports_clear_error(monkeypatch):
     assert "54321" in msg
     assert "already in use" in msg
     assert "timed out" not in msg
+
+
+def test_cancelled_waiter_releases_pinned_port_for_retry(monkeypatch):
+    """A flow cancelled mid-wait (handshake timeout) must leave its pinned/cached port bindable: the
+    retry reuses the same port and previously died with EADDRINUSE because the listener thread parked
+    in select() kept the closed socket alive (#113771)."""
+    import socket
+    import tools.mcp_oauth as mo
+
+    monkeypatch.setattr(mo, "_is_interactive", lambda: False)
+    monkeypatch.setattr(mo, "_raise_if_non_interactive", lambda lead: None)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    waiter = mo._make_callback_waiter(port, timeout=30)
+
+    async def drive():
+        task = asyncio.create_task(waiter())
+        await asyncio.sleep(0.3)  # listener bound and parked in its poll
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with socket.socket() as again:  # what the retry's _start_callback_server does
+            again.bind(("127.0.0.1", port))
+
+    asyncio.run(drive())
 
 
 # ---------------------------------------------------------------------------

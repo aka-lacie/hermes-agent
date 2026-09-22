@@ -27,7 +27,7 @@ def queue(monkeypatch, tmp_path):
     runner = GatewayRunner(config=GatewayConfig())
     runner._busy_input_mode = "steer"
     adapter = SimpleNamespace(_pending_messages={})
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
     return runner, adapter
 
 

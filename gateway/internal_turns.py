@@ -32,7 +32,7 @@ def webhook_worker_instruction_role(runner: Any, source: Any) -> Optional[str]:
 
     if source.platform != Platform.WEBHOOK:
         return None
-    adapter = runner._adapter_for_source(source)
+    adapter = runner._delivery_adapter_for(source)
     delivery = getattr(adapter, "_delivery_info", {}).get(source.chat_id, {})
     return "subagent" if delivery.get("delivery_mode") == "internal_turn" else None
 

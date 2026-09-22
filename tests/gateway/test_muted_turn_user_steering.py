@@ -55,7 +55,7 @@ async def test_real_wiring_resumes_user_stream_but_not_task_diagnostic(monkeypat
     gateway = GatewayRunner(config=GatewayConfig())
     gateway.config.streaming = StreamingConfig(enabled=True)
     adapter = RecordingAdapter()
-    gateway._adapter_for_source = lambda source: adapter
+    gateway._delivery_adapter_for = lambda source: adapter
     gateway._build_stream_consumer_config = lambda *a, **k: (
         StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1, cursor=""), None)
     gateway._consume_pending_native_image_paths = lambda key: []

@@ -47,9 +47,14 @@ class GatewayAgentCacheMixin:
 
     @classmethod
     def _extract_cache_busting_config(cls, user_config: dict | None) -> dict:
-        """Values that must bust the cached agent, as a flat dict keyed by 'section.key'. Missing keys /
-        non-dict sections yield None (still enters the signature). Includes the live tool registry
-        generation: MCP reloads mutate the registry without touching config.yaml."""
+        """Values that must bust the cached agent, as a flat dict keyed by 'section.key'. ``user_config``
+        is the raw file (no DEFAULT_CONFIG merge), so an absent key is filled from DEFAULT_CONFIG — the
+        value the agent was actually built with. Mapping 'absent' to None made an explicit ``null``
+        (the documented opt-out of a non-None default such as ``compression.threshold_tokens``)
+        signature-identical to 'unset', so the opt-out never rebuilt a live session. Non-dict sections
+        count as absent. Includes the live tool registry generation: MCP reloads mutate the registry
+        without touching config.yaml."""
+        from hermes_cli.config import DEFAULT_CONFIG
         out: Dict[str, Any] = {}
         cfg = user_config if isinstance(user_config, dict) else {}
         for section, key in cls._CACHE_BUSTING_CONFIG_KEYS:
@@ -57,8 +62,10 @@ class GatewayAgentCacheMixin:
             if section == "checkpoints" and isinstance(section_val, bool):
                 # Legacy ``checkpoints: true``: a live toggle must still rebuild the cached agent.
                 out[f"{section}.{key}"] = section_val if key == "enabled" else None
+            elif isinstance(section_val, dict) and key in section_val:
+                out[f"{section}.{key}"] = section_val[key]
             else:
-                out[f"{section}.{key}"] = section_val.get(key) if isinstance(section_val, dict) else None
+                out[f"{section}.{key}"] = cfg_get(DEFAULT_CONFIG, section, key)
         try:
             from tools.registry import registry
             out["tools.registry_generation"] = getattr(registry, "_generation", None)
@@ -171,6 +178,11 @@ class GatewayAgentCacheMixin:
                     # The managed llama.cpp supervisor owns its live port; a persisted loopback URL from a
                     # boot that fell back to an ephemeral port would strand the session on a dead endpoint.
                     override["base_url"] = runtime.get("base_url")
+                from hermes_cli.models import normalize_opencode_base_url, opencode_provider_family
+                if opencode_provider_family(provider) is not None and override.get("base_url"):
+                    # api_mode was just re-derived from the target model; a relay URL persisted by an older
+                    # build for another wire (/v1-stripped) or the other family is healed to match (#96066).
+                    override["base_url"] = normalize_opencode_base_url(provider, override.get("api_mode"), override["base_url"])
             except Exception:
                 logger.debug(
                     "Credential re-resolution failed for persisted override "
@@ -481,6 +493,13 @@ class GatewayAgentCacheMixin:
             session_key, interrupt_reason=interrupt_reason, invalidation_reason=invalidation_reason,
         )
         from gateway.run import _AGENT_PENDING_SENTINEL
+        # The turn's hard interrupt reaches only its in-turn children; background delegations were
+        # detached at dispatch and would otherwise run to completion and wake the session later.
+        # Each interrupted unit still returns as a completion (status=interrupted, partial output).
+        from tools.async_delegation import interrupt_for_session
+        interrupt_for_session(
+            session_key=session_key, reason=invalidation_reason,
+            parent_session_id=str(getattr(running_agent, "session_id", "") or ""))
         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             # Plugins holding a per-turn external resource (an outbound RPC blocked on a tool result
             # the loop will never consume) learn the turn is gone. Fires for /stop and the /new
@@ -498,7 +517,7 @@ class GatewayAgentCacheMixin:
                 )
             except Exception:
                 logger.debug("agent_loop_stopped hook dispatch failed", exc_info=True)
-        adapter = self._adapter_for_source(source)
+        adapter = self._delivery_adapter_for(source)
         interrupt_session_activity = getattr(type(adapter), "interrupt_session_activity", None)
         if adapter and callable(interrupt_session_activity):
             metadata = self._thread_metadata_for_source(source)
