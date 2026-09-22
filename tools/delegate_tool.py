@@ -230,6 +230,7 @@ def _build_child_agent(
     override_reasoning_effort: Any = None,
     profile_home: Optional[Path] = None,
     override_service_tier: Optional[str] = None,  # a route's checked speed tier (tools/delegate_tool_tuning.py)
+    has_fork_context: bool = False,
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair. ``profile_home`` builds (and later runs,
@@ -256,7 +257,7 @@ def _build_child_agent(
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=_resolve_workspace_hint(parent_agent), role=effective_role,
-        max_spawn_depth=max_spawn, child_depth=child_depth,
+        max_spawn_depth=max_spawn, child_depth=child_depth, has_fork_context=has_fork_context,
     )
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -295,7 +296,7 @@ def _build_child_agent(
                     enabled_toolsets=child_toolsets, disabled_toolsets=child_disabled_toolsets, quiet_mode=True,
                     ephemeral_system_prompt=child_prompt, log_prefix=f"[subagent-{task_index}]", platform="subagent",
                     side_agent=True,
-                    skip_context_files=True, skip_memory=True, clarify_callback=None,
+                    skip_context_files=True, load_soul_identity=True, skip_memory=True, clarify_callback=None,
                     thinking_callback=(
                         (lambda text: _safe_progress(child_progress_cb, "_thinking", text) if text else None)
                         if child_progress_cb else None
@@ -304,8 +305,6 @@ def _build_child_agent(
                     session_id=getattr(child_session_db, "reserved_session_id", None),
                     tool_progress_callback=child_progress_cb,
                     iteration_budget=None,  # fresh budget per subagent
-                    # A profile route carries that profile's identity (its SOUL.md under the bound home).
-                    **({"load_soul_identity": True} if profile_home is not None else {}),
                 )
             except BaseException:
                 # No child close() will ever run: release the dedicated handle here.
@@ -457,6 +456,8 @@ def _build_children(
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
     children = []
+    from agent.subagent_context import attach_fork_history, fork_history
+    history = fork_history(parent_agent) if any(t.get("fork_context", True) for t in task_list) else []
     for i, t in enumerate(task_list):
         route = routes[i]
         if route.error:
@@ -470,7 +471,9 @@ def _build_children(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
                 model=route.creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **_route_overrides(route),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
+                has_fork_context=bool(history) and t.get("fork_context", True),
+                **_route_overrides(route),
             )
         except ValueError as exc:
             # An owner refusal can land mid-batch: the siblings built so far hold reservations.
@@ -479,6 +482,8 @@ def _build_children(
                 _close_child(built, "Failed to close child after a refused sibling")
             return [], str(exc)
         pin_child_service_tier(child, route.creds)
+        if t.get("fork_context", True):
+            attach_fork_history(child, history)
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
                 child._delegate_output_schema = _task_schema

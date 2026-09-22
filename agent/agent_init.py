@@ -2143,7 +2143,13 @@ def init_agent(
     requested_provider: str | None = None, capabilities: Optional[dict[str, bool]] = None, cwd: Optional[str] = None,
     side_agent: bool = False, memory_manager=None,
     tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
+    # Main or subagent operating guidance, independent of platform/tools. None preserves
+    # platform defaults; subagent also loads its role file when project context is skipped.
+    instruction_role: Optional[str] = None,
 ):
+    if instruction_role not in (None, "main", "subagent"):
+        raise ValueError("instruction_role must be 'main', 'subagent', or None")
+    agent.instruction_role = instruction_role or ("subagent" if platform == "subagent" else "main")
     from agent.safe_worker_policy import safe_worker_enabled
 
     if safe_worker_enabled():

@@ -278,6 +278,7 @@ class AIAgent(
         capabilities: dict[str, bool] | None = None, cwd: str | None = None,
         side_agent: bool = False, memory_manager=None,
         tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
+        instruction_role: Optional[str] = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
         init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
@@ -952,6 +953,7 @@ class AIAgent(
         # on a closed delegate child they were the only remaining owners, pinning its history in the parent heap.
         self._session_messages = []
         self._db_flush_scan_prefix = None
+        self.__dict__.pop("_delegate_fork_history", None)
         self._streamed_assistant_text_parts = []
         if isinstance(session_messages, list):
             # The token-estimate memo pins message strings; a closed conversation's can never hit again. The

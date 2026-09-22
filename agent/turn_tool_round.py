@@ -168,7 +168,9 @@ def run_tool_round(
     from agent.prepared_compaction import maybe_prepare
     maybe_prepare(agent, messages, origin="tool-batch")
 
-    agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+    from agent.subagent_context import bind_fork_source
+    with bind_fork_source(agent, messages):
+        agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
     from hermes_cli.observability.shared_metrics_harness import finish_tool_round
 
     finish_tool_round(agent)

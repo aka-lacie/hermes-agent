@@ -49,6 +49,7 @@ def test_close_releases_transcript_shadow_copies():
     big = {"role": "tool", "content": payload}
     agent._session_messages = [big]
     agent._db_flush_scan_prefix = agent._session_messages[:]
+    agent._delegate_fork_history = [big]  # cancellation before the first child turn
     agent._streamed_assistant_text_parts = ["y" * 10_000]
     probe = weakref.ref(payload)
 
@@ -56,6 +57,7 @@ def test_close_releases_transcript_shadow_copies():
 
     assert agent._session_messages == []
     assert agent._db_flush_scan_prefix is None
+    assert "_delegate_fork_history" not in vars(agent)
     assert agent._streamed_assistant_text_parts == []
     del big, payload
     gc.collect()

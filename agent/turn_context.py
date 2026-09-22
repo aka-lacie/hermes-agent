@@ -1219,6 +1219,9 @@ def build_turn_context(
 
     _ensure_session_row(agent, pending_cli_message)
 
+    from agent.subagent_context import bind_fork_source, persist_fork_history
+    persist_fork_history(agent, conversation_history)
+
     # A turn interrupted before admission could not write its accepted input because
     # it did not own the session lease. Persist that carried-forward row now, before
     # compaction can rewrite or drop it.
@@ -1233,11 +1236,12 @@ def build_turn_context(
     # Before turn-start compaction: its summary request quotes recent user turns, this one included,
     # so a vetoed prompt skips it (the turn makes no model call at all).
     _blocks: list[str] = []
-    plugin_user_context = _collect_pre_llm_call_context(
-        agent, effective_task_id=effective_task_id, turn_id=turn_id,
-        original_user_message=original_user_message, messages=messages,
-        conversation_history=conversation_history, blocks=_blocks,
-    )
+    with bind_fork_source(agent, messages):
+        plugin_user_context = _collect_pre_llm_call_context(
+            agent, effective_task_id=effective_task_id, turn_id=turn_id,
+            original_user_message=original_user_message, messages=messages,
+            conversation_history=conversation_history, blocks=_blocks,
+        )
     plugin_block_message = _blocks[0] if _blocks else ""  # first veto wins
     compaction = CompactionOutcome(
         messages=messages, active_system_prompt=active_system_prompt,
