@@ -1878,6 +1878,9 @@ DEFAULT_CONFIG = {
             # budget-gated mode; keep it the default so explicit "on"/"off" pins are unaffected).
             # "off" = pass-through, no bridge.
             "enabled": "auto",
+            # delegate_task children receive all permitted local schemas immediately.
+            # Remote connector tools still require their discovery bridge.
+            "eager_subagents": False,
             # Listing budget as % of the model's context length; effective budget = min(this % of
             # context, listing_max_tokens). Range 0..100.
             "threshold_pct": 5,

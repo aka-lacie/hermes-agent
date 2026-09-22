@@ -48,6 +48,8 @@ class ToolSearchConfig:
     listing_max_tokens: int = 4000  # budget = min(this, threshold_pct% of context)
     # None = curated default; an explicit list replaces it wholesale ([] = defer no core tools).
     defer_tools: Optional[frozenset] = None
+    # Inline the child's permitted local tools; remote connectors still use the bridge.
+    eager_subagents: bool = False
 
     @property
     def effective_defer_tools(self) -> frozenset:
@@ -63,6 +65,7 @@ class ToolSearchConfig:
         defer_raw = raw.get("defer")
         return cls(
             enabled=_tri_state(raw.get("enabled", "auto")),
+            eager_subagents=_tri_state(raw.get("eager_subagents", False)) == "on",
             threshold_pct=max(0.0, min(100.0, _safe_float(raw.get("threshold_pct"), 5.0))),
             search_default_limit=_clamped_int(
                 raw.get("search_default_limit"), 5, 1, max_search_limit),
@@ -344,7 +347,11 @@ def assemble_tool_defs(tool_defs: List[Dict[str, Any]], *, context_length: Optio
     config = config or load_config()
     incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
                 if name not in BRIDGE_TOOL_NAMES]
-    visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
+    from agent.delegation_context import is_delegated_child_context
+    if config.eager_subagents and is_delegated_child_context():
+        visible, deferrable = incoming, []
+    else:
+        visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
     connections_granted = connections_in_scope(incoming)
     if not deferrable:
         if should_activate(config, 0, context_length, connections_granted=connections_granted):

@@ -98,6 +98,7 @@ tiers on the next assembly.
 tools:
   tool_search:
     enabled: auto       # auto (default), on, or off
+    eager_subagents: false  # true: delegated children get permitted local tools eagerly
     threshold_pct: 5    # listing budget as a percentage of context
     search_default_limit: 5
     max_search_limit: 25
@@ -109,6 +110,7 @@ tools:
 | --- | --- | --- |
 | `enabled` | `auto` | `auto`/`on` activate whenever at least one deferrable tool exists; `off` disables entirely (everything stays eager). `auto` is currently an alias of `on` — it is reserved for a future mode that inlines schemas when they fit the context and defers only when they don't. Pin `on` or `off` if you want today's behavior guaranteed across upgrades. |
 | `threshold_pct` | `5` | Listing budget as a percentage of the active model's context length. Range 0–100. |
+| `eager_subagents` | `false` | Give delegated children all their permitted local tool schemas immediately, including MCP and plugin tools. The parent's deferral policy is unchanged. Remote managed connectors still use the bridge because their schemas are discovered remotely. |
 | `search_default_limit` | `5` | Hits returned per query when the model calls `tool_search` without a `limit`. |
 | `max_search_limit` | `25` | Hard upper bound the model can request via `limit` (per query). Range 1–50. |
 | `listing` | `auto` | Embed a skills-style manifest of every deferred tool (name + first sentence of its description, ≤60 chars, grouped by MCP server) in the `tool_search` bridge description. `auto` includes it when it fits the budget (falling back to names-only, then to the tier-2 server summary); `on`/`off` force either way. |
@@ -116,6 +118,20 @@ tools:
 
 Per-call array caps are internal safety bounds, not configuration. Over-cap
 calls return an error so the model can retry with a smaller batch.
+
+### A compact parent with eager workers
+
+Set `eager_subagents: true` and include work tools such as `terminal`, `read_file`,
+`write_file`, `patch`, `search_files`, and `web_search` in the parent's `defer`
+list. Keep conversational and orchestration tools out of that list. Delegated
+children at every depth bypass local deferral, so they can use their work tools
+on their first model call. Enabled/disabled toolsets and the normal child tool
+restrictions still apply; eager loading does not grant additional capabilities.
+This policy uses the runtime's delegated-child context, not an agent's name or
+prompt. Standalone cron/webhook workers retain the ordinary policy.
+
+Tool schemas are captured when an agent is constructed. This setting does not
+rewrite the tool snapshot of an already running agent.
 
 ### Why the listing exists
 
