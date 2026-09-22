@@ -91,11 +91,12 @@ def test_blank_and_prose_mentions_are_not_silence():
 
 def test_failed_agent_result_never_counts_as_intentional_silence():
     assert is_intentional_silence_agent_result({"failed": False}, "NO_REPLY")
-    assert not is_intentional_silence_agent_result({"failed": True}, "NO_REPLY")
+    assert not is_intentional_silence_agent_result({"failed": True, "user_visible_response": True}, "NO_REPLY")
 
 
 @pytest.mark.asyncio
-async def test_human_turn_gets_a_visible_fallback_for_a_silence_marker(monkeypatch, tmp_path):
+@pytest.mark.parametrize("delivered", [False, True])
+async def test_human_turn_silence_requires_a_delivered_response(monkeypatch, tmp_path, delivered):
     runner = _runner(monkeypatch, tmp_path)
     runner._run_agent = AsyncMock(return_value={
         "final_response": "[SILENT]",
@@ -110,12 +111,15 @@ async def test_human_turn_gets_a_visible_fallback_for_a_silence_marker(monkeypat
         "failed": False,
     })
 
+    runner._run_agent.return_value["user_visible_response"] = delivered
     response = await runner._handle_message_with_agent(
         _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
     )
-
-    assert "silence marker" in response
-    assert "Try again or rephrase" in response
+    if delivered:
+        assert response == ""
+    else:
+        assert "silence marker" in response
+        assert "Try again or rephrase" in response
 
 
 @pytest.mark.asyncio
@@ -165,7 +169,8 @@ async def test_scheduled_heartbeat_silence_suppresses_delivery(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_queued_human_turn_also_gets_the_visible_fallback():
+@pytest.mark.parametrize("delivered", [False, True])
+async def test_queued_human_turn_uses_its_own_delivery_receipt(delivered):
     runner = gateway_run.GatewayRunner(GatewayConfig())
     runner._deliver_queued_first_response = AsyncMock()
     turn_ctx = SimpleNamespace(
@@ -179,13 +184,16 @@ async def test_queued_human_turn_also_gets_the_visible_fallback():
         inbound_message_id="msg-42",
         run_generation=1,
     )
-    result = {"final_response": "NO_REPLY", "failed": False}
+    result = {"final_response": "NO_REPLY", "failed": False, "user_visible_response": delivered}
 
     await runner._run_agent_deliver_first_response(
         turn_ctx, None, result, result, None,
     )
 
-    assert "silence marker" in runner._deliver_queued_first_response.await_args.args[0]
+    if delivered:
+        runner._deliver_queued_first_response.assert_not_awaited()
+    else:
+        assert "silence marker" in runner._deliver_queued_first_response.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -248,6 +256,7 @@ async def test_empty_success_still_gets_empty_response_warning(monkeypatch, tmp_
         "last_prompt_tokens": 0,
         "api_calls": 1,
         "failed": False,
+        "user_visible_response": True,
     })
 
     response = await runner._handle_message_with_agent(
@@ -272,6 +281,7 @@ async def test_prose_mentioning_silence_token_is_delivered(monkeypatch, tmp_path
         "last_prompt_tokens": 0,
         "api_calls": 1,
         "failed": False,
+        "user_visible_response": True,
     })
 
     response = await runner._handle_message_with_agent(

@@ -357,6 +357,14 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # Only a timed-out full-final send that MAY have landed keeps legacy trust.
         return None if self._delivery_ambiguous else False
 
+    def has_delivered_response(self) -> bool:
+        """Whether conversational text survived delivery, independent of final text."""
+        from gateway.response_filters import is_intentional_silence_response
+        seen = [*self._delivered_commentary_texts, *self._delivered_segment_texts]
+        if self._already_sent:
+            seen.append(self._visible_prefix())
+        return any(text.strip() and not is_intentional_silence_response(text) for text in seen)
+
     def has_delivered_text(self, text: str) -> bool:
         """Return True if *text* was already delivered as visible chat content."""
         target = self._clean_for_display(text or "").strip()

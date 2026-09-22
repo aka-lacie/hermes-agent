@@ -929,3 +929,31 @@ Defaults to `false`. Only platforms whose adapter implements `delete_message` ho
 - [Buzz Setup](buzz.md)
 - [A2A (Agent-to-Agent) Setup](a2a.md)
 - [Webhooks](webhooks.md)
+
+
+### Responses delivered by tools
+
+A successful reaction, message, or attachment sent to the current conversation
+can complete a gateway turn without additional text: the model may finish with
+`NO_REPLY`. Confirmed conversational stream text and audible streaming speech
+also count. Processing indicators, previews, skipped sends, failed sends, and
+output to a different conversation do not authorize silence. Failed agent turns
+and unexpected blank output retain their diagnostics; substantive final text is
+still delivered even after a reaction.
+
+Native tools/plugins that deliver their own output can report it **after transport
+success**, from their tool handler:
+
+```python
+from gateway.response_delivery import record_response_delivery
+
+record_response_delivery(
+    platform="discord", chat_id=channel_id, thread_id=thread_id,
+)
+```
+
+Pass the actual destination. This records delivery only for the current profile,
+conversation, and active gateway invocation. It is shared with context-preserving
+in-process tool threads, but not delegated agents or detached subprocesses. Each
+queued follow-up starts a fresh receipt. There is no extra model-visible tool or
+prompt change and no configuration switch required.

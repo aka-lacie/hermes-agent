@@ -196,7 +196,11 @@ def _handle_react(args, remove=False):
         result = _run_async(react_fn(chat_id=chat_id, message_id=message_id, **({} if remove else {"emoji": emoji})))
     except Exception as e:
         return json.dumps(_error(f"Reaction failed: {e}"))
-    return json.dumps(result if isinstance(result, dict) else {"success": bool(result)})
+    result = result if isinstance(result, dict) else {"success": bool(result)}
+    if not remove and result.get("success") is True:
+        from gateway.response_delivery import record_response_delivery
+        record_response_delivery(platform=platform_name, chat_id=chat_id, thread_id=_thread_id)
+    return json.dumps(result)
 
 
 def _handle_send(args):
@@ -273,6 +277,9 @@ def _handle_send(args):
                                               media_files=media_files, force_document=force_document_attachments,
                                               **handler_args))
         if isinstance(result, dict) and result.get("success"):
+            if not result.get("skipped"):
+                from gateway.response_delivery import record_response_delivery
+                record_response_delivery(platform=platform_name, chat_id=chat_id, thread_id=thread_id)
             if used_home_channel:
                 result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
             if mirror_text and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):

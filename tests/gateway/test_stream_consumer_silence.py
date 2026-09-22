@@ -129,6 +129,7 @@ class TestStreamedSilenceSuppression:
         assert consumer.final_response_sent is False
         assert consumer.final_content_delivered is False
         assert consumer.already_sent is False
+        assert consumer.has_delivered_response() is False
 
     @pytest.mark.asyncio
     async def test_partial_marker_preview_is_retracted(self):
@@ -152,5 +153,23 @@ class TestStreamedSilenceSuppression:
         adapter.delete_message.assert_awaited_once_with("chat_1", "preview_1")
         assert consumer.final_content_delivered is False
         assert consumer.already_sent is False
+        assert consumer.has_delivered_response() is False
 
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("success", [True, False])
+async def test_only_confirmed_commentary_counts_as_response_before_silence(success):
+    adapter = _make_adapter()
+    adapter.send.return_value = SimpleNamespace(success=success, message_id="comment", error="failed")
+    consumer = GatewayStreamConsumer(adapter, "chat_1", StreamConsumerConfig())
+    consumer.on_commentary("That made me smile.")
+    consumer.on_delta("NO_REPLY")
+    consumer.finish()
+    await consumer.run()
+    assert consumer.has_delivered_response() is success
+    from gateway.response_delivery import capture_stream_delivery
+    result = {}
+    capture_stream_delivery(result, consumer)
+    assert bool(result.get("user_visible_response")) is success
