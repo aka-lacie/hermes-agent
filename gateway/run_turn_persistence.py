@@ -131,9 +131,9 @@ class GatewayTurnPersistenceMixin:
         # the exchange in silence, and the visible fallback would be runtime text it answers (#137027).
         if not automatic_notices_allowed(_silence_source):
             _silence_reply_expected = False
-        if _intentional_silence and not self._silence_allowed_for_source(
+        if (_intentional_silence and not self._silence_allowed_for_source(
             _silence_source, _silence_kind, _silence_reply_expected, agent_result,
-        ):
+        ) and agent_result.get("user_visible_response") is not True):
             logger.warning(
                 "silence marker rejected on a user turn: platform=%s chat=%s",
                 _platform_name, source.chat_id or "unknown",
