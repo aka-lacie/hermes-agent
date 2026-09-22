@@ -389,6 +389,17 @@ TASK_COMPLETION_GUIDANCE = (
     "produce. Reporting a blocker honestly is always better than inventing a result."
 )
 
+SUBAGENT_TASK_COMPLETION_GUIDANCE = (
+    "# Finishing the delegated task\n"
+    "For an assigned build, execution, or verification task, produce the requested result backed by actual "
+    "execution—not merely a plan or description. Work within the delegated scope; do not expand it to complete "
+    "unrelated requests from inherited history.\n"
+    "If blocked, try appropriate alternatives within your assignment and authority and complete any remaining "
+    "independent work. Then return a final result describing the partial outcome, the blocker, and the specific "
+    "information or decision needed. This ends your run; do not wait for a reply or direct user interaction. "
+    "Never invent results."
+)
+
 # Universal parallel-tool-call guidance (ALL models): the runtime already executes independent calls
 # concurrently. Supersedes the former Google-only bullet so no model receives the steer twice.
 # Why this matters for cost: every assistant turn resends the entire accumulated conversation (and, on
@@ -494,13 +505,35 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
 )
 
 
-def execution_guidance_text() -> str:
+def execution_guidance_text(*, subagent: bool = False) -> str:
     """OPENAI_MODEL_EXECUTION_GUIDANCE as injected into the system prompt.
 
     The guidance names no web tool (#39797: a hard "use web_search" overrode SOUL.md and dangled in Blank Slate),
-    so the text is toolset-neutral and needs no per-session filtering.
+    so that rule stays toolset-neutral. Children get assignment-scoped completion
+    criteria and terminal blocker reporting instead of an unavailable question channel.
     """
-    return OPENAI_MODEL_EXECUTION_GUIDANCE
+    if not subagent:
+        return OPENAI_MODEL_EXECUTION_GUIDANCE
+    # Keep the shared discipline (verification, literal preservation, etc.)
+    # unchanged; only assignment scope and the unavailable question channel differ.
+    substitutions = {
+        "Keep calling tools until: (1) the task is complete, AND (2) you have verified the result.":
+            "Work until the delegated assignment is verified, or return a final result explaining what is blocked.",
+        "Only ask for clarification when the ambiguity genuinely changes what tool you would call.":
+            "If unresolved ambiguity materially changes the action, report it in your final result to the parent.",
+        "does the output satisfy every stated requirement?":
+            "does the output satisfy the requirements of your delegated assignment?",
+        "'done' means every named acceptance criterion is verified — never a plausible subset.":
+            "'done' means the assignment's acceptance criteria are verified; otherwise identify what remains "
+            "unverified or blocked.",
+        "Ask a clarifying question only when the information cannot be retrieved by tools.":
+            "If necessary information cannot be retrieved, include the specific question in your final result "
+            "to the parent. This ends your run; do not wait for a reply.",
+    }
+    text = OPENAI_MODEL_EXECUTION_GUIDANCE
+    for original, replacement in substitutions.items():
+        text = text.replace(original, replacement)
+    return text
 
 
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
@@ -1551,6 +1584,28 @@ def _context_section(content: str, label: str, warn_name: str, path: Path, conte
     """Threat-scan *content*, render it as ``## <label>``, cap it to the budget (*warn_name* labels warnings)."""
     body = f"## {label}\n\n{_scan_context_content(content, label)}"
     return _truncate_content(body, warn_name, context_length=context_length, read_path=str(path))
+
+
+def build_role_instructions_prompt(
+    role: str, context_length: Optional[int] = None, home_override: "Path | None" = None,
+) -> str:
+    """Optional profile-local operating guidance, separate from shared SOUL/project rules.
+
+    Reuse context-file scanning, read deadlines and caps. Only the selected role loads;
+    a missing child file must never fall back to the parent's orchestration instructions.
+    """
+    filename = {"main": "main.md", "subagent": "subagent.md"}[role]
+    home = Path(home_override) if home_override is not None else get_hermes_home()
+    path = home / "instructions" / filename
+    content = _read_context_file(path)
+    if not content:
+        return ""
+    return (
+        "# Role-specific instructions\n\n"
+        "These instructions describe how to use your available capabilities; they do not grant additional tools "
+        "or change delegation depth limits. Follow the tools and limits provided for this agent.\n\n"
+        + _context_section(content, f"instructions/{filename}", f"instructions/{filename}", path, context_length)
+    )
 
 
 def _hermes_md_candidates(cwd_path: Path) -> list[tuple[str, Path, str]]:

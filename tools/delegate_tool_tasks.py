@@ -98,6 +98,8 @@ def _normalize_task_list(
     for i, task in enumerate(task_list):
         if not isinstance(task, dict):
             return None, f"Task {i} must be an object, got {type(task).__name__}."
+        if "fork_context" in task and not isinstance(task["fork_context"], bool):
+            return None, f"Task {i} 'fork_context' must be a boolean."
         if not task.get("goal", "").strip():
             return None, f"Task {i} is missing a 'goal'."
     # The single-goal form is exempt from the batch gate (short goals are valid there).

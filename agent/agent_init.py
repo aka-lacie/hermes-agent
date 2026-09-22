@@ -2226,6 +2226,7 @@ def init_agent(
     checkpoint_max_snapshots: int = 20, checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10, pass_session_id: bool = False,
     requested_provider: str = None, capabilities: Optional[Dict[str, bool]] = None, cwd: Optional[str] = None,
+    instruction_role: Optional[str] = None,
 ):
     """Initialize the AI Agent (body of :meth:`AIAgent.__init__`).
 
@@ -2241,7 +2242,12 @@ def init_agent(
         assistant message — use structured outputs there instead.
       skip_context_files: skip SOUL.md/.hermes.md/AGENTS.md/CLAUDE.md/.cursorrules injection;
         load_soul_identity keeps ~/.hermes/SOUL.md as identity regardless.
+      instruction_role: main or subagent operating guidance, independent of platform/tools.
+        None preserves platform defaults; subagent also loads its role file when project context is skipped.
     """
+    if instruction_role not in (None, "main", "subagent"):
+        raise ValueError("instruction_role must be 'main', 'subagent', or None")
+    agent.instruction_role = instruction_role or ("subagent" if platform == "subagent" else "main")
     _install_safe_stdio()
 
     _params = locals()

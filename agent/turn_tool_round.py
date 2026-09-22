@@ -149,7 +149,9 @@ def run_tool_round(
         with suppress(Exception):
             agent.stream_delta_callback(None)
 
-    agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+    from agent.subagent_context import bind_fork_source
+    with bind_fork_source(agent, messages):
+        agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
     if getattr(agent, "_incremental_persistence_failed", False):
         # Tool result could not be made canonical: never send the in-memory result to

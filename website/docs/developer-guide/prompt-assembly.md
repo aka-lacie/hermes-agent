@@ -29,7 +29,7 @@ Primary files:
 The cached system prompt is assembled as three ordered tiers (see `agent/system_prompt.py`):
 
 1. **stable** — identity (`SOUL.md` or fallback), tool/model guidance, coding operating brief
-2. **context** — caller-supplied `system_message`, project context files (`.hermes.md` / `AGENTS.md` / `CLAUDE.md` / `.cursorrules`), then the worktree-dependent git workspace snapshot, operator instructions and platform hints
+2. **context** — caller-supplied `system_message`, project context files (`.hermes.md` / `AGENTS.md` / `CLAUDE.md` / `.cursorrules`), optional profile-local role instructions, then the worktree-dependent git workspace snapshot, operator instructions and platform hints
 3. **volatile** — skills index, built-in memory snapshot (`MEMORY.md`), user profile snapshot (`USER.md`), external memory-provider block, timestamp/session/model/provider line, then runtime environment hints (host / home / **current working directory**)
 
 The final system prompt is then joined as: `stable` → `context` → `volatile`.
@@ -55,7 +55,17 @@ excluding embedder descriptions. `Platform:` is deliberately not an identity fie
 the per-turn user-message channel (`agent/surface_switch.py`), so the cached prefix survives (#104414). Legacy prompts retain their original
 host-before-context anchor, so prompts persisted before the reorder still validate.
 
-When `skip_context_files` is set (e.g., subagent delegation), SOUL.md is not loaded and the hardcoded `DEFAULT_AGENT_IDENTITY` is used instead.
+When `skip_context_files` is set, SOUL.md is omitted unless `load_soul_identity=True`.
+Delegated children set both: the parent's active-profile SOUL.md is their identity, while
+project context is loaded separately from the parent's resolved workspace into their
+child briefing. The fallback remains `DEFAULT_AGENT_IDENTITY` when no SOUL.md is loaded.
+
+Optional profile files `instructions/main.md` and `instructions/subagent.md` hold role-specific
+tool/orchestration guidance. Prompt assembly selects only the child file for `platform="subagent"`,
+and only the main file for other agents that load context files. Other context-skipping auxiliary
+agents load neither. These files reuse context-file scanning, deadlines and caps, and enter the
+cached context tier; they do not change tool availability or trigger live cache invalidation.
+SOUL.md and project AGENTS.md should contain shared identity/rules, not main-only orchestration.
 
 ### Concrete example: assembled system prompt
 
@@ -328,6 +338,15 @@ The architecture is intentionally optimized to:
 - avoid mutating history unnecessarily
 - keep memory semantics understandable
 - let gateway/ACP/CLI add context without poisoning persistent prompt state
+
+## Explicit worker instruction role
+
+Hosts may construct `AIAgent(instruction_role="subagent")` for a background worker
+whose result is consumed by another agent. This selects `instructions/subagent.md`
+and assignment-scoped completion/execution guidance, even with project context
+disabled. It does not change platform identity, tools, permissions, memory settings,
+delegation ancestry, or conversation history. The default preserves platform-based
+selection. Select the role before the first prompt build; do not change it mid-session.
 
 ## Related docs
 

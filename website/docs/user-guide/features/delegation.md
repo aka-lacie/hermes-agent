@@ -6,7 +6,7 @@ description: "Spawn isolated child agents for parallel workstreams with delegate
 
 # Subagent Delegation
 
-The `delegate_task` tool spawns child AIAgent instances with isolated context, inherited tool access, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final summary enters the parent's context.
+The `delegate_task` tool spawns child AIAgent instances with independent context, inherited tool access, and their own terminal sessions. Each child inherits a conversational snapshot by default and then works independently — only its final summary enters the parent's context.
 
 Top-level model calls run in the background automatically. Hermes returns a handle immediately so the conversation can continue, then posts the result back as a new message. An orchestrator subagent waits for its own workers so it can synthesize their results before returning.
 
@@ -79,16 +79,67 @@ Keep schemas forgiving: require only the fields you will actually read. Tasks wi
 
 ## How Subagent Context Works
 
-:::warning Critical: Subagents Know Nothing
-Subagents start with a **completely fresh conversation**. They have zero knowledge of the parent's conversation history, prior tool calls, or anything discussed before delegation. The subagent's only context comes from the `goal` and `context` fields the parent agent populates when it calls `delegate_task`.
-:::
+By default, children inherit the parent's current user messages, final assistant answers,
+and textual compaction handoff. Raw tool calls/results, reasoning, and interim assistant
+commentary are excluded, including the delegation call itself. The child's `goal` is
+delivered separately as its assignment. Children in one batch receive independent copies
+of the same snapshot; they do not inherit their siblings' assignments or subsequent work.
 
-One exception: when the parent has a resolved workspace directory, every subagent's system prompt embeds that workspace's **project context files** (`.hermes.md` > AGENTS.md chain > CLAUDE.md > `.cursorrules` — the same discovery, priority, and size caps as the main agent's system prompt; SOUL.md is excluded). Subagents working in a repo operate under the repo's own conventions without having to rediscover them.
+Set `fork_context: false` on a task to omit conversation history and start with its `goal` and `context`.
+Shared identity/project instructions and child-role guidance still apply.
+Each child has its own session and compaction state. Forking does not restore archived
+pre-compaction history, broaden the child's tool permissions, or modify the parent.
 
-This means the parent agent must pass **everything** the subagent needs in the call:
+The child's briefing states whether a transcript was actually included (an empty parent
+history is also treated as no transcript). It distinguishes inherited findings from the
+child's own work and limits the task to the delegated assignment. Missing tool evidence or
+skill instructions should be retrieved when needed, not assumed to have survived the fork.
+
+Children do not have an ask-parent-and-wait channel. When blocked, a child completes any
+independent work within scope and returns a **final result** with the partial outcome,
+blocker, and decision or information needed. That ends its run; additional work requires
+a new delegation. Steering can guide a child only while it is still running. Explicit
+output contracts (such as JSON-only responses) take precedence over the default report format.
+Nested delegation returns results inline; end-the-turn guidance applies only to pending
+top-level background dispatches.
+
+Children load **SOUL.md from the parent's active profile** into their identity slot.
+When the parent has a resolved workspace directory, every subagent's system prompt embeds that workspace's **project context files** (`.hermes.md` > AGENTS.md chain > CLAUDE.md > `.cursorrules` — the same discovery, priority, and size caps as the main agent's system prompt). Subagents working in a repo operate under the repo's own conventions without having to rediscover them.
+
+### Shared identity, separate operating instructions
+
+Keep identity and rules that apply to everyone in SOUL.md and project AGENTS.md.
+Put role-specific tool use and orchestration policy in optional files under the **active profile's home**:
+
+| File | Main agent | Delegated children |
+|---|---|---|
+| `SOUL.md` | Shared persona | Same profile's persona |
+| Project `AGENTS.md` (or higher-priority context file) | Project conventions | Parent workspace's conventions |
+| `instructions/main.md` | Main-only operating guidance | Not loaded |
+| `instructions/subagent.md` | Not loaded | Child-only operating guidance |
+
+For example, `instructions/main.md` could say “Break independent work into bounded assignments,
+then verify and synthesize the results.” `instructions/subagent.md` could say “Work only on
+your assignment and return concrete findings and unresolved questions to the parent.”
+
+These files add guidance; they do **not** grant tools, alter approvals, or increase the
+delegation depth limit. Built-in tool guidance is still generated for each agent's available
+tools. Leaf children are explicitly told they cannot spawn; children with delegation enabled
+receive the configured depth limit. A missing child file never falls back to the main file.
+Auxiliary agents that skip context files do not acquire main-only guidance.
+
+This is file-based inheritance, not a copy of the parent's entire system prompt: files are
+read for each new child, so a child started after an edit can see newer instructions than its
+parent. Existing prompts are not rewritten mid-conversation; the normal explicit rebuild or
+compaction boundary may reload them. Role files use the existing context-file read timeout,
+injection scan and size caps. No files are created or migrated automatically. Move existing
+main-only orchestration prose out of SOUL.md/AGENTS.md yourself; shared text is not classified
+or stripped, and role files are not an information-isolation boundary for conversation text.
+
+The parent must still pass tool findings and task-specific details that are not in the conversational snapshot:
 
 ```python
-# BAD - subagent has no idea what "the error" is
+# VAGUE - the tool output describing "the error" is not inherited
 delegate_task(goal="Fix the error")
 
 # GOOD - subagent has all context it needs

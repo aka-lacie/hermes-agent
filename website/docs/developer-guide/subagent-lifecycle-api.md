@@ -5,11 +5,26 @@ sidebar_label: Subagent lifecycle API
 
 # Public Subagent Lifecycle API
 
-Plugins can launch and supervise fresh Hermes child sessions without importing
+Plugins can launch and supervise independent Hermes child sessions without importing
 `tools.delegate_tool`, gateway internals, TUI state, or `AIAgent` fields.
 The service resolves its parent from the current agent turn, so it works in
 CLI, gateway, non-interactive, and kanban-worker sessions. Launching outside an
 active agent turn fails closed with `No active Hermes parent session`.
+
+`SubagentLaunchRequest.fork_context` defaults to `True`. Children inherit a private
+snapshot of user turns, final assistant answers, and textual compaction handoffs;
+parent tool calls/results, reasoning, and interim commentary are omitted. The goal
+is a separate assignment, not a continuation of the parent's pending tool call.
+Use `fork_context=False` for a fresh conversation. Plugin tools and `pre_llm_call`
+hooks snapshot the current turn; other callers use the parent's saved in-memory
+history. Child sessions persist their inherited prefix separately from the parent.
+
+Both lifecycle launches and `delegate_task` load the parent's active-profile SOUL.md and
+resolved workspace's project instructions. This is independent of `fork_context`.
+Optional profile files `instructions/main.md` and `instructions/subagent.md` separate
+main-agent operating guidance from child guidance; children never fall back to the main
+file. These are startup file reads, not a copy of the parent's cached system prompt, and
+cannot grant tools or override depth limits. See [shared identity and role instructions](../user-guide/features/delegation.md#shared-identity-separate-operating-instructions).
 
 ```python
 from agent.subagent_lifecycle import SubagentLaunchRequest

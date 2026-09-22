@@ -548,13 +548,19 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool
     return ([_soul_content], True) if _soul_content else ([DEFAULT_AGENT_IDENTITY], False)
 
 
+def _instruction_role(agent: Any) -> str:
+    """Operating posture is independent of transport, tools and delegation ancestry."""
+    return getattr(agent, "instruction_role", None) or ("subagent" if agent.platform == "subagent" else "main")
+
+
 def _guidance_parts(agent: Any) -> List[str]:
     """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key."""
     parts: List[str] = []
     if agent.valid_tool_names:
         parts += [
             text for flag, text in (
-                ("_task_completion_guidance", TASK_COMPLETION_GUIDANCE),
+                ("_task_completion_guidance", _pb.SUBAGENT_TASK_COMPLETION_GUIDANCE
+                 if _instruction_role(agent) == "subagent" else TASK_COMPLETION_GUIDANCE),
                 ("_parallel_tool_call_guidance", PARALLEL_TOOL_CALL_GUIDANCE),
             ) if getattr(agent, flag, True)
         ]
@@ -568,12 +574,17 @@ def _guidance_parts(agent: Any) -> List[str]:
     # model-name substrings.  Execution guidance is an independent gate so
     # DeepSeek/Kimi/Qwen-class models get it even with enforcement off.
     if _model_gate(agent._tool_use_enforcement, agent.model, TOOL_USE_ENFORCEMENT_MODELS):
-        parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
+        enforcement = TOOL_USE_ENFORCEMENT_GUIDANCE
+        if _instruction_role(agent) == "subagent":
+            enforcement = enforcement.replace("the user", "your parent").replace(
+                "Keep working until the task is actually complete.",
+                "Keep working within your assignment until it is complete or you return a final blocker report.")
+        parts.append(enforcement)
         if any(g in (agent.model or "").lower() for g in ("gemini", "gemma")):
             parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
     if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
         from agent.prompt_builder import execution_guidance_text
-        parts.append(execution_guidance_text())
+        parts.append(execution_guidance_text(subagent=_instruction_role(agent) == "subagent"))
     return parts
 
 
@@ -696,6 +707,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if system_message is not None:
         context_parts.append(system_message)
     context_parts.extend(_context_files_part(agent, _ctx_len, _soul_loaded))
+    # Persona/project rules are shared; operating guidance is selected for this
+    # agent, never copied from the parent's complete prompt. Auxiliary agents
+    # that deliberately skip context do not acquire main-agent instructions.
+    if not agent.skip_context_files or _instruction_role(agent) == "subagent":
+        context_parts.append(_pb.build_role_instructions_prompt(
+            _instruction_role(agent), _ctx_len,
+            home_override=_agent_home(agent)))
     if coding_workspace_parts:
         context_parts.extend([*coding_workspace_parts, *coding_trailing_parts, *post_workspace_parts])
     else:

@@ -990,6 +990,9 @@ def build_turn_context(
 
     _ensure_session_row(agent, pending_cli_message)
 
+    from agent.subagent_context import bind_fork_source, persist_fork_history
+    persist_fork_history(agent, conversation_history)
+
     # A turn interrupted before admission could not write its accepted input because
     # it did not own the session lease. Persist that carried-forward row now, before
     # compaction can rewrite or drop it.
@@ -1012,12 +1015,13 @@ def build_turn_context(
     conversation_history = compaction.conversation_history
     current_turn_user_idx = compaction.current_turn_user_idx
 
-    plugin_user_context = _collect_pre_llm_call_context(
-        agent, effective_task_id=effective_task_id, turn_id=turn_id,
-        original_user_message=original_user_message, messages=messages,
-        conversation_history=conversation_history,
-        internal_notification=internal_notification,
-    )
+    with bind_fork_source(agent, messages):
+        plugin_user_context = _collect_pre_llm_call_context(
+            agent, effective_task_id=effective_task_id, turn_id=turn_id,
+            original_user_message=original_user_message, messages=messages,
+            conversation_history=conversation_history,
+            internal_notification=internal_notification,
+        )
     plugin_user_context = _merge_gateway_notes(
         agent, messages, current_turn_user_idx, plugin_user_context
     )

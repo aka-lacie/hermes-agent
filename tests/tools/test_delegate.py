@@ -99,6 +99,9 @@ class TestDelegateRequirements(unittest.TestCase):
         desc = _build_top_level_description()
         # Compaction ceiling: the old description was ~4,000 chars.
         self.assertLessEqual(len(desc), 2200)
+        self.assertIn("Nested delegation from a subagent", desc)
+        self.assertIn("return results in this tool call", desc)
+        self.assertIn("After a pending background dispatch", desc)
         # Contracts only the top-level text carries:
         for keyword in (
             "background",          # async semantics

@@ -2,7 +2,7 @@
 """
 Delegate Tool -- Subagent Architecture
 
-Spawns child AIAgent instances with a fresh conversation, their own task_id
+Spawns child AIAgent instances with forked conversational context, their own task_id
 (terminal session, file-ops cache), the parent's toolsets minus child-blocked
 tools, and a focused system prompt built from goal + context. Single-task and
 batch (parallel) modes; top-level model calls run in the background while
@@ -178,6 +178,7 @@ def _build_child_agent(
     routing_cfg: Optional[Dict[str, Any]] = None,
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
+    has_fork_context: bool = False,
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair."""
@@ -202,7 +203,7 @@ def _build_child_agent(
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=_resolve_workspace_hint(parent_agent), role=effective_role,
-        max_spawn_depth=max_spawn, child_depth=child_depth,
+        max_spawn_depth=max_spawn, child_depth=child_depth, has_fork_context=has_fork_context,
     )
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -237,7 +238,7 @@ def _build_child_agent(
                 **rt, max_iterations=max_iterations, prefill_messages=getattr(parent_agent, "prefill_messages", None),
                 enabled_toolsets=child_toolsets, disabled_toolsets=child_disabled_toolsets, quiet_mode=True,
                 ephemeral_system_prompt=child_prompt, log_prefix=f"[subagent-{task_index}]", platform="subagent",
-                skip_context_files=True, skip_memory=True, clarify_callback=None,
+                skip_context_files=True, load_soul_identity=True, skip_memory=True, clarify_callback=None,
                 thinking_callback=(
                     (lambda text: _safe_progress(child_progress_cb, "_thinking", text) if text else None)
                     if child_progress_cb else None
@@ -377,6 +378,8 @@ def _build_children(
         "routing_cfg": routing_cfg,
     }
     children = []
+    from agent.subagent_context import attach_fork_history, fork_history
+    history = fork_history(parent_agent) if any(t.get("fork_context", True) for t in task_list) else []
     for i, t in enumerate(task_list):
         _task_schema = task_schemas[i] if i < len(task_schemas) else None
         _child_context = t.get("context")
@@ -387,10 +390,14 @@ def _build_children(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
                 model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
+                has_fork_context=bool(history) and t.get("fork_context", True),
+                **overrides,
             )
         except ValueError as exc:
             return [], str(exc)
+        if t.get("fork_context", True):
+            attach_fork_history(child, history)
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
                 child._delegate_output_schema = _task_schema
@@ -536,17 +543,14 @@ def _build_top_level_description(*, independent_completions=None) -> str:
     return _DESCRIPTION_HEAD.format(delivery=delivery) + restrictions_rule + _DESCRIPTION_TAIL
 
 _DESCRIPTION_HEAD = (
-    "Spawn subagents in isolated contexts; each gets its own conversation, terminal session, and toolset, and only its "
-    "final summary returns to you. Pass every task in `tasks` — one entry spawns one subagent, several run in parallel "
-    "(limit in the tasks description).\n\n"
-    "Sessions without a later-result consumer (including one-shot CLI and cron) join parallel children "
-    "and return results in this tool call. "
-    "Otherwise runs in the background: dispatch returns live transcript paths and results re-enter "
-    "as a new message when subagents finish ({delivery}). Background results are delivered only "
-    "BETWEEN your turns: finish whatever does not depend on them, then give a one-line status and END YOUR TURN. Never "
-    "wait or poll on transcripts, artifact files, or CI for a child. "
-    "While children run, `action` (list/steer/stop) controls them live — steer when a transcript shows a "
-    "child drifting.\n\n"
+    "Spawn subagents with independent conversation state, terminal sessions, and tool permissions. Each starts "
+    "with a filtered conversation snapshot by default and returns its final result. Pass tasks in `tasks`; "
+    "several run in parallel (limit in tasks description).\n\n"
+    "Nested delegation from a subagent, and sessions without a later-result consumer (including one-shot CLI and "
+    "cron), return results in this tool call; use them immediately. Top-level background delegation returns a "
+    "dispatch handle and live transcript paths; results arrive BETWEEN your turns ({delivery}). After a pending "
+    "background dispatch, finish independent work, give a brief status, and END YOUR TURN. Never wait or poll for "
+    "completion. While children run, `action` (list/steer/stop) controls them live.\n\n"
     "USE FOR: reasoning-heavy subtasks, work that would flood your context with intermediate data, or independent "
     "parallel workstreams.\n"
     "DO NOT USE FOR (use these instead):\n"
@@ -556,8 +560,8 @@ _DESCRIPTION_HEAD = (
     "- Durable work that must survive this session -> cronjob or terminal(background=True, notify=True); /stop, /new, "
     "or process exit discards running subagents.\n\n"
     "RULES:\n"
-    "- Children know nothing of this conversation: pass everything needed via 'context', including any required "
-    "output language, tone, or style (e.g. \"respond in Chinese\").\n"
+    "- Children inherit user turns/final answers, not reasoning/tools. Pass findings and style "
+    "(e.g. \"respond in Chinese\") via 'context'; fork_context=false starts fresh.\n"
     "- Child summaries are SELF-REPORTS, not verified facts: a child claiming \"uploaded successfully\" or "
     "\"file written\" may be wrong. For external side effects (uploads, remote writes, publishing), require a "
     "verifiable handle (URL, ID, absolute path) and verify it yourself before telling the user the operation "
@@ -578,7 +582,7 @@ def _build_tasks_param_description() -> str:
     return (
         f"The task(s), up to {max_children} in parallel for this user (set "
         "via delegation.max_concurrent_children). Each entry spawns one "
-        "subagent with isolated context and terminal session; a single task "
+        "subagent with independent conversation state and terminal session; a single task "
         "is a one-entry array. Required when spawning."
     )
 
@@ -613,7 +617,7 @@ DELEGATE_TASK_SCHEMA = {
     # _build_dynamic_schema_overrides() so the model sees the user's actual max_concurrent_children / max_spawn_depth.
     # Lazy (not at import) so cli.CLI_CONFIG isn't forced to load before the test conftest redirects HERMES_HOME.
     "description": (
-        "Spawn one or more subagents in isolated contexts. "
+        "Spawn one or more subagents with independent conversation state. "
         "Description is rebuilt at every get_definitions() call to reflect the user's current delegation limits."
     ),
     "parameters": {
@@ -631,13 +635,19 @@ DELEGATE_TASK_SCHEMA = {
                     "properties": {
                         "goal": _p(
                             "string",
-                            "What this subagent should accomplish. Be specific and self-contained — it knows "
-                            "nothing about your conversation history.",
+                            "What this subagent should accomplish. Be specific; inherited conversation is "
+                            "background, not the child's assignment.",
                         ),
                         "context": _p(
                             "string",
-                            "Background THIS child needs: file paths, error messages, constraints. Each child "
-                            "sees only its own context — repeat shared background in every task that needs it.",
+                            "Additional background THIS child needs: file paths, tool findings, error messages, "
+                            "constraints. Other children's assignments are not inherited.",
+                        ),
+                        "fork_context": _p(
+                            "boolean", "Include a filtered parent-conversation snapshot: user turns, final answers, "
+                            "and textual compaction handoffs (default true). False omits that history; shared "
+                            "identity, project rules, and normal child instructions still apply.",
+                            default=True,
                         ),
                         "output_schema": _p(
                             "object",

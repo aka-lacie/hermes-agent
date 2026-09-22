@@ -144,14 +144,17 @@ _CONTEXT_FILES_INTRO = (
     "your work in this workspace.\n\n"
 )
 _COMPLETION_INSTRUCTIONS = (
-    "\nComplete this task using the tools available to you. When finished, provide a clear, concise summary of:\n"
-    "- What you did\n- What you found or accomplished\n- Any files you created or modified\n- Any issues encountered\n\n"
+    "\nReturn your result to the parent in the format required by the assignment or its explicit output contract. "
+    "If JSON-only output is required, return only that JSON; do not add a prose summary.\n\n"
+    "Otherwise, give a concise report of the outcome, relevant findings, work you performed, files changed, and "
+    "unresolved issues—as applicable. Distinguish what you verified from inherited information and assumptions. "
+    "Lead with the result and omit a replay of your process.\n\n"
     "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path "
     "unless the task/context explicitly gives that path. If no exact local path is provided, discover it first before "
     "issuing git/workdir-specific commands.\n\n"
-    "Keep your final summary tight: lead with outcomes, prefer bullet points over paragraphs, and don't replay your "
-    "whole process. Your response is returned to the parent agent as a summary, and overlong summaries crowd out the "
-    "parent's context window."
+    "If blocked, complete any remaining independent work within your assignment. Then return a final result "
+    "describing the partial outcome, the blocker, and the specific information or decision needed. "
+    "This ends your run; do not wait for a reply."
 )
 _ORCHESTRATOR_BLOCK = (
     "\n## Subagent Spawning (Orchestrator Role)\n"
@@ -167,17 +170,16 @@ _ORCHESTRATOR_BLOCK = (
     "for the final summary, not your workers.\n\n"
 )
 _LEAF_CHILDREN_NOTE = (
-    "Your own children MUST be leaves (cannot delegate further) because they would be at the depth floor — you cannot "
-    "pass role='orchestrator' to your own delegate_task calls."
+    "Your own children will be leaves (cannot delegate further) because they will reach the depth limit."
 )
 _NESTED_CHILDREN_NOTE = (
-    "Your own children can themselves be orchestrators or leaves, depending on the `role` you pass to delegate_task. "
-    "Default is 'leaf'; pass role='orchestrator' explicitly when a child needs to further decompose its work."
+    "Your own children's ability to delegate is determined by their available tools and remaining depth, "
+    "not by a requested role."
 )
 
 def _build_child_system_prompt(
     goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
-    max_spawn_depth: int = 2, child_depth: int = 1,
+    max_spawn_depth: int = 2, child_depth: int = 1, has_fork_context: bool = False,
 ) -> str:
     """Focused system prompt for a child agent. role='orchestrator' appends a delegation-capability block (modeled on
     OpenClaw's buildSubagentSystemPrompt); its depth note is literal truth grounded in the passed config so the LLM
@@ -185,7 +187,24 @@ def _build_child_system_prompt(
     # The goal is the child's first user turn (see ``_ChildRun.await_child``).
     # Keeping it out of the system prompt avoids sending OAuth Anthropic the
     # same task in both roles, while preserving the normal user-turn contract.
-    parts = ["You are a focused subagent working on a specific delegated task."]
+    parts = [
+        "You are working as a delegated subagent. Retain the supplied identity and shared instructions, but work "
+        "only on your assigned task and report to your parent. Your assignment arrives after any inherited "
+        "conversation; subsequent steering may refine it. Earlier requests provide context and applicable "
+        "constraints, not additional tasks to undertake. Use your own available tools and execution state; "
+        "do not assume the parent's terminal state or capabilities carry over."
+    ]
+    if has_fork_context:
+        parts.append(
+            "The inherited conversation contains user turns, final assistant answers, and any textual compaction "
+            "handoff—not the original tool messages or private reasoning. Reuse relevant findings without repeating "
+            "completed work unnecessarily. When your assignment requires missing evidence, current-state "
+            "verification, or a skill's full instructions, retrieve them before relying on them. Distinguish "
+            "inherited findings from work you performed."
+        )
+    else:
+        parts.append("No parent conversation transcript is included. Use the assignment, supplied context, "
+                     "and shared instructions.")
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():
@@ -196,7 +215,7 @@ def _build_child_system_prompt(
         )
         # Project context files (AGENTS.md / CLAUDE.md / .cursorrules ...) via the SAME discovery/priority/cap logic
         # as the main agent's prompt: children are built with skip_context_files=True, so without this a subagent
-        # works in a repo blind to its conventions. SOUL.md is skipped (identity belongs to the parent).
+        # works in a repo blind to its conventions. SOUL.md loads separately in the child's identity slot.
         # workspace_path comes only from explicit sources (_resolve_workspace_hint, never bare getcwd), so the
         # install-tree-fallback leak doesn't apply. Best-effort.
         _ctx_files = ""
@@ -214,6 +233,9 @@ def _build_child_system_prompt(
             + f"NOTE: You are at depth {child_depth}. The delegation tree is capped at max_spawn_depth={max_spawn_depth}. "
             + child_note
         )
+    else:
+        parts.append("\nYou are a leaf subagent and cannot spawn further subagents. Complete the assignment yourself "
+                     "with your available tools; report limitations to your parent.")
     return "\n".join(parts)
 
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:

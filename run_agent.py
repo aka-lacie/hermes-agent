@@ -288,6 +288,7 @@ class AIAgent(
         checkpoint_max_total_size_mb: int = 500, checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False, requested_provider: str = None,
         capabilities: Dict[str, bool] | None = None, cwd: str | None = None,
+        instruction_role: Optional[str] = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
         init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
@@ -960,6 +961,7 @@ class AIAgent(
         # on a closed delegate child they were the only remaining owners, pinning its history in the parent heap.
         self._session_messages = []
         self._db_flush_scan_prefix = None
+        self.__dict__.pop("_delegate_fork_history", None)
         self._streamed_assistant_text_parts = []
         _quietly(self._trim_process_memory)
         _quietly(self._finalize_owned_session_row)

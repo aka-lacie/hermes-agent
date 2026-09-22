@@ -58,6 +58,7 @@ class SubagentLaunchRequest:
     correlation_id: Optional[str] = None
     metadata: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     timeout_seconds: Optional[float] = None
+    fork_context: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -219,6 +220,7 @@ _HANDLE_FIELD_CHECKS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
 _REQUEST_REJECTIONS: tuple[tuple[Callable[[Any], bool], str], ...] = (
     (lambda r: not isinstance(r, SubagentLaunchRequest) or not isinstance(r.goal, str) or not r.goal.strip() or len(r.goal) > _MAX_GOAL_CHARS,
      "goal must be a non-empty string of at most 16000 characters."),
+    (lambda r: not isinstance(r.fork_context, bool), "fork_context must be a boolean."),
     (lambda r: r.context is not None and (not isinstance(r.context, str) or len(r.context) > _MAX_CONTEXT_CHARS),
      "context must be a string of at most 32000 characters."),
     (lambda r: r.role not in {"leaf", "orchestrator"}, "role must be 'leaf' or 'orchestrator'."),
@@ -255,13 +257,17 @@ class SubagentLifecycleService:
             self._cleanup_locked()
             if request.correlation_id and correlation_key in _REGISTRY.correlations:
                 raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
+        from agent.subagent_context import attach_fork_history, fork_history
+        history = fork_history(parent) if request.fork_context else []
         # Lazy: delegate construction stays internal, plugins never import private delegation helpers.
         from tools.delegate_tool import _build_child_preserving_parent_tools, DEFAULT_MAX_ITERATIONS
         child = _build_child_preserving_parent_tools(
             task_index=0, goal=request.goal, context=request.context,
             toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
             model=request.model, max_iterations=DEFAULT_MAX_ITERATIONS, task_count=1, parent_agent=parent, role=request.role,
+            has_fork_context=bool(history),
         )
+        attach_fork_history(child, history)
         subagent_id = str(getattr(child, "_subagent_id", "") or "")
         if not subagent_id:
             raise SubagentLifecycleError("Hermes failed to assign a child identity.")
