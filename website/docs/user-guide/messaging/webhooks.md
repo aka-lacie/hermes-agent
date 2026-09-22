@@ -368,6 +368,12 @@ a detached message. This runs a second agent turn: the webhook agent processes
 the payload first, then the destination agent receives that result as a
 labelled automated event with its existing conversation context.
 
+The webhook worker loads the profile's `instructions/subagent.md` and scoped worker
+guidance in this mode. It remains a webhook agent with its normal tools and lifecycle,
+not a conversation-forked child. Selection uses the configured delivery mode captured
+for this request, never a field supplied in the webhook payload. The receiving
+conversation retains its main-agent instructions; direct delivery is unchanged.
+
 Internal turns require a live gateway messaging adapter. They are rejected for
 `log` and `github_comment`, which are output sinks rather than conversations,
 and cannot be combined with `deliver_only: true` because there would be no

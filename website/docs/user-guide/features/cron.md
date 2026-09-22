@@ -603,6 +603,12 @@ This changes token use depending on what runs:
 - **Script only or reminder:** no detached agent runs; only the destination
   agent turn uses LLM tokens.
 
+Detached agent tasks using `internal_turn` load the profile's `instructions/subagent.md`
+and assignment-scoped execution guidance, including when no `workdir` is configured.
+They remain cron agents with their existing tools and lifecycle; this does not fork
+the destination's history. The receiving conversation keeps its main-agent instructions.
+Direct-delivery jobs keep the existing instruction selection.
+
 Internal-turn delivery requires a live messaging conversation. It cannot target
 `local` because there is no conversation there, and it cannot target `bot-chat`
 because Bot Chat already starts its own agent turn. Use direct delivery for

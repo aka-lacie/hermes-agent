@@ -1088,6 +1088,7 @@ class TurnRunner:
     def _build_fresh_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations,
                            reasoning_config, pr, skip_context_files):
         from gateway.run import _checkpoint_agent_kwargs
+        from gateway.internal_turns import webhook_worker_instruction_role
         ctx = self._ctx
         runner = self._runner
         src = ctx.source
@@ -1103,6 +1104,7 @@ class TurnRunner:
             provider_sort=pr.get("sort"), provider_require_parameters=pr.get("require_parameters", False),
             provider_data_collection=pr.get("data_collection"),
             session_id=ctx.session_id, platform=platform_key,
+            instruction_role=webhook_worker_instruction_role(runner, src),
             user_id=src.user_id, user_id_alt=src.user_id_alt, user_name=src.user_name,
             chat_id=src.chat_id, chat_name=src.chat_name, chat_type=src.chat_type, thread_id=src.thread_id,
             gateway_session_key=ctx.session_key,

@@ -2252,6 +2252,7 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         skip_memory=False,
         skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
         platform="cron",
+        instruction_role="subagent" if job.get("delivery_mode") == "internal_turn" else None,
         session_id=session_id,
         session_db=session_db,
     )

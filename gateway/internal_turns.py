@@ -21,6 +21,22 @@ logger = logging.getLogger(__name__)
 INTERNAL_NOTIFICATION_MARKER = "[HERMES_INTERNAL_NOTIFICATION]"
 
 
+def webhook_worker_instruction_role(runner: Any, source: Any) -> Optional[str]:
+    """Select worker prose from the adapter-owned per-delivery snapshot, never POST content.
+
+    Webhook sessions have a unique chat id per delivery. The snapshot stays fixed
+    throughout that worker run, even if its route is reconfigured. A receiving
+    Discord/etc. conversation is not a webhook worker and keeps its normal role.
+    """
+    from gateway.config import Platform
+
+    if source.platform != Platform.WEBHOOK:
+        return None
+    adapter = runner._adapter_for_source(source)
+    delivery = getattr(adapter, "_delivery_info", {}).get(source.chat_id, {})
+    return "subagent" if delivery.get("delivery_mode") == "internal_turn" else None
+
+
 def trusted_internal_notification_context(
     event: Any,
 ) -> Optional[dict[str, str]]:
