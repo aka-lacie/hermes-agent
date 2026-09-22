@@ -28,6 +28,20 @@ def diagnostic_process_event(event: dict) -> bool:
     }
 
 
+def resume_user_presentation(agent):
+    """User steering ends notification-only silence without rebuilding the agent."""
+    saved = getattr(agent, "_notification_suppressed_callbacks", None)
+    if saved is None or getattr(agent, "_mute_notification_reply", False) is not True:
+        return
+    on_resume = getattr(agent, "_notification_resume_callback", None)
+    for key, value in saved.items():
+        setattr(agent, key, value)
+    agent._mute_notification_reply = False
+    _muted_surface.set(None)
+    if on_resume is not None:
+        on_resume()
+
+
 def notification_config_snapshot():
     """Read the owning effective config once per turn (the loader already returns a fresh copy)."""
     from gateway.warning_notifications import effective_user_config
@@ -53,20 +67,26 @@ def notification_policy_snapshot(agent, platform, config):
 
 
 @contextmanager
-def notification_turn(agent, *, muted: bool, session_id: str = ""):
+def notification_turn(agent, *, muted: bool, session_id: str = "", on_resume=None):
     """Freeze the current turn's presentation without touching prompts or tool schemas."""
     if not muted:
         yield
         return
     missing = object()
-    keys = (*_PRESENTATION_CALLBACKS, "suppress_status_output", "_mute_notification_reply")
+    keys = (*_PRESENTATION_CALLBACKS, "suppress_status_output", "thinking_progress",
+            "_mute_notification_reply", "_notification_resume_callback")
     saved = {key: getattr(agent, key, missing) for key in keys}
+    agent._notification_suppressed_callbacks = {
+        key: value for key, value in saved.items() if value is not missing
+    }
     token = _muted_surface.set(session_id)
     try:
         for key in _PRESENTATION_CALLBACKS:
             setattr(agent, key, None)
         agent.suppress_status_output = True
         agent._mute_notification_reply = True
+        agent.thinking_progress = False
+        agent._notification_resume_callback = on_resume
         yield
     finally:
         for key, value in saved.items():
@@ -75,3 +95,4 @@ def notification_turn(agent, *, muted: bool, session_id: str = ""):
             else:
                 setattr(agent, key, value)
         _muted_surface.reset(token)
+        del agent._notification_suppressed_callbacks

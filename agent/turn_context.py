@@ -683,6 +683,7 @@ def _collect_pre_llm_call_context(
     agent: Any, *, effective_task_id: str, turn_id: str, original_user_message: Any,
     messages: List[Any], conversation_history: Optional[List[Any]],
     internal_notification: Optional[Mapping[str, str]] = None,
+    input_events: Optional[List[dict]] = None,
 ) -> str:
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
@@ -706,6 +707,7 @@ def _collect_pre_llm_call_context(
             internal_notification=(
                 dict(internal_notification) if internal_notification else None
             ),
+            input_events=input_events,
         )
         try:
             # Spill oversized per-hook context to disk so a runaway plugin can't inflate every subsequent
@@ -902,6 +904,7 @@ def build_turn_context(
     # Reset first: a cached gateway agent must never carry the previous turn's bot author into a human turn.
     turn_author = parse_turn_author(turn_author)
     agent._turn_author = turn_author
+    agent._received_user_steer = False
 
     # Recover a rotated session before binding log/turn ids or copying client history so
     # everything in this turn belongs to the canonical child.
@@ -1021,6 +1024,7 @@ def build_turn_context(
             original_user_message=original_user_message, messages=messages,
             conversation_history=conversation_history,
             internal_notification=internal_notification,
+            input_events=(persist_user_display_metadata or {}).get("input_events"),
         )
     plugin_user_context = _merge_gateway_notes(
         agent, messages, current_turn_user_idx, plugin_user_context

@@ -715,6 +715,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         return {
             "session_id": session.id,
             "session_key": session.session_key,
+            "parent_session_id": session.parent_session_id,
             "task_id": session.task_id,
             "owner_task_id": session.owner_task_id or session.task_id,
             "command": session.command,

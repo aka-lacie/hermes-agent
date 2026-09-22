@@ -909,8 +909,8 @@ class TurnRunner:
 
     def _setup_stream_consumer(self, platform_key):
         ctx = self._ctx
-        if ctx.mute_notification_reply:
-            return None, None, None, False
+        # Construct real sinks even for diagnostic wakes. The presentation scope suppresses
+        # callbacks, and the outer consumer task stays dormant until a user steer is consumed.
         stream_consumer = None
         # The streaming-TTS consumer is created on the outer loop thread before run_sync launches;
         # run_sync only reads it via the holder for delta-callback wiring.
@@ -1278,16 +1278,7 @@ class TurnRunner:
         # Thinking between tool calls is independent of tool_progress mode (Mattermost opts in
         # per platform so global scratch-text doesn't leak into threads).
         agent.thinking_progress = ctx._thinking_enabled
-        if ctx.mute_notification_reply:
-            # Controls and operational event/step callbacks remain wired. These
-            # presentation callbacks are rebound on every next turn.
-            agent.tool_progress_callback = None
-            agent.tool_start_callback = None
-            agent.tool_complete_callback = None
-            # Keep diagnostic observers installed; concrete sinks veto display.
-            agent.stream_delta_callback = None
-            agent.interim_assistant_callback = None
-            agent.thinking_progress = False
+        # notification_turn must save these live sinks before suppressing presentation.
         ctx.agent_holder[0] = agent  # interrupt support
         # The titler fires from the turn prologue, so attach the rename lane before the run.
         self._attach_session_title_callback(agent, ctx)
@@ -1712,7 +1703,10 @@ class TurnRunner:
             if ctx.inbound_message_id is not None:
                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
             from agent.notification_presentation import notification_turn
-            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
+            with notification_turn(
+                agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or "",
+                on_resume=lambda: setattr(ctx, "mute_notification_reply", False),
+            ):
                 return agent.run_conversation(api_message, **kwargs)
         finally:
             unregister_gateway_notify(session_key)
@@ -1733,6 +1727,10 @@ class TurnRunner:
             )
         ctx.result_holder[0] = result
         if stream_consumer is None:
+            return
+        if ctx.mute_notification_reply:
+            # A dormant consumer must never adopt a diagnostic-only final.
+            stream_consumer.finish()
             return
         # Pass final_response as the authoritative finalize payload: it includes post-stream
         # augmentation (verifier footer, explainer) the accumulator never saw. Adopt ONLY a genuinely
@@ -1956,6 +1954,7 @@ class TurnRunner:
             "partial": result.get("partial", False), "completed": result.get("completed"),
             "interrupted": result.get("interrupted", False), "interrupt_message": result.get("interrupt_message"),
             "error": result.get("error"),
+            "received_user_input": result.get("received_user_input") is True,
             "compression_exhausted": result.get("compression_exhausted", False),
             "compression_deferred": result.get("compression_deferred", False),
             "tools": ctx.tools_holder[0] or [],

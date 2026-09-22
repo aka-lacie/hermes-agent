@@ -150,10 +150,10 @@ async def test_non_internal_event_still_interrupts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_human_waits_silently_for_an_active_internal_turn() -> None:
+async def test_user_steers_an_active_internal_turn_without_aborting_it() -> None:
     """A user message does not abort a synthetic turn or get a busy ack."""
     runner = _make_runner()
-    runner._busy_input_mode = "interrupt"
+    runner._busy_input_mode = "steer"
     adapter = _make_adapter()
     event = _make_internal_event(text="new question")
     object.__setattr__(event, "internal", False)
@@ -168,4 +168,5 @@ async def test_human_waits_silently_for_an_active_internal_turn() -> None:
     assert handled is True
     parent.interrupt.assert_not_called()
     adapter._send_with_retry.assert_not_called()
-    assert adapter._pending_messages[sk] is event
+    parent.steer.assert_called_once()
+    assert sk not in adapter._pending_messages

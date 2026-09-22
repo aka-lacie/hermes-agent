@@ -430,6 +430,20 @@ By default, messaging a busy agent redirects its active turn (a running foregrou
 - `queue` — follow-up messages wait and run as the next turn after the current task finishes. Each follow-up (text, voice note, video, document) gets its own turn in arrival order; only a rapid photo burst is merged into one album turn.
 - `steer` — follow-up messages are injected into the current run via `/steer`, arriving at the agent after the next tool call. No interrupt, no new turn. Falls back to `queue` behavior if the agent hasn't started yet.
 
+In `steer` mode, results from requested work (background subagents, conversation-owned
+process completions, and task watch matches) can also enter at the next tool boundary.
+User messages come first, followed by task results with separate provenance. Steering
+targets the main agent; it decides whether to update any subagents. Webhook/cron
+`internal_turn` deliveries keep their existing notification policy and stay queued.
+An active internal notification does not force user steers into the queue.
+
+Pending text inputs can share one follow-up batch. User message order and per-message
+reaction targets are preserved; task context is bounded to 24,000 characters per batch
+(an individually oversized task-only result can still run). Excess results remain
+pending. Voice, image, and document inputs retain their attachment handling and order.
+No in-flight model request is restarted and no completed response is rewritten merely
+because new input arrived. Input missing the final tool boundary runs as a follow-up.
+
 Gateway steers (including explicit `/steer`) and active-turn redirects carry the requesting event's available platform, chat, thread, sender, message, profile, and scope identifiers as per-message JSON context. With `privacy.redact_pii: true`, identifiers in this model-visible context are hashed on supported platforms, including alternate and parent identifiers; the original event identifiers remain internal for routing. Otherwise identifiers are preserved exactly. Neither mode changes the session's system prompt or chooses a fallback reply destination. The context is routing data, not authorization or a guarantee of automatic delivery.
 
 ```yaml

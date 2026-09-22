@@ -1,10 +1,4 @@
-"""Busy-mode steer reaches the subagent the parent is blocked on (#112095, Telegram surface).
-
-A parent inside ``delegate_task`` drains its own steer queue only after the tool returns — i.e.
-after the child finishes — so a steer that lands on the parent alone is never read by a looping
-child. Every gateway steer entry point must fan the text out to ``_active_children`` and the ack
-must say so.
-"""
+"""User steering is parent-only, including while the parent supervises children."""
 
 import threading
 
@@ -34,7 +28,7 @@ def _event(text="focus on rows 10-20"):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["busy_steer_mode", "priority", "explicit_command"])
-async def test_busy_steer_fans_out_to_active_subagents(route, tmp_path, monkeypatch):
+async def test_busy_steer_stays_with_parent(route, tmp_path, monkeypatch):
     monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
     runner = GatewayRunner(config=GatewayConfig())
     child_a, child_b = _Agent(), _Agent()
@@ -49,12 +43,12 @@ async def test_busy_steer_fans_out_to_active_subagents(route, tmp_path, monkeypa
         runner._hm_busy_steer(event, parent, "key")
     else:
         reply = await runner._busy_steer_command(event, "key", event.source)
-        assert "subagent" in reply
+        assert "subagent" not in reply
 
     assert parent.payload and parent.payload.endswith("focus on rows 10-20")
-    # The looping child — the one actually doing the work — gets the same text, not just the parent.
-    assert child_a.payload == parent.payload
-    assert child_b.payload == parent.payload
+    # The parent decides which child, if any, needs the new user input.
+    assert child_a.payload is None
+    assert child_b.payload is None
 
 
 def test_busy_steer_ack_names_subagents(tmp_path, monkeypatch):
@@ -65,5 +59,5 @@ def test_busy_steer_ack_names_subagents(tmp_path, monkeypatch):
                   demoted_for_subagents=False, demoted_for_compression=False)
     with_children = runner._compose_busy_ack_message(_event(), 0.0, None, parent, **kwargs)
     without = runner._compose_busy_ack_message(_event(), 0.0, None, _Agent(), **kwargs)
-    assert "subagent" in with_children
+    assert "subagent" not in with_children
     assert "subagent" not in without

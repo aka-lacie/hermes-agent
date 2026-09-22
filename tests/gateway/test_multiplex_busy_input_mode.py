@@ -495,6 +495,8 @@ async def test_primary_adapter_busy_origin_uses_routed_privacy(
         skip_memory=True, save_trajectories=False, platform="cli",
     )
     agent._executing_tools = mode == "interrupt"
+    from agent.steering import begin_input_turn
+    begin_input_turn(agent)  # this fixture represents a turn already executing tools
     runner._session_state(key).turn.agent = agent
     adapter._active_sessions[key] = asyncio.Event()
     ambient = get_hermes_home_override()

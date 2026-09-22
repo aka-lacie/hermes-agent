@@ -239,7 +239,13 @@ class InterruptControlMixin:
             # hard_cancel, so a soft clear dropped a live user message with no trace.
             with _ic_lock(self, "_pending_steer_lock"):
                 self._pending_steer = None
+                self._pending_input_events = []
         return True
+
+    def steer_input_events(self, events: list[dict]) -> bool:
+        """Accept gateway-owned user/task provenance without forwarding to children."""
+        from agent.steering import enqueue_inputs
+        return enqueue_inputs(self, events)
 
     def steer(self, text: str) -> bool:
         """Queue user text for delivery as its own user row after the current tool batch finishes (no
@@ -248,6 +254,8 @@ class InterruptControlMixin:
             return False
         cleaned = text.strip()
         with _ic_lock(self, "_pending_steer_lock"):
+            if getattr(self, "_input_turn_open", None) is False:
+                return False
             existing = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
             self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
         return True

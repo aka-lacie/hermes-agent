@@ -29,6 +29,7 @@ from gateway.response_delivery import (
     response_delivery_scope, capture_response_delivery, capture_stream_delivery,
 )
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
+from gateway.input_batch import input_metadata
 from gateway.session import (
     SessionSource, _session_key_namespace, build_channel_continuity_note,
     build_session_context,
@@ -1461,6 +1462,8 @@ class GatewayTurnMixin:
         # A queued (/queue) chain's TERMINAL turn owns the silence verdict, not the event that
         # opened the chain: an internal follow-up may go silent, a human one must not.
         _silence_kind = agent_result.get("queued_terminal_display_kind", persist_user_display_kind)
+        if agent_result.get("received_user_input") is True:
+            _silence_kind = None
         if (_intentional_silence and not is_machinery_display_kind(_silence_kind)
                 and agent_result.get("user_visible_response") is not True):
             logger.warning(
@@ -1747,8 +1750,13 @@ class GatewayTurnMixin:
         }
         if prepared.persist_user_display_kind:
             _user_entry["display_kind"] = prepared.persist_user_display_kind
+        # Gateway-owned fallback writes need the same item provenance as agent writes:
+        # a rendered mixed batch is not one user statement, even when the run failed early.
+        metadata = dict(input_metadata(event))
         if prepared.persistence_owner:
-            _user_entry["display_metadata"] = {"gateway_input_owner": prepared.persistence_owner}
+            metadata["gateway_input_owner"] = prepared.persistence_owner
+        if metadata:
+            _user_entry["display_metadata"] = metadata
         if getattr(event, "message_id", None):
             _user_entry["message_id"] = str(event.message_id)
         return _user_entry
@@ -2124,7 +2132,7 @@ class GatewayTurnMixin:
                 persist_user_timestamp=prepared.persist_user_timestamp,
                 persist_user_display_kind=prepared.persist_user_display_kind,
                 persist_user_display_metadata={
-                    "gateway_input_owner": prepared.persistence_owner, **diagnostic_metadata(event)},
+                    "gateway_input_owner": prepared.persistence_owner, **input_metadata(event)},
                 message_type=event.message_type,
                 internal_notification=trusted_internal_notification_context(event),
                 scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
@@ -3174,9 +3182,16 @@ class GatewayTurnMixin:
         except Exception as _stts_err:
             logger.debug("Could not set up streaming TTS consumer: %s", _stts_err)
 
-    async def _run_agent_stream_consumer_task(self, stream_consumer_holder: list) -> None:
-        """Wait (up to 10s) for the stream consumer to be created inside run_sync, then run it."""
-        for _ in range(200):
+    async def _run_agent_stream_consumer_task(self, stream_consumer_holder: list, turn_ctx=None) -> None:
+        """Keep muted diagnostic transports dormant until user input resumes presentation."""
+        attempts = 0
+        while attempts < 200:
+            if turn_ctx is not None and turn_ctx.mute_notification_reply:
+                if turn_ctx.result_holder[0] is not None:
+                    return
+                await asyncio.sleep(0.05)
+                continue
+            attempts += 1
             if stream_consumer_holder[0] is not None:
                 await stream_consumer_holder[0].run()
                 return
@@ -3488,7 +3503,25 @@ class GatewayTurnMixin:
             if done:
                 # Prefer the real result even if the watchdog fired in the same window (the run already
                 # persisted its reply).
-                return worker.executor_task.result()
+                try:
+                    return worker.executor_task.result()
+                except Exception:
+                    # A failed worker skips the normal final-result drain. Recover on
+                    # this event-loop thread before the adapter releases its busy guard,
+                    # so its existing cleanup path schedules the preserved next turn.
+                    agent = agent_holder[0]
+                    if (agent is not None and getattr(agent, "_input_turn_open", None) is False
+                            and turn_ctx.session_key and self._adapter_for_source(turn_ctx.source)):
+                        from agent.steering import finish_input_turn
+                        from gateway.input_batch import restore_leftover_inputs
+                        finished_result = getattr(turn_ctx, "result_holder", [None])[0]
+                        recovery = finished_result if isinstance(finished_result, dict) else {}
+                        finish_input_turn(agent, recovery)
+                        if recovery.get("pending_steer"):
+                            recovery.setdefault("pending_input_events", []).append(
+                                {"kind": "user", "text": recovery.pop("pending_steer")})
+                        restore_leftover_inputs(self, recovery, turn_ctx.source, turn_ctx.session_key)
+                    raise
             if worker.agent_timeout is not None:
                 if worker.timeout_fired.is_set():
                     break
@@ -3558,11 +3591,15 @@ class GatewayTurnMixin:
         )
         pending_event = None
         pending = None
+        from gateway.input_batch import restore_leftover_inputs, coalesce_pending_inputs
+        if result and adapter and session_key:
+            restore_leftover_inputs(self, result, source, session_key)
         if result and adapter and session_key:
             pending_event = _dequeue_pending_event(adapter, session_key)
             # /queue overflow: promote the next queued event into the consumed "next-up" slot so the
             # recursive drain sees it (keeps FIFO order; a mid-chain /queue can't jump the queue).
             pending_event = self._promote_queued_event(session_key, adapter, pending_event)
+            pending_event = coalesce_pending_inputs(self, adapter, session_key, pending_event)
             if result.get("interrupted") and not pending_event and result.get("interrupt_message"):
                 interrupt_message = result.get("interrupt_message")
                 if _is_control_interrupt_message(interrupt_message):
@@ -3618,7 +3655,10 @@ class GatewayTurnMixin:
         self, turn_ctx: TurnContext, adapter: Any, response: Any, result: Any, stream_task: Any,
     ) -> None:
         """Deliver the first response before a queued follow-up runs, unless streaming already did."""
-        if turn_ctx.mute_notification_reply:
+        # Delivery uses the finalized response, including whether it consumed user input.
+        _delivery_result = response if isinstance(response, dict) else (result or {})
+        if (turn_ctx.mute_notification_reply
+                and _delivery_result.get("received_user_input") is not True):
             return
         session_key = turn_ctx.session_key
         _sc = turn_ctx.stream_consumer_holder[0]
@@ -3627,8 +3667,6 @@ class GatewayTurnMixin:
                 await self._await_stream_task(stream_task)
             except Exception as e:
                 logger.debug("Stream consumer wait before queued message failed: %s", e)
-        # Delivery uses the finalized task result (empty/failure normalization), not raw ``result``.
-        _delivery_result = response if isinstance(response, dict) else (result or {})
         capture_stream_delivery(_delivery_result, _sc)
         first_response = _delivery_result.get("final_response", "")
         _already_streamed = self._run_agent_stream_confirmed_final_delivery(
@@ -3636,7 +3674,8 @@ class GatewayTurnMixin:
         )
         # Same silence predicate as the normal path, else this branch leaks the literal marker.
         if self._is_intentional_silence(_delivery_result, first_response):
-            if (is_machinery_display_kind(turn_ctx.persist_user_display_kind)
+            if ((is_machinery_display_kind(turn_ctx.persist_user_display_kind)
+                    and _delivery_result.get("received_user_input") is not True)
                     or _delivery_result.get("user_visible_response") is True):
                 logger.info(
                     "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",
@@ -3682,7 +3721,6 @@ class GatewayTurnMixin:
         response: Any, result: Any, stream_task: Any,
     ) -> Any:
         """Run the queued / interrupting follow-up as the next turn (recursive ``_run_agent``)."""
-        from gateway.platforms.base import merge_pending_message_event
         from gateway.run import _preserve_queued_followup_history_offset
         source, session_id, session_key, run_generation = (
             turn_ctx.source, turn_ctx.session_id, turn_ctx.session_key, turn_ctx.run_generation,
@@ -3706,7 +3744,17 @@ class GatewayTurnMixin:
             )
             adapter = self._adapter_for_source(source)
             if adapter and pending_event:
-                merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
+                # The coalescer can leave media, excess task results and external turns
+                # behind. Reinsert the already-dequeued event without merging its body
+                # or provenance into that occupied slot, then restore arrival order.
+                from gateway.input_policy import priority
+                self._enqueue_fifo(session_key, pending_event, adapter)
+                overflow = self._overflow_queue(session_key)
+                waiting = [adapter._pending_messages[session_key], *(overflow or [])]
+                waiting.sort(key=lambda item: (priority(item), item.timestamp.timestamp()))
+                adapter._pending_messages[session_key] = waiting[0]
+                if overflow is not None:
+                    overflow[:] = waiting[1:]
             elif adapter and hasattr(adapter, 'queue_message'):
                 adapter.queue_message(session_key, pending)
             return turn_ctx.result_holder[0] or {"final_response": response, "messages": history}
@@ -3807,7 +3855,7 @@ class GatewayTurnMixin:
                 internal_notification=next_internal_notification,
                 persist_user_message=next_persist_message,
                 persist_user_display_kind=next_display_kind,
-                persist_user_display_metadata=diagnostic_metadata(pending_event) or None,
+                persist_user_display_metadata=input_metadata(pending_event) or None,
             )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
@@ -4185,7 +4233,7 @@ class GatewayTurnMixin:
         progress_task = spawn(turn_runner.send_progress_messages()) if disp.needs_progress_queue else None
         log_task = spawn(self._run_agent_write_tool_log(disp.log_queue)) if disp.log_mode_enabled else None
         # The stream consumer is created inside run_sync; this task polls for it.
-        stream_task = spawn(self._run_agent_stream_consumer_task(turn_ctx.stream_consumer_holder))
+        stream_task = spawn(self._run_agent_stream_consumer_task(turn_ctx.stream_consumer_holder, turn_ctx))
         tracking_task = spawn(self._run_agent_track_agent(turn_ctx))
         _interrupt_detected = asyncio.Event()  # shared with backup check
         interrupt_monitor = spawn(self._run_agent_monitor_for_interrupt(turn_ctx, _interrupt_detected))
@@ -4203,7 +4251,9 @@ class GatewayTurnMixin:
             response = await self._run_agent_await_turn_worker(worker, turn_ctx, _interrupt_detected, interrupt_monitor)
             capture_response_delivery(response)
             if isinstance(response, dict):
-                response["_notification_reply_muted"] = turn_ctx.mute_notification_reply
+                response["_notification_reply_muted"] = (
+                    turn_ctx.mute_notification_reply and response.get("received_user_input") is not True
+                )
             self._run_agent_evict_on_fallback(turn_ctx)
 
             # Interrupted OR queued message (/queue)?
@@ -4213,9 +4263,13 @@ class GatewayTurnMixin:
             capture_stream_delivery(response, None, turn_ctx.streaming_tts_consumer_holder[0])
             pending_event, pending = await self._run_agent_drain_pending(result, adapter, source, session_key)
             if pending_event or pending:
-                return await self._run_agent_queued_followup(
+                response = await self._run_agent_queued_followup(
                     turn_ctx, adapter, pending, pending_event, response, result, stream_task,
                 )
+                if _interrupt_depth < self._MAX_INTERRUPT_DEPTH:
+                    return response
+                # At the depth limit no follow-up ran: this turn still owns the
+                # response. Flush and reconcile its stream before the outer send.
         finally:
             await self._run_agent_cleanup_turn_tasks(
                 turn_ctx, progress_task=progress_task, log_task=log_task, interrupt_monitor=interrupt_monitor,

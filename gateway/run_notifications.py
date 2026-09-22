@@ -1196,6 +1196,13 @@ class GatewayNotificationsMixin:
                 text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
                 message_id=str(evt.get("message_id") or "").strip() or None, metadata=metadata,
             )
+            from gateway.input_policy import task_feedback_event
+            synth_event.task_feedback = task_feedback_event(evt)
+            if synth_event.task_feedback:
+                from gateway.input_policy import input_record
+                synth_event.metadata["input_events"] = [input_record(synth_event, origin={
+                    "type": evt.get("type"), "task_id": evt.get("delegation_id") or evt.get("session_id"),
+                })]
             logger.info(
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
                 platform_name, source.chat_id, source.thread_id,

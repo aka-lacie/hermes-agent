@@ -3281,6 +3281,10 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     """
     if num_tool_msgs <= 0 or not messages:
         return
+    if getattr(agent, "_pending_input_events", None):
+        from agent.steering import append_pending_inputs
+        if append_pending_inputs(agent, messages):
+            return
     steer_text = agent._drain_pending_steer()
     if not steer_text:
         return
