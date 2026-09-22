@@ -431,6 +431,7 @@ Hermes reads MCP config from `~/.hermes/config.yaml` under `mcp_servers`.
 | `timeout` | number | Tool call timeout |
 | `connect_timeout` | number | Initial connection timeout (also bounds the MCP `initialize` handshake) |
 | `lazy` | bool | If `true`, register the server's tools from the schema cache at startup and only start/connect it on the first tool call (default `false`). Needs one prior live connect to fill the cache. |
+| `lazy_cache_ignore_ttl` | bool | With `lazy: true`, allow an expired cached schema at startup (default `false`). Useful for intermittently offline servers. First use still connects and refreshes the live tool list; a missing cache or changed connection fingerprint still requires discovery. |
 | `idle_timeout_seconds` | number | Recycle a stdio server after this many seconds without a tool call (`0` = never, default). The server restarts transparently on the next tool call. |
 | `max_lifetime_seconds` | number | Recycle a stdio server after this total age (`0` = never, default). Restarts transparently on next use. |
 | `enabled` | bool | If `false`, Hermes skips the server entirely |
@@ -680,6 +681,15 @@ Hermes discovers MCP servers at startup and registers their tools into the norma
 ### Lazy start
 
 A server with `lazy: true` is registered from the on-disk schema cache instead: its tools appear in the registry immediately, and the process is spawned (or the HTTP endpoint connected) on the first tool call. The cache is written on every live connect, so the first run of a new or changed server is always eager. The banner and the TUI session panel show such a server as **lazy** with its cached tool count (`3 tool(s) (lazy, starts on first use)`) — it is a working server, not a failed one — and the startup discovery summary counts it as `N lazy, not spawned yet`.
+
+For an intermittently offline server, set `lazy_cache_ignore_ttl: true` alongside
+`lazy: true` to use its last saved tool schemas even when the server's cache TTL
+has elapsed (including `ttlMs: 0`). This changes only startup schema selection:
+the first tool call still requires a live connection and refreshes discovery,
+and a sleeping host can still make that call fail. Cached schemas can be stale
+until that connection succeeds. Missing cache entries and changes to the
+command, arguments, URL, transport, or tool filters still trigger eager discovery.
+Other servers continue honoring their cache TTLs by default.
 
 ### Dynamic Tool Discovery
 

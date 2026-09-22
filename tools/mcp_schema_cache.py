@@ -56,11 +56,14 @@ def _save_all(data: Dict[str, Any]) -> None:
     atomic_json_write(_cache_path(), data, mode=0o600)
 
 
-def get_cached_entry(server_name: str, fingerprint: str) -> Optional[dict]:
+def get_cached_entry(server_name: str, fingerprint: str, *, allow_expired: bool = False) -> Optional[dict]:
     """Return cached entry when fingerprint matches (and TTL holds), else None. ``tools/list``
     results may carry ``ttlMs`` (SEP-2549); an entry older than a recorded TTL is a miss so the
     next startup re-probes instead of serving a stale manifest forever. Entries without a TTL
-    never expire. ``cacheScope`` is irrelevant: this cache is per-user local disk."""
+    never expire. ``allow_expired`` is an explicit lazy-start policy: use the saved
+    schema as a startup manifest, then refresh on first connection. It never
+    bypasses the connection fingerprint. ``cacheScope`` is irrelevant: this
+    cache is per-user local disk."""
     with _cache_lock:
         entry = _load_all().get(server_name)
     if not isinstance(entry, dict) or entry.get("fingerprint") != fingerprint:
@@ -69,7 +72,7 @@ def get_cached_entry(server_name: str, fingerprint: str) -> Optional[dict]:
     written_at = entry.get("written_at")
     expired = (isinstance(ttl_ms, (int, float)) and isinstance(written_at, (int, float))
                and (time.time() - written_at) * 1000.0 >= float(ttl_ms))
-    return None if expired else entry
+    return None if expired and not allow_expired else entry
 
 
 def write_cache_entry(server_name: str, fingerprint: str, *, tools: List[dict],

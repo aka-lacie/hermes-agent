@@ -310,6 +310,56 @@ class TestLazyFirstUseConnect:
         assert "playwright" in mcp._lazy_server_configs
 
 
+@pytest.mark.parametrize("online", [False, True])
+def test_expired_manifest_registers_offline_then_connects_on_dispatch(monkeypatch, tmp_path, online):
+    from tools import mcp_schema_cache as cache
+    from tools.registry import registry
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    name = "offlineprobe"
+    config = {"command": "unreachable-test-host", "lazy": True, "lazy_cache_ignore_ttl": True}
+    cached = {"name": "read", "description": "Saved description",
+              "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}},
+              "annotations": {"readOnlyHint": True}}
+    fp = cache.config_fingerprint(config)
+    cache.write_cache_entry(name, fp, tools=[cached], ttl_ms=0)
+    assert cache.get_cached_entry(name, fp) is None
+
+    server = mcp.MCPServerTask(name)
+    server.session = SimpleNamespace(call_tool=AsyncMock(return_value=SimpleNamespace(
+        isError=False, content=[], structuredContent=None)))
+    server._tools = [SimpleNamespace(name="read", description="Fresh description",
+                                    inputSchema=cached["inputSchema"], annotations=cached["annotations"])]
+    server._list_cache_meta = {"ttl_ms": 0}
+    connector = AsyncMock(return_value=server, side_effect=None if online else RuntimeError("host asleep"))
+    monkeypatch.setattr(_mcp_discovery, "_connect_server", connector)
+    monkeypatch.setattr(_mcp_loop, "_ensure_mcp_loop", lambda: None)
+    monkeypatch.setattr(_mcp_loop, "_run_on_mcp_loop", TestLazyFirstUseConnect._run_on_loop)
+    try:
+        names = _mcp_discovery.register_mcp_servers({name: config})
+        assert names
+        connector.assert_not_awaited()
+        tool = registry.get_entry(_mcp_schema.mcp_prefixed_tool_name(name, "read"))
+        assert tool.schema["parameters"] == cached["inputSchema"]
+        response = json.loads(tool.handler({"path": "example"}))
+        connector.assert_awaited_once()
+        if online:
+            assert "error" not in response
+            server.session.call_tool.assert_awaited_once()
+            refreshed = cache.get_cached_entry(name, fp, allow_expired=True)
+            assert refreshed["tools"][0]["description"] == "Fresh description"
+            assert cache.get_cached_entry(name, fp) is None
+        else:
+            assert "error" in response
+            server.session.call_tool.assert_not_awaited()
+            assert _mcp_discovery._connect_cooldown_active(name)
+    finally:
+        registry.deregister(_mcp_schema.mcp_prefixed_tool_name(name, "read"))
+        for table in (mcp._server_connect_errors, mcp._server_connect_failures,
+                      mcp._server_connect_retry_after, mcp._server_scope_keys):
+            table.pop(name, None)
+
+
 class TestCacheLoadDescriptionScan:
     def test_scan_runs_on_cache_load_path(self):
         # Defense-in-depth: the cache file is user-writable JSON, so the

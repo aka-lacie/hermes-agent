@@ -49,3 +49,12 @@ def test_cache_scope_round_trips():
         "srv", "fp", tools=[{"name": "t"}], ttl_ms=60_000, cache_scope="private"
     )
     assert sc.get_cached_entry("srv", "fp")["cache_scope"] == "private"
+
+
+def test_expired_opt_in_keeps_fingerprint_and_default_ttl_contract():
+    sc.write_cache_entry("srv", "fp", tools=[{"name": "t"}], ttl_ms=0)
+    assert sc.get_cached_entry("srv", "fp") is None
+    assert sc.get_cached_entry("srv", "fp", allow_expired=True)["tools"] == [{"name": "t"}]
+    assert sc.get_cached_entry("srv", "changed", allow_expired=True) is None
+    assert sc.get_cached_entry("missing", "fp", allow_expired=True) is None
+    assert sc.get_cached_entry("srv", "fp") is None  # reading never rewrites TTL
