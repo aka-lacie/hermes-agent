@@ -19,6 +19,7 @@ from tools.delegate_tool_registry import (
     _capture_gateway_steer_authority, _close_subagent_steering, _register_subagent, _unregister_subagent,
 )
 from tools.delegate_tool_results import (
+    _child_route_metadata,
     _extract_output_tail, _looks_like_error_output, _stringify_tool_content, _summarize_tool_arguments,
 )
 
@@ -34,6 +35,7 @@ def _str_or_none(value: Any) -> Optional[str]:
 def _fabricated_entry(idx: int, status: str, error: str, child: Any, duration: float = 0) -> Dict[str, Any]:
     """Result entry for a child that raised, never finished, or was abandoned."""
     return {
+        **_child_route_metadata(child),
         "task_index": idx, "status": status, "summary": None, "error": error, "api_calls": 0,
         "duration_seconds": duration, "_child_role": getattr(child, "_delegate_role", None),
     }
@@ -317,6 +319,7 @@ def _register_child(
         owner_transport, owner_session_record = _capture_gateway_steer_authority(owner_session_id)
     _raw_depth = getattr(child, "_delegate_depth", 1)
     _register_subagent({
+        **_child_route_metadata(child),
         "subagent_id": _subagent_id,
         "parent_id": _str_or_none(getattr(child, "_parent_subagent_id", None)),
         "depth": max(0, _raw_depth - 1) if isinstance(_raw_depth, int) else 0,
@@ -523,6 +526,7 @@ def _build_result_entry(
     _cost_status = getattr(child, "session_cost_status", None)
     # Result entry contract: see the _run_single_child docstring.
     entry: Dict[str, Any] = {
+        **_child_route_metadata(child),
         "task_index": task_index,
         "status": status,
         "summary": summary,

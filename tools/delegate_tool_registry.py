@@ -235,6 +235,7 @@ def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
     return _resolve_session_lineage(owner_sid, parent_agent) in {parent_sid, _resolve_session_lineage(parent_sid, parent_agent)}
 
 def _list_payload(parent_agent: Any) -> Dict[str, Any]:
+    from tools.delegate_tool_results import _child_route_metadata
     with _active_subagents_lock:
         records = list(_active_subagents.values())
     entries = []
@@ -247,6 +248,7 @@ def _list_payload(parent_agent: Any) -> Dict[str, Any]:
             "parent_id": r.get("parent_id"),
             "goal": r.get("goal"),
             "model": r.get("model"),
+            **_child_route_metadata(r.get("agent")),
             "status": r.get("status"),
             "running_seconds": round(time.time() - started, 1) if isinstance(started, (int, float)) else None,
             "accepting_steer": bool(r.get("accepting_steer", False)),

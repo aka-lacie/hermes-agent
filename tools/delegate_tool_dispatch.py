@@ -341,6 +341,8 @@ def _dispatched_payload(batch: _Batch, units: List[tuple[_Batch, str]]) -> dict:
     if batch.live_paths:
         payload["live_transcripts"] = list(batch.live_paths)
         payload["live_transcripts_hint"] = _BACKGROUND_NOTES["live_transcripts_hint"]
+    from tools.delegate_tool_results import _child_route_metadata
+    payload["routes"] = [{"task_index": i, **_child_route_metadata(c)} for i, _, c in batch.children]
     return payload
 
 def _units_of(batch: _Batch) -> List[_Batch]:
@@ -364,6 +366,8 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
     """Hand ONE unit to the async registry; the runner joins on that unit's children only."""
     from tools.async_delegation import dispatch_async_delegation_batch
     child_agents = [c for (_, _, c) in unit.children]
+    models = {model if isinstance(model := getattr(c, "model", None), str) else unit.creds.get("model")
+              for c in child_agents}
 
     def _interrupt():
         for c in child_agents:
@@ -373,7 +377,7 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
         # Call-wide goals: completion formatting indexes them by task_index.
         goals=[t["goal"] for t in unit.task_list], context=unit.context,
         toolsets=None,  # metadata for the completion block only; subagents inherit the parent's toolsets
-        role=unit.top_role, model=unit.creds["model"],
+        role=unit.top_role, model=next(iter(models)) if len(models) == 1 else None,
         runner=lambda: _execute_and_aggregate(unit, honor_parent_interrupt=False),
         interrupt_fn=_interrupt, delegation_id=unit_id, slot_key=slot_key,
         task_indexes=[i for (i, _, _) in unit.children] if len(unit.children) < len(unit.task_list) else None,

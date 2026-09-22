@@ -362,6 +362,51 @@ def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
         command=pinned_command, args=list(runtime.get("args") or []),
     )
 
+DIFFICULTY_LEVELS = ("easy", "medium", "hard")
+_DIFFICULTY_ROUTE_KEYS = frozenset({
+    "model", "provider", "base_url", "api_key", "api_mode", "request_overrides",
+    "command", "args", "fallback_providers", "reasoning_effort",
+})
+
+
+def _task_route_configs(tasks: list, cfg: dict) -> list:
+    """Validate the whole batch before resolving per-child routes; never mutate profile config.
+
+    Omitted difficulty keeps the usual delegation route. Explicit levels must be configured;
+    a route overlays that default, including its reasoning and fallback policy.
+    """
+    from copy import deepcopy
+    from hermes_constants import parse_reasoning_effort
+
+    routes = cfg.get("difficulty_routes") or {}
+    if not isinstance(routes, dict):
+        raise ValueError("delegation.difficulty_routes must be a mapping.")
+    selected = []
+    for i, task in enumerate(tasks):
+        difficulty = task.get("difficulty")
+        if "difficulty" in task and (
+            not isinstance(difficulty, str) or difficulty not in DIFFICULTY_LEVELS
+        ):
+            raise ValueError(f"Task {i} difficulty must be easy, medium, or hard.")
+        route = {}
+        if difficulty is not None:
+            if difficulty not in routes:
+                raise ValueError(f"Task {i} difficulty '{difficulty}' has no configured delegation.difficulty_routes entry.")
+            route = routes[difficulty]
+            if not isinstance(route, dict):
+                raise ValueError(f"delegation.difficulty_routes.{difficulty} must be a mapping.")
+            unknown = set(route) - _DIFFICULTY_ROUTE_KEYS
+            if unknown:
+                raise ValueError(f"Unsupported delegation route settings: {', '.join(sorted(unknown))}.")
+        effective = deepcopy({k: v for k, v in cfg.items() if k != "difficulty_routes"})
+        effective.update(deepcopy(route))
+        effort = route.get("reasoning_effort")
+        if effort is not None and effort != "" and parse_reasoning_effort(effort) is None:
+            raise ValueError(f"Task {i} has invalid delegation reasoning_effort: {effort!r}.")
+        selected.append(effective)
+    return selected
+
+
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     """Child credential bundle from the ``delegation`` config section. Three branches: ``base_url`` set → direct
     endpoint (``api_key`` None means inherit the parent's key, so providers keyed outside OPENAI_API_KEY work);

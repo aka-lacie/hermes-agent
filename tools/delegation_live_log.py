@@ -228,6 +228,7 @@ def create_live_transcripts(
     task_list: List[Dict[str, Any]], context: Optional[str] = None,
     delegation_id: Optional[str] = None, model: Optional[str] = None,
     provider: Optional[str] = None,
+    routes: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple[Optional[str], List[Optional[LiveTranscriptWriter]], List[str]]:
     """One pre-headered writer per task + a manifest.json; prunes stale dirs.
     Returns ``(delegation_id, writers, paths)``; on any top-level failure
@@ -243,7 +244,7 @@ def create_live_transcripts(
         paths: List[str] = [str(w.path) for w in made if w.path is not None]
         if not paths:
             return None, [None] * n, []
-        _write_manifest(deleg_id, task_list, paths, model=model, provider=provider)
+        _write_manifest(deleg_id, task_list, paths, model=model, provider=provider, routes=routes)
         return deleg_id, writers, paths
     return None, [None] * n, []
 
@@ -254,13 +255,15 @@ def _manifest_path(delegation_id: str) -> Path:
 
 def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                     paths: List[str], model: Optional[str] = None,
-                    provider: Optional[str] = None) -> None:
+                    provider: Optional[str] = None,
+                    routes: Optional[List[Dict[str, Any]]] = None) -> None:
     with _best_effort("manifest write"):
         _dump_json(_manifest_path(delegation_id), {
             "delegation_id": delegation_id, "started": time.strftime(_TIME_FMT),
             "task_count": len(task_list), "model": model, "provider": provider,
             "tasks": [{
                 "index": i,
+                **(routes[i] if routes and i < len(routes) else {}),
                 # Same mounted dir as the .log files, so the goal needs the same redaction.
                 "goal": _redact(str(t.get("goal", ""))[:500]),
                 "log": paths[i] if i < len(paths) else None,
@@ -280,6 +283,9 @@ def update_manifest_statuses(delegation_id: Optional[str],
             r = by_index.get(task.get("index"))
             if r is not None:
                 task["status"] = r.get("status", task.get("status"))
+                for key in ("difficulty", "requested_model", "requested_provider", "model", "provider", "reasoning_effort"):
+                    if key in r:
+                        task[key] = r[key]
                 if r.get("exit_reason"):
                     task["exit_reason"] = r["exit_reason"]
         manifest["completed"] = time.strftime(_TIME_FMT)
