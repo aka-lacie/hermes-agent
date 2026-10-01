@@ -1,6 +1,6 @@
 """Personal runtime integration remains safe through updater decomposition."""
 
-from types import SimpleNamespace
+from tests.hermes_cli.test_update_target_identity import update_tree  # noqa: F401 — shared fixture
 from unittest.mock import patch
 
 import pytest
@@ -17,22 +17,6 @@ def test_integration_guard_never_switches_even_when_fully_merged():
     git.assert_not_called()
 
 
-def test_post_swap_integration_tail_never_syncs_main():
-    class ReachedDependencySync(Exception):
-        pass
-
-    with patch.object(update_cmd._m(), "_sync_with_upstream_if_needed") as sync, \
-         patch.object(update_cmd, "_sync_python_dependencies_after_pull", side_effect=ReachedDependencySync), \
-         pytest.raises(ReachedDependencySync):
-        update_cmd._finish_pulled_update(
-            ["git"], "main", "before", SimpleNamespace(active_lazy_features=[], active_tool_dependencies={}),
-            gateway_mode=False, is_fork=True, desktop_dir=None,
-            had_desktop_app_before_update=False, pre_update_snapshot_id=None,
-            _pre_update_plan=None, _windows_gateway_resume=None,
-            remote="origin", in_place_update=True)
-    sync.assert_not_called()
-
-
 @pytest.mark.parametrize("current", ["main", "HEAD", "feat/example"])
 def test_integration_guard_refuses_wrong_checkout(current):
     with patch.object(update_cmd, "_git_run") as git, \
@@ -46,24 +30,34 @@ def test_integration_guard_refuses_wrong_checkout(current):
     git.assert_not_called()
 
 
-def test_conflicted_integration_merge_aborts_without_reset(capsys):
-    calls = []
+@pytest.mark.parametrize("conflict", [False, True])
+def test_configured_integration_uses_real_refs_and_new_completion(update_tree, monkeypatch, conflict):
+    from hermes_cli import main as cli_main
+    from tests.hermes_cli.test_update_target_identity import git
 
-    def git(_cmd, args, **kwargs):
-        calls.append(args)
-        return SimpleNamespace(
-            returncode=1 if args[:2] == ["merge", "--no-edit"] else 0,
-            stdout="cron/jobs.py\n" if args[0] == "diff" else "", stderr="conflict",
-        )
-
-    with patch.object(update_cmd, "_git_run", side_effect=git), \
-         patch.object(update_cmd, "_capture_head_sha", return_value="before"), \
-         pytest.raises(SystemExit):
-        update_cmd._pull_updates(
-            ["git"], "main", None, prompt_for_restore=False, gw_input_fn=None,
-            discard_local_changes=False, keep_stash=False, remote="source",
-            in_place_update=True,
-        )
-    assert calls == [["merge", "--no-edit", "source/main"],
-                     ["diff", "--name-only", "--diff-filter=U"], ["merge", "--abort"]]
-    assert "cron/jobs.py" in capsys.readouterr().out
+    t = update_tree
+    git(t.clone, "checkout", "-qb", "dev2")
+    personal = t.clone / ("content.txt" if conflict else "personal.txt")
+    personal.write_text("personal behavior\n")
+    git(t.clone, "add", personal.name)
+    git(t.clone, "-c", "commit.gpgsign=false", "commit", "-qm", "personal")
+    before = git(t.clone, "rev-parse", "HEAD")
+    git(t.clone, "remote", "rename", "origin", "source")
+    monkeypatch.setattr("hermes_cli.main_install_repair._configured_update_target_value",
+                        lambda key, default: {"integration_branch": "dev2", "remote": "source",
+                                              "branch": "main"}.get(key, default))
+    # A default stable channel must not detach an explicitly configured integration lane.
+    if conflict:
+        with pytest.raises(SystemExit) as exc:
+            cli_main.cmd_update(t.args)
+        assert exc.value.code == 1
+        assert git(t.clone, "rev-parse", "HEAD") == before
+        assert not (t.clone / ".git" / "MERGE_HEAD").exists()
+        assert not t.requests
+    else:
+        cli_main.cmd_update(t.args)
+        git(t.clone, "merge-base", "--is-ancestor", before, "HEAD")
+        git(t.clone, "merge-base", "--is-ancestor", t.newer, "HEAD")
+        assert t.requests[-1]["expected_sha"] == git(t.clone, "rev-parse", "HEAD")
+        assert personal.read_text() == "personal behavior\n"
+    assert git(t.clone, "branch", "--show-current") == "dev2"

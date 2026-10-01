@@ -92,6 +92,7 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `delivery_mode` | No | `direct` (default) posts the result as-is. `internal_turn` continues the destination's current agent conversation with the result, adding a destination-agent turn. Only live messaging targets support internal turns; `log` and `github_comment` do not. For `cron_job` routes, configure delivery on the job itself; route-level `internal_turn` is rejected. |
 | `cron_job` | No | Fire an existing cron job (by ID or name) on each event instead of starting a fresh webhook agent session. The rendered `prompt` becomes transient per-run context; the job's own prompt, skills, model, and delivery settings apply. Mutually exclusive with `deliver_only`. See [Event-Triggered Cron Jobs](#event-triggered-cron-jobs). |
 | `coalesce` | No | Debounce rapid distinct events on the same logical entity into one agent run. Block with a required `key` (payload field or template identifying the entity, e.g. `pull_request.number`), optional `window_seconds` (quiet window, default 30) and `max_wait_seconds` (dispatch cap, default 300). See [Event Coalescing](#event-coalescing). Mutually exclusive with `deliver_only` and `cron_job`. |
+| `mirror_to_session` | No | Default `false`. When `true`, after a successful delivery to a chat platform the delivered message is also written into that chat's session transcript (as a labelled user turn, the same way continuable cron briefs are), so when you reply in that chat the agent knows what it just sent you. See [Replying to a delivery](#replying-to-a-delivery). |
 
 ### Full example
 
@@ -379,6 +380,14 @@ Internal turns require a live gateway messaging adapter. They are rejected for
 and cannot be combined with `deliver_only: true` because there would be no
 webhook-agent completion to hand off. If the destination agent has nothing
 useful to tell the user, it can respond with `[SILENT]`.
+
+### Replying to a delivery {#replying-to-a-delivery}
+
+By default a delivery is fire-and-forget: each webhook event runs in its own session, so if you reply to the delivered message in that chat, the agent there has no record of what was sent. Set `mirror_to_session: true` on the route (or pass `--mirror-to-session` to `hermes webhook subscribe`) and the delivered text is also appended to the target chat's session as `[Webhook delivery: <route>]` followed by the message, so a follow-up ("so he's out?") has the context.
+
+- The mirror is best-effort: it never fails the delivery, and it is skipped when the chat has no gateway session yet (nobody has talked to the agent there).
+- On a `/p/<profile>/` route it is written into that profile's session for the chat, never another profile's.
+- The mirrored text enters the chat's history as if you had sent it. On a [`deliver_only`](#direct-delivery-mode) route it is the raw rendered payload, so only enable it for sources whose content you trust to sit in your conversation (your own services, not a public issue tracker).
 
 ---
 

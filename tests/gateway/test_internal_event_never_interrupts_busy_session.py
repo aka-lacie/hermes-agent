@@ -142,7 +142,7 @@ async def test_non_internal_event_still_interrupts() -> None:
 
     from unittest.mock import patch
 
-    with patch("gateway.run.merge_pending_message_event"):
+    with patch("gateway.platforms.base.merge_pending_message_event"):
         handled = await runner._handle_active_session_busy_message(event, sk)
 
     assert handled is True

@@ -101,7 +101,7 @@ async def test_real_wiring_resumes_user_stream_but_not_task_diagnostic(monkeypat
     ("NO_REPLY", True, None),
 ])
 async def test_user_answer_before_successor_obeys_user_silence_policy(monkeypatch, tmp_path, final, visible, expected):
-    from gateway.run_turn import _UNEXPECTED_SILENCE_REPLY
+    from gateway.run_turn import _unexpected_silence_reply
 
     monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
     gateway = GatewayRunner(config=GatewayConfig())
@@ -116,7 +116,7 @@ async def test_user_answer_before_successor_obeys_user_silence_policy(monkeypatc
     else:
         gateway._deliver_queued_first_response.assert_awaited_once()
         assert gateway._deliver_queued_first_response.call_args.args[0] == (
-            _UNEXPECTED_SILENCE_REPLY if expected == "warning" else expected)
+            _unexpected_silence_reply() if expected == "warning" else expected)
 
 
 @pytest.mark.asyncio

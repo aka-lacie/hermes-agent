@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from contextvars import copy_context
 from unittest.mock import patch
 
-import yaml
+import hermes_yaml as yaml
 
 
 @contextmanager

@@ -5,7 +5,7 @@ from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 
 def test_profile_routes_through_registry_and_real_children(tmp_path, monkeypatch):
