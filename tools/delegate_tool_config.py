@@ -425,6 +425,8 @@ def _task_route_configs(tasks: list, cfg: dict) -> list:
 
     Omitted difficulty keeps the usual delegation route. Explicit levels must be configured;
     a route overlays that default, including its reasoning and fallback policy.
+    Task model/provider pins win last. An explicit provider selects a fresh connection
+    bundle, never the endpoint or request settings belonging to the selected route.
     """
     from copy import deepcopy
     from hermes_constants import parse_reasoning_effort
@@ -434,6 +436,18 @@ def _task_route_configs(tasks: list, cfg: dict) -> list:
         raise ValueError("delegation.difficulty_routes must be a mapping.")
     selected = []
     for i, task in enumerate(tasks):
+        pins = {}
+        for key in ("model", "provider"):
+            if key in task:
+                value = task[key]
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"Task {i} {key} must be a non-empty string.")
+                pins[key] = value.strip()
+        if "provider" in pins:
+            if "model" not in pins:
+                raise ValueError(f"Task {i} provider requires an explicit model.")
+            if pins["provider"].lower() == "auto":
+                raise ValueError(f"Task {i} provider must name a specific provider, not auto.")
         difficulty = task.get("difficulty")
         if "difficulty" in task and (
             not isinstance(difficulty, str) or difficulty not in DIFFICULTY_LEVELS
@@ -451,6 +465,11 @@ def _task_route_configs(tasks: list, cfg: dict) -> list:
                 raise ValueError(f"Unsupported delegation route settings: {', '.join(sorted(unknown))}.")
         effective = deepcopy({k: v for k, v in cfg.items() if k != "difficulty_routes"})
         effective.update(deepcopy(route))
+        if "provider" in pins:
+            for key in ("base_url", "api_key", "api_mode", "request_overrides", "command", "args",
+                        "fallback_providers"):
+                effective.pop(key, None)
+        effective.update(pins)
         effort = route.get("reasoning_effort")
         if effort is not None and effort != "" and parse_reasoning_effort(effort) is None:
             raise ValueError(f"Task {i} has invalid delegation reasoning_effort: {effort!r}.")

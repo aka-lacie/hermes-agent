@@ -342,6 +342,30 @@ Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then
 
 The pin is the default for every child. Configure difficulty routes below to let each task select a different model and reasoning effort without changing that default.
 
+### Per-task model and provider overrides
+
+Each `tasks[]` item accepts optional `model` and `provider` strings. Explicit task
+values take precedence over difficulty routes, delegation defaults, and parent
+inheritance. A `model` alone keeps the selected route's provider and connection;
+Hermes does not guess a provider from the model name.
+
+```json
+{"tasks": [
+  {"goal": "Check the supplied calculations", "model": "your-fast-model"},
+  {"goal": "Review the proposed architecture", "model": "your-review-model", "provider": "your-configured-provider"}
+]}
+```
+
+An explicit `provider` requires an explicit `model` and selects that provider's
+credentials, endpoint, transport, and request settings from the current profile.
+It clears the selected route's connection settings and fallback chain; reasoning
+effort still follows the selected difficulty/defaults. Provider `auto`, empty values,
+and unresolvable providers return an error before any child is constructed. Model
+availability is checked by the provider when the child runs.
+
+Start a new session after upgrading so the new fields appear in the tool schema
+without changing an existing conversation's cached prefix.
+
 ### Per-task difficulty routing
 
 Configure `delegation.difficulty_routes` to expose an optional `difficulty` field on each

@@ -619,7 +619,7 @@ _DESCRIPTION_HEAD = (
     "the parent applies the transition.\n"
 )
 _DESCRIPTION_TAIL = (
-    "- Models follow task difficulty, then delegation.provider / delegation.model, then parent inheritance."
+    "- Explicit task model/provider overrides win over difficulty, delegation defaults, and parent inheritance."
 )
 
 def _build_tasks_param_description() -> str:
@@ -698,6 +698,14 @@ DELEGATE_TASK_SCHEMA = {
                 "items": {
                     "type": "object",
                     "properties": {
+                        "model": _p(
+                            "string", "Optional model override, ahead of difficulty/defaults. Keeps the selected "
+                            "provider unless provider is also supplied; no provider inference.",
+                        ),
+                        "provider": _p(
+                            "string", "Optional configured provider override; requires model. Resolves its own "
+                            "credentials and transport from this profile. Omit to keep the selected provider.",
+                        ),
                         "goal": _p(
                             "string",
                             "What this subagent should accomplish. Be specific; inherited conversation is "
