@@ -1996,6 +1996,9 @@ DEFAULT_CONFIG = {
             # delegate_task children receive all permitted local schemas immediately.
             # Remote connector tools still require their discovery bridge.
             "eager_subagents": False,
+            # Exact tool names to keep eager only for delegated children while other tools
+            # retain normal deferral. Applies when eager_subagents is false; grants no tools.
+            "eager_subagent_tools": [],
             # Listing budget as % of the model's context length; effective budget = min(this % of
             # context, listing_max_tokens). Range 0..100.
             "threshold_pct": 5,

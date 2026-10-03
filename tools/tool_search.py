@@ -52,6 +52,8 @@ class ToolSearchConfig:
     defer_tools: Optional[frozenset] = None
     # Inline the child's permitted local tools; remote connectors still use the bridge.
     eager_subagents: bool = False
+    # Per-child exceptions to normal deferral, without making every MCP/plugin tool eager.
+    eager_subagent_tools: frozenset[str] = frozenset()
 
     @property
     def effective_defer_tools(self) -> frozenset:
@@ -73,9 +75,16 @@ class ToolSearchConfig:
                 "(e.g. [todo_list, computer_use]; [] keeps every tool eager) - "
                 "using the curated default set.", defer_raw)
             defer_raw = None
+        eager_raw = raw.get("eager_subagent_tools", [])
+        if not isinstance(eager_raw, (list, tuple, set)):
+            logger.warning(
+                "tools.tool_search.eager_subagent_tools is %r, expected a YAML list of "
+                "tool names (e.g. [terminal, read_file]) - using no eager exceptions.", eager_raw)
+            eager_raw = []
         return cls(
             enabled=_tri_state(raw.get("enabled", "auto")),
             eager_subagents=_tri_state(raw.get("eager_subagents", False)) == "on",
+            eager_subagent_tools=frozenset(n.strip() for n in eager_raw if isinstance(n, str) and n.strip()),
             threshold_pct=max(0.0, min(100.0, _safe_float(raw.get("threshold_pct"), 5.0))),
             search_default_limit=_clamped_int(
                 raw.get("search_default_limit"), 5, 1, max_search_limit),
@@ -171,6 +180,7 @@ def _tool_def_names(tool_defs: Iterable[Dict[str, Any]]) -> Iterable[str]:
 
 
 def classify_tools(tool_defs: List[Dict[str, Any]], defer_tools: Optional[frozenset] = None,
+                   *, eager_tools: frozenset[str] = frozenset(),
                    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split a tool-defs list into (visible, deferrable); bridge tools are dropped (re-added
     after classification)."""
@@ -178,7 +188,8 @@ def classify_tools(tool_defs: List[Dict[str, Any]], defer_tools: Optional[frozen
     deferrable: List[Dict[str, Any]] = []
     for td, name in zip(tool_defs, _tool_def_names(tool_defs)):
         if name not in BRIDGE_TOOL_NAMES:
-            (deferrable if is_deferrable_tool_name(name, defer_tools) else visible).append(td)
+            (deferrable if name not in eager_tools and is_deferrable_tool_name(name, defer_tools)
+             else visible).append(td)
     return visible, deferrable
 
 
@@ -359,10 +370,13 @@ def assemble_tool_defs(tool_defs: List[Dict[str, Any]], *, context_length: Optio
     incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
                 if name not in BRIDGE_TOOL_NAMES]
     from agent.delegation_context import is_delegated_child_context
-    if config.eager_subagents and is_delegated_child_context():
+    is_child = is_delegated_child_context()
+    if config.eager_subagents and is_child:
         visible, deferrable = incoming, []
     else:
-        visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
+        visible, deferrable = classify_tools(
+            incoming, config.effective_defer_tools,
+            eager_tools=config.eager_subagent_tools if is_child else frozenset())
     connections_granted = connections_in_scope(incoming)
     if not deferrable:
         if should_activate(config, 0, context_length, connections_granted=connections_granted):
