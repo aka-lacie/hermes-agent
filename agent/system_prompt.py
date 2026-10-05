@@ -586,7 +586,7 @@ def _guidance_parts(agent: Any) -> List[str]:
             parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
     if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
         from agent.prompt_builder import execution_guidance_text
-        parts.append(execution_guidance_text(subagent=_instruction_role(agent) == "subagent"))
+        parts.append(execution_guidance_text(agent.valid_tool_names, subagent=_instruction_role(agent) == "subagent"))
     # delegate_task background delivery is intentionally between turns. Put this after the generic persistence
     # blocks so their "keep working" rule cannot turn the required yield into no-op/polling activity.
     if "delegate_task" in agent.valid_tool_names:

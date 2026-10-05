@@ -18,9 +18,8 @@ def test_role_files_follow_profile_and_capabilities_without_rewriting_cache(tmp_
     from tools.delegate_tool_results import _build_child_preserving_parent_tools
     from tools.delegation_output_schema import append_output_contract
     from agent.prompt_builder import (
-        OPENAI_MODEL_EXECUTION_GUIDANCE, SUBAGENT_TASK_COMPLETION_GUIDANCE, TASK_COMPLETION_GUIDANCE,
+        SUBAGENT_TASK_COMPLETION_GUIDANCE, TASK_COMPLETION_GUIDANCE,
         TOOL_USE_ENFORCEMENT_GUIDANCE,
-        execution_guidance_text,
     )
 
     homes = [tmp_path / "profile-a", tmp_path / "profile-b"]
@@ -90,12 +89,15 @@ def test_role_files_follow_profile_and_capabilities_without_rewriting_cache(tmp_
                             assert ("Orchestrator Role" in child_prompt) == can_delegate
                             assert ("cannot spawn further subagents" in child_prompt) != can_delegate
                             assert TASK_COMPLETION_GUIDANCE in parent_prompt
-                            assert OPENAI_MODEL_EXECUTION_GUIDANCE in parent_prompt
+                            assert "does the output satisfy every stated requirement?" in parent_prompt
                             assert TOOL_USE_ENFORCEMENT_GUIDANCE in parent_prompt
                             assert TOOL_USE_ENFORCEMENT_GUIDANCE not in child_prompt
                             assert "deliver a final result to your parent" in child_prompt
                             assert SUBAGENT_TASK_COMPLETION_GUIDANCE in child_prompt
-                            assert execution_guidance_text(subagent=True) in child_prompt
+                            # Toolset filtering must compose with the child's scoped instructions.
+                            assert "terminal" not in child.valid_tool_names
+                            assert "Hashes, encodings, checksums → use terminal" not in child_prompt
+                            assert "Work until the delegated assignment is verified" in child_prompt
                             assert "ask the user" not in child_prompt.lower()
                             assert "ask a clarifying question" not in child_prompt.lower()
                             assert "requirements of your delegated assignment" in child_prompt

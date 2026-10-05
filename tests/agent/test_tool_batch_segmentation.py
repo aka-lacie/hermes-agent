@@ -395,7 +395,15 @@ def agent():
             skip_memory=True,
         )
         a.client = MagicMock()
-        return a
+        # These tests enter the executor directly, bypassing the conversation wrapper
+        # that normally opens steering admission for an owned turn.
+        from agent.steering import begin_input_turn, finish_input_turn
+        begin_input_turn(a)
+        try:
+            yield a
+        finally:
+            finish_input_turn(a)
+            a.close()
 
 
 class TestSegmentedDispatchIntegration:

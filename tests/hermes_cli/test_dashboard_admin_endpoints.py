@@ -390,6 +390,12 @@ class TestWebhookEndpoints:
         subs = self.client.get("/api/webhooks").json()["subscriptions"]
         assert subs[0]["script"] == "todoist_filter.py"
 
+        # A re-POST is a general update, not an enable: an explicit disable must survive it.
+        assert self.client.put("/api/webhooks/todoist/enabled", json={"enabled": False}).status_code == 200
+        assert self.client.post("/api/webhooks", json={"name": "todoist", "deliver": "log"}).status_code == 200
+        from hermes_cli.webhook import _load_subscriptions
+        assert _load_subscriptions()["todoist"]["enabled"] is False
+
     @pytest.mark.asyncio
     async def test_create_webhook_can_route_completion_through_main_agent(self):
         from hermes_cli.config import load_config, save_config
