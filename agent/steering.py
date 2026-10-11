@@ -57,6 +57,8 @@ def enqueue_inputs(agent, events: list[dict]) -> bool:
         if inbox is None:
             inbox = agent._pending_input_events = []
         inbox.extend(deepcopy(events))
+        if any(event["kind"] == "user" for event in events):
+            agent._turn_user_intervened = True
     return True
 
 
