@@ -11,7 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 
-def _child_route_metadata(child: Any) -> Dict[str, Any]:
+def _child_route_metadata(child: Any) -> dict[str, Any]:
     """Requested route alongside the current runtime (which may have fallen back); no credentials."""
     fields = {
         "difficulty": "_delegate_difficulty", "requested_model": "_delegate_requested_model",

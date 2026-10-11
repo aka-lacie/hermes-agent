@@ -75,7 +75,7 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
         *,
         target: Any,
         text: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> bool:
         """Schedule a synthetic main-agent turn on the live gateway loop."""
         from gateway.run import _profile_runtime_scope
@@ -192,7 +192,7 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
                 )
                 self._background_tasks.add(task)
 
-                def _done(completed: "asyncio.Task") -> None:
+                def _done(completed: asyncio.Task) -> None:
                     self._background_tasks.discard(completed)
                     if completed.cancelled():
                         return

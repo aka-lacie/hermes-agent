@@ -1,6 +1,6 @@
 """Personal runtime integration remains safe through updater decomposition."""
 
-from tests.hermes_cli.test_update_target_identity import update_tree  # noqa: F401 — shared fixture
+from tests.hermes_cli.test_update_target_identity import update_tree
 from unittest.mock import patch
 
 import pytest

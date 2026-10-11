@@ -236,7 +236,7 @@ def create_live_transcripts(
     task_list: list[dict[str, Any]], context: Optional[str] = None,
     delegation_id: Optional[str] = None, model: Optional[str] = None,
     provider: Optional[str] = None,
-    routes: Optional[List[Dict[str, Any]]] = None,
+    routes: Optional[list[dict[str, Any]]] = None,
     home: Optional[Path] = None,
 ) -> tuple[Optional[str], list[Optional[LiveTranscriptWriter]], list[str]]:
     """One pre-headered writer per task + a manifest.json; prunes stale dirs.
