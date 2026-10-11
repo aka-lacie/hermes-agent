@@ -601,42 +601,17 @@ A delegation the stall monitor has flagged shows as
 children show their quiet time so you can tell "slow" from "stuck" at a
 glance.
 
-## Continuing a completed child (opt-in)
+## Continuing a completed child through a plugin
 
-Set `delegation.resumable_sessions: true` in the profile to retain delegated
-conversations for follow-up. Completion still releases the child's agent, clients,
-and tool resources. Only its conversation and routing metadata remain on disk.
-This applies to new delegations while enabled; earlier one-off children are not
-retroactively enrolled.
+The host exposes retained conversations through `ctx.subagent_lifecycle` and a
+profile-scoped delegation extension. A plugin supplies the model-facing continuation
+commands, discovery/search presentation, assignment formatting, and retention/review
+policy. Native delegation remains unchanged without an enabled extension.
 
-```json
-{"tasks": [{"goal": "Review this PR", "title": "PR review", "fork_context": true}]}
-{"action": "resume", "session_id": "<child session ID>", "message": "I fixed the race; review the updated diff."}
-{"action": "list"}
-{"action": "list", "query": "PR review"}
-{"action": "observe", "session_id": "<child session ID>"}
-{"action": "close", "session_id": "<child session ID>"}
-```
-
-Spawn and completion return stable child session IDs. `list` includes running and
-idle children, ordered by last activity, with creation/activity timestamps, title,
-latest assignment, model and provider. Its default window is 20 entries; `query`
-searches all retained children owned by this conversation, including closed ones.
-`observe` returns a bounded transcript. Neither operation wakes a child or renews
-its activity. An omitted title uses a shortened first assignment.
-
-`resume` accepts an idle child's next assignment, optionally with a `model` override
-within its saved provider. It restores the child's own history and refreshes its
-current tools, skills, credentials and child instructions. Later parent history
-is not copied automatically; include relevant changes in the new assignment.
-Use `steer` or `stop` with `session_id` for a running child; a busy resume is refused.
-`close` retires an idle child permanently while retaining its transcript.
-
-There is no idle TTL or cap on retained conversations. Normal session deletion
-still applies. Process restart cannot continue unfinished execution, but a parent
-can start another turn in the retained conversation. Automatic child review may
-update skills when the existing review threshold is met; it cannot write memory.
-An eligible review is cancelled when the next assignment activates that child.
+See [the plugin lifecycle API](../../developer-guide/subagent-lifecycle-api.md#retained-conversations-opt-in)
+for the host contract. Conversation IDs and history survive plugin reload or removal;
+normal transcript deletion still applies. This is conversation continuation, not
+recovery or replay of an interrupted run.
 
 ## Steering a Running Subagent
 

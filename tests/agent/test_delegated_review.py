@@ -58,6 +58,7 @@ def _child(tmp_path):
     child._delegate_session_id = "stable-child"
     child._delegate_depth = 1
     child._delegate_resumable = True
+    child._delegate_review_skills = True
     child._session_db = SimpleNamespace(db_path=tmp_path / "state.db")
     child._active_children = []
     child._active_children_lock = threading.Lock()

@@ -422,7 +422,7 @@ def _build_children(
     top_role: str, max_iterations: int, parent_agent, routing_cfg: dict[str, Any],
     live_deleg_id: Optional[str], live_writers: list, task_images: Optional[list[Optional[list[str]]]] = None,
     task_routes: Optional[list] = None,
-    resume: Optional[dict] = None,
+    resume: Optional[dict] = None, retain_sessions: bool = False,
 ) -> tuple[list[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe);
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
@@ -495,7 +495,8 @@ def _build_children(
                 _ident_ref["delegation_id"] = live_deleg_id
         try:
             from tools.delegate_sessions import bind_child
-            bind_child(parent_agent, child, t, resume, routing_cfg=child_cfg)
+            bind_child(parent_agent, child, t, resume, routing_cfg=child_cfg,
+                       retain=retain_sessions)
         except Exception as exc:
             logger.warning("Subagent session reservation failed", exc_info=True)
             from tools.delegate_tool_child_run import _close_child, _detach_child
@@ -535,6 +536,7 @@ def delegate_task(
     credentials_cfg: Optional[dict[str, Any]] = None,
     session_id: Optional[str] = None, model: Optional[str] = None, query: Optional[str] = None,
     limit: int = 20, _resume: Optional[dict] = None,
+    _retain_sessions: bool = False, _extension_request: Optional[dict] = None,
 ) -> str:
     """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control running ones. ``action``
     list/steer/stop run synchronously and bypass the pause gate, depth limit and async dispatch. ``role`` is legacy
@@ -544,12 +546,13 @@ def delegate_task(
         return tool_error("delegate_task requires a parent agent context.")
 
     normalized_action = (action or "").strip().lower()
-    from tools.delegate_sessions import control as session_control, enabled as sessions_enabled
-    if sessions_enabled() and normalized_action in {"resume", "list", "observe", "close", "steer", "stop"}:
-        # Legacy live IDs remain accepted for integrations; the model sees stable session IDs.
-        if normalized_action not in {"steer", "stop"} or session_id:
-            return session_control(normalized_action, parent_agent, session_id=session_id,
-                                   message=message, model=model, query=query, limit=limit, background=background)
+    from agent.subagent_extension import dispatch_extension
+    result = dispatch_extension(normalized_action, parent_agent, _extension_request if _extension_request is not None else {
+        "session_id": session_id, "subagent_id": subagent_id, "message": message, "model": model,
+        "query": query, "limit": limit, "background": background,
+    })
+    if result is not None:
+        return result
     if normalized_action in _CONTROL_ACTIONS:
         return _handle_control_action(normalized_action, subagent_id, message, parent_agent)
     if normalized_action and normalized_action != "spawn":
@@ -644,7 +647,7 @@ def delegate_task(
         task_list, task_schemas, creds, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
         routing_cfg=routing_cfg, live_deleg_id=live_deleg_id, live_writers=live_writers, task_images=task_images,
         task_routes=task_routes,
-        resume=_resume,
+        resume=_resume, retain_sessions=_retain_sessions,
     )
     if err:
         return tool_error(err)
@@ -684,14 +687,6 @@ def _build_top_level_description(*, independent_completions=None) -> str:
         if independent_completions else "one message per call"
     )
     description = _DESCRIPTION_HEAD.format(delivery=delivery) + restrictions_rule + _DESCRIPTION_TAIL
-    from tools.delegate_sessions import enabled as sessions_enabled
-    if sessions_enabled():
-        description += (
-            "\nCompleted children retain their conversations on disk. Resume by session_id with a new assignment; "
-            "tools and skills refresh at activation. list shows recent running/idle children ordered by activity; "
-            "query searches older retained sessions. observe reads without waking; close retires an idle child. "
-            "There is no idle expiry. Supply changed context in your follow-up assignment."
-        )
     return description
 
 _DESCRIPTION_HEAD = (
@@ -771,11 +766,11 @@ def _build_dynamic_schema_overrides() -> dict:
             k: v for k, v in tasks["items"]["properties"].items() if k != "group"
         }}
 
-    from tools.delegate_sessions import extend_schema
-    return {
+    from agent.subagent_extension import extend_delegation_schema
+    return extend_delegation_schema({
         "description": _build_top_level_description(independent_completions=independent_completions),
-        "parameters": extend_schema(overrides_params),
-    }
+        "parameters": overrides_params,
+    })
 
 def _p(type_: str, description: str, **extra) -> dict:
     return {"type": type_, **extra, "description": description}
@@ -908,6 +903,7 @@ registry.register(
         images=args.get("images"), action=args.get("action"), subagent_id=args.get("subagent_id"), message=args.get("message"),
         parent_agent=kw.get("parent_agent"),
         session_id=args.get("session_id"), model=args.get("model"), query=args.get("query"), limit=args.get("limit", 20),
+        _extension_request=args,
     ),
     check_fn=check_delegate_requirements,
     emoji="🔀",
