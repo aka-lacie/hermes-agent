@@ -308,7 +308,7 @@ def test_a_torn_branch_switch_leaves_the_autostash_parked(checkout, monkeypatch,
     restored = []
     monkeypatch.setattr(update_cmd._m(), "_restore_stashed_changes", lambda *a, **k: restored.append(a))
 
-    def torn_switch(git_cmd, branch, target_ref, *, pre, stash):
+    def torn_switch(git_cmd, branch, target_ref, *, pre, stash, remote="origin"):
         interrupted_pull_marker(root).write_text(f"pid=1\npre={pre}\ntarget={pre}\nstash={stash}\n",
                                                  encoding="utf-8")
         return subprocess.CompletedProcess(["checkout", branch], 1, "", "error: unable to write file cli.py")
