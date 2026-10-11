@@ -152,8 +152,12 @@ def test_failed_admission_releases_retained_children(harness, monkeypatch, failu
             raise RuntimeError("credential lease unavailable")
         monkeypatch.setattr(tool, "_lease_child_credential", fail_start)
         tasks = [{"goal": "Start a retained assignment"}]
-    result = json.loads(tool.delegate_task(tasks=tasks, parent_agent=parent))
-    assert result.get("error") or result["results"][0]["status"] == "error", result
+    if failure_stage == "construction":
+        with pytest.raises(RuntimeError, match="second construction failed"):
+            tool.delegate_task(tasks=tasks, parent_agent=parent)
+    else:
+        result = json.loads(tool.delegate_task(tasks=tasks, parent_agent=parent))
+        assert result.get("error") or result["results"][0]["status"] == "error", result
     roster = json.loads(tool.delegate_task(action="list", parent_agent=parent))
     assert roster["subagents"]
     assert all(row["status"] == "idle" for row in roster["subagents"])

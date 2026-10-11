@@ -466,7 +466,9 @@ def _build_children(
             for _, _, built in children:
                 _detach_child(parent_agent, built)
                 _close_child(built, "Could not close child after route construction failed")
-            return [], str(exc)
+            if isinstance(exc, ValueError):
+                return [], str(exc)
+            raise
         if t.get("fork_context", True):
             attach_fork_history(child, history)
         child._delegate_difficulty = t.get("difficulty") or "default"
