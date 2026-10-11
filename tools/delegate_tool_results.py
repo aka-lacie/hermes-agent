@@ -19,6 +19,9 @@ def _child_route_metadata(child: Any) -> dict[str, Any]:
     }
     result = {key: value for key, attr in fields.items()
               if isinstance(value := getattr(child, attr, None), str)}
+    session_id = getattr(child, "_delegate_session_id", None)
+    if isinstance(session_id, str):
+        result["session_id"] = session_id
     reasoning = getattr(child, "reasoning_config", None)
     if isinstance(reasoning, dict):
         result["reasoning_effort"] = reasoning.get("effort") if reasoning.get("enabled", True) else False

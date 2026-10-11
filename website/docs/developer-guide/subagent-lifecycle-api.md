@@ -74,3 +74,27 @@ parent-broadening toolsets are rejected, and per-tool blocks, working-directory
 overrides, and per-launch timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
+
+## Retained conversations (opt-in)
+
+With `delegation.resumable_sessions: true`, the same service also offers
+`launch_session(goal=..., context=None, title=None, fork_context=True,
+model=None, provider=None, background=False)`,
+`resume_session(session_id, message, model=None, background=False)`,
+`list_sessions(query=None, limit=20)`, `observe_session(session_id, limit=20)`,
+and `close_session(session_id)`. Optional arguments are keyword-only. These return
+normal delegation result dictionaries; refusals raise `SubagentLifecycleError`.
+Background execution still requires a host capable of delivering later results.
+
+Conversation methods use stable session IDs stored in the parent's profile
+database. The existing immutable run handles and their reconnect/retention
+contract are unchanged. Use `launch_session` when future continuation is needed.
+The parent conversation owns the child across reconstruction and compression;
+another conversation cannot adopt it. Each accepted activation has exclusive
+admission and uses the normal transcript turn lease.
+
+Idle children have no AIAgent instance and no automatic expiry. Explicit close
+retires them without deleting history; normal session deletion still applies.
+Process loss ends the active run without replaying it; the saved conversation can
+be continued after the recorded process is proven dead. This is not durable
+execution or crash recovery.
