@@ -40,7 +40,9 @@ def _resolve_skill_package(name):
     error, directory, skill_md = skills._locate_skill(name, category_name, roots)
     if error is not None or directory is None:
         _unavailable(f"{name!r} is not a visible unambiguous directory skill")
-    frontmatter = skills._safe_frontmatter(content=skills._read_skill_text(skill_md))
+    # Metadata lookup must not consume the renderer's read/mark boundary: review
+    # freshness records the exact bytes subsequently returned by skill_view.
+    frontmatter = skills._safe_frontmatter(path=skill_md)
     relative = skills._owned_relative(directory, skill_md, [p for _, p in roots])
     declared = frontmatter.get("name", directory.name)
     if skills._is_skill_disabled(declared, relative) and (skills._is_skill_disabled(declared) or any(
@@ -62,7 +64,7 @@ def _resolve_plugin(name, record):
         _unavailable(f"Skill {name!r} no longer exists; reload its plugin")
     if skills._is_skill_disabled(name):
         _unavailable(f"Skill {name!r} is disabled")
-    frontmatter = skills._safe_frontmatter(content=skills._read_skill_text(path))
+    frontmatter = skills._safe_frontmatter(path=path)
     if not skills.skill_matches_platform(frontmatter):
         _unavailable(f"Skill {name!r} is not supported on this platform")
     return {"name": name, "path": path.parent, "read_only": True,
