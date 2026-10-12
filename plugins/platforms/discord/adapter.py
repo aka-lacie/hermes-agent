@@ -6418,7 +6418,53 @@ def _define_discord_view_classes() -> None:
             self._disable_all()
             await self._expire_embed(t("platform.discord.prompt.expired_footer"))
 
-    ExecApprovalView = build_exec_approval_view(discord, _HermesView, unauthorized=_unauthorized)
+    _RetiringExecApprovalView = build_exec_approval_view(discord, _HermesView, unauthorized=_unauthorized)
+
+    class ExecApprovalView(_RetiringExecApprovalView):
+        """Upstream's retiring card, bound to its one exact request: each button carries a
+        process-local ``ApprovalCardBinding`` token, a card without a request id stays disabled
+        (no FIFO fallback), and only a click from this card's own message with its own token
+        reaches ``resolve_gateway_approval``."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            from gateway.platforms.approval_cards import ApprovalCardBinding
+            actions = {"once": self.allow_once, "session": self.allow_session,
+                       "always": self.allow_always, "deny": self.deny}
+            self._approval_binding = ApprovalCardBinding(self.session_key, self.request_id,
+                [choice for choice, button in actions.items() if button in self.children])
+            for choice, button in actions.items():
+                if choice in self._approval_binding.ids:
+                    button.custom_id = self._approval_binding.ids[choice]
+                    button.disabled = not self._approval_binding.request_id
+
+        def _click_is_bound(self, interaction, choice: str) -> bool:
+            binding = self._approval_binding
+            custom_id = (getattr(interaction, "data", None) or {}).get("custom_id")
+            message_id = getattr(getattr(interaction, "message", None), "id", None)
+            return (bool(binding.request_id) and isinstance(custom_id, str)
+                    and binding.ids.get(choice) == custom_id
+                    and self._message is not None and message_id == self._message.id)
+
+        async def _resolve(self, interaction: discord.Interaction, choice: str, color: discord.Color, label_key: str):
+            if self._click_is_bound(interaction, choice):
+                await super()._resolve(interaction, choice, color, label_key)
+                return
+            # Not this card's exact request: never answer another pending card's request.
+            if not await self._gate(
+                interaction, resolved_msg=t("platform.discord.approval.already_resolved"),
+                unauth_msg=_unauthorized(),
+            ):
+                return
+            logger.info("Discord approval click refused: not bound to this card (session %s, choice=%s)",
+                        self.session_key, choice)
+            if self.request_id:
+                # The bound request's observer owns this card's final edit.
+                await interaction.response.send_message(
+                    t("platform.discord.approval.no_longer_pending"), ephemeral=True)
+                return
+            self.resolved = True
+            await self._finalize_embed(interaction, discord.Color.dark_grey(), t("platform.discord.approval.expired"))
 
     class SlashConfirmView(_HermesView):
         """Approve Once / Always Approve / Cancel for slash-command confirmations (``/reload-mcp``,

@@ -51,6 +51,7 @@ class ApprovalRequest:
     surface: str
     timeout_seconds: float
     allowed_choices: tuple[ApprovalChoice, ...]
+    provenance: object | None = None
 
     @classmethod
     def create(
@@ -69,9 +70,11 @@ class ApprovalRequest:
             description=description, pattern_key=pattern_key, pattern_keys=list(pattern_keys),
             surface=surface, timeout_seconds=timeout_seconds, allowed_choices=choices,
         )
-        canonical = json.dumps({**fields, "session_key": session_key}, sort_keys=True, separators=(",", ":"))
+        from agent.approval_provenance import public_provenance
+        provenance = public_provenance()
+        canonical = json.dumps({**fields, "provenance": provenance.to_dict() if provenance else None, "session_key": session_key}, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return cls(**{**fields, "pattern_keys": pattern_keys, "allowed_choices": tuple(choices)}, digest=digest)
+        return cls(**{**fields, "pattern_keys": pattern_keys, "allowed_choices": tuple(choices)}, digest=digest, provenance=provenance)
 
     def respond(self, choice: ApprovalChoice | str) -> ApprovalDecision:
         """Build the correlated response a transport should return."""

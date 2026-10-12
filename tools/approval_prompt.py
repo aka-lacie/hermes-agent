@@ -238,6 +238,7 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
         command=request.command, description=request.description, pattern_key=pattern_key,
         pattern_keys=list(pattern_keys), session_key=session_key, surface=f"transport:{name}",
         request_id=request.request_id, request_digest=request.digest,
+        provenance=request.provenance.to_dict() if request.provenance else None,
     )
     _ctx._fire_approval_hook("pre_approval_request", **hook_kwargs)
     from tools.human_input_hooks import human_input_request

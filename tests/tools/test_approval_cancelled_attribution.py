@@ -107,8 +107,13 @@ def test_session_boundary_teardown_reports_withdrawn_prompt(gateway_session):
     _assert_withdrawn(holder["result"], "the session ended before the prompt was answered")
 
 
-def test_coalesced_follower_inherits_the_leaders_cancellation(gateway_session):
+def test_coalesced_follower_inherits_the_leaders_cancellation(gateway_session, monkeypatch):
     """A follower coalesced onto an interrupted leader wakes with the leader's cause, not a deny."""
+    from types import SimpleNamespace
+    from agent.approval_provenance import capture_origin
+    from agent.tool_invocation import CallContext
+    captured = capture_origin(CallContext(SimpleNamespace(session_id="same-actor"), "task", "call"), "terminal")
+    monkeypatch.setattr("agent.approval_provenance.current_origin", lambda: captured)
     leader_thread, leader = _run_gate_until_pending()
     follower = {}
     follower_thread = threading.Thread(

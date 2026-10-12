@@ -334,6 +334,8 @@ def _build_child_agent(
     child._delegate_depth, child._delegate_role = child_depth, effective_role  # post-degrade role
     child._delegate_workspace = workspace_path
     child._delegate_forked_context = has_fork_context
+    from agent.approval_provenance import attach_child_actor
+    attach_child_actor(child, parent_agent)
     child._subagent_id, child._parent_subagent_id = subagent_id, parent_subagent_id
     _apply_child_compression_cap(child, delegation_cfg)
     # Ownership chain for action=list/steer/stop; weakref so a finished parent
