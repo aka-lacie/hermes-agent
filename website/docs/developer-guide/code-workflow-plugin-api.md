@@ -114,3 +114,44 @@ Snapshots are profile-scoped and retained for pinning and rollback; v1 does not
 automatically prune them. Restore a prior
 tree through the same validated CAS batch, within the existing 20-operation limit.
 Snapshots contain code and expectations, never frozen tool grants or credentials.
+
+
+## Package resolution and static inspection
+
+`tools.skill_packages.resolve_skill_package(name)` returns canonical `name`, source
+`path`, `read_only`, and the provider registration identity. Qualified plugin skills
+use `plugin:skill`; a workflow name splits at the final colon. Resolution applies
+current visibility and never falls back from a known unloaded plugin namespace to
+an ordinary package. Plugin packages are runnable but all `skill_manage` mutations
+reject their ownership, including aliases; there is no writable overlay.
+
+`tools.workflow_inspection.inspect_skill_package(name)` returns a content revision,
+ownership and static workflow descriptors. The registered static validator derives
+input schemas and validates examples without importing candidate modules.
+`CodeCallContext` exposes `resolve_skill_package`, `snapshot_skill`,
+`list_skill_packages` and `inspect_skill_package` for plugins. Recheck visibility
+before using `pin_package`: accepted content remains pinned across updates, while
+unloading/disablement prevents new resolution. An already executing captured module
+finishes under the cell's ordinary cancellation/deadline policy.
+
+The paired plugin supplies `workflows.list(skill=None)` and
+`workflows.describe(name)`; inspection consumes ordinary namespace-call budget but
+does not preflight tools, import candidates or launch children. `skill_view` exposes
+existing workflow descriptors and linked manifest/examples. Opt in with
+`include_workflows=true` to get an ordinary package's revision before its first
+workflow publication. Publication and schema changes still use the existing CAS.
+
+## Approval attribution
+
+The common invocation boundary captures immutable, versioned, redacted actor/tool
+provenance. Code calls add a workflow identity only after validating the host's
+registered contract. Attribution does not change grant scope or consent policy.
+Gateway adapters receive additive `_hermes_approval` metadata with the exact
+`request_id` and optional provenance; overrides need no new required arguments.
+Unknown provenance renders `Origin unavailable`.
+
+Discord buttons use process-local opaque `ha:1:<token>:<choice>` bindings to the
+exact request and message. Unbound legacy cards and cards from an earlier process
+are inert; there is no persistent mapping or database migration. Text `/approve`
+and `/approve all` retain existing queue/grant semantics. Identical commands
+coalesce only when their immutable host origin identities match.

@@ -1510,19 +1510,9 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         entry = self._plugin_skills.get(qualified_name)
         return entry["path"] if entry else None
 
-    def list_plugin_skills(self, plugin_name: str) -> list[str]:
-        """Return sorted bare names of all skills registered by *plugin_name*."""
-        prefix = f"{plugin_name}:"
-        return sorted(e["bare_name"] for qn, e in self._plugin_skills.items() if qn.startswith(prefix))
-
-    def list_plugin_skill_metadata(self) -> list[dict[str, Any]]:
-        """Return progressive-disclosure metadata for registered plugin skills."""
-        return [
-            {
-                "name": qualified, "description": str(entry.get("description", "")),
-                "category": "plugin", "frontmatter": dict(entry.get("frontmatter", {})),
-            } for qualified, entry in sorted(self._plugin_skills.items())
-        ]
+    from hermes_cli.plugins_content import (
+        is_plugin_skill_namespace, get_plugin_skill_registration, list_plugin_skills, list_plugin_skill_metadata,
+    )
 
     def list_automation_blueprints(self) -> list[Any]:
         """Plugin-registered ``AutomationBlueprint``s, sorted by key."""
