@@ -49,10 +49,18 @@ def _append_missed_steer(entry: dict[str, Any], late_steer: Optional[str]) -> No
 
 def _close_child(child: Any, log_message: str) -> None:
     """Best-effort ``child.close()`` (tool sandboxes, browser daemons, httpx clients)."""
+    if getattr(child, "_delegate_resumable", False) is True:
+        with _quiet("Could not hand off delegated skills review", exc_info=True):
+            from agent.delegated_review import finish_delegated_review
+            finish_delegated_review(child)
     with _quiet(log_message, exc_info=True):
         close = getattr(child, "close", None)
         if callable(close):
             close()
+    if getattr(child, "_delegate_resumable", False) is True:
+        with _quiet("Could not release delegated session", exc_info=True):
+            from tools.delegate_sessions import release_child
+            release_child(child)
 
 def _with_children_lock(parent_agent: Any, op: str, child: Any) -> None:
     """``parent_agent._active_children.<op>(child)`` under the parent's lock when it has one."""
@@ -384,7 +392,7 @@ def _register_child(
     })
     return _subagent_id
 
-def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_id: Optional[str]):
+def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_id: Optional[str], *, workspace=None):
     """Opt-in worktree isolation: own git worktree off the parent's HEAD (the
     child's terminal starts there). Git-only, local-backend-only; failures
     degrade silently to the shared workspace. Returns the worktree info or None."""
@@ -401,7 +409,7 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
             from tools.terminal_tool import get_session_cwd as _gsc
             _parent_cwd = _gsc(parent_task_id)
         return subagent_worktree.create_subagent_worktree(
-            _parent_cwd or _resolve_workspace_hint(parent_agent), subagent_id=subagent_id,
+            workspace or _parent_cwd or _resolve_workspace_hint(parent_agent), subagent_id=subagent_id,
         )
     return None
 
@@ -754,15 +762,18 @@ class _ChildRun:
         import uuid as _uuid
         self.child_task_id = self.subagent_id or f"subagent-{self.task_index}-{_uuid.uuid4().hex[:8]}"
         self.parent_task_id = getattr(self.parent_agent, "_current_task_id", None)
+        workspace = (getattr(self.child, "_delegate_workspace", None)
+                     if getattr(self.child, "_delegate_resumable", False) is True else None)
         # Seed the child's cwd record from the parent's: same starting directory,
         # but the child's later `cd`s stay in its own record. Per-session container
         # isolation keys containers by task_id; the child must share the PARENT's.
         with _quiet("Child cwd seed failed: %s"):
             from tools.terminal_tool import get_session_cwd, record_session_cwd, register_container_alias
-            record_session_cwd(self.child_task_id, get_session_cwd(self.parent_task_id))
+            record_session_cwd(self.child_task_id, workspace or get_session_cwd(self.parent_task_id))
             register_container_alias(self.child_task_id, self.parent_task_id)
 
-        self.worktree_info = _create_isolated_worktree(self.parent_agent, self.parent_task_id, self.subagent_id)
+        workspace_kwargs = {"workspace": workspace} if workspace else {}
+        self.worktree_info = _create_isolated_worktree(self.parent_agent, self.parent_task_id, self.subagent_id, **workspace_kwargs)
         if self.worktree_info is not None:
             with _quiet("worktree cwd seed failed: %s"):
                 from tools.terminal_tool import record_session_cwd as _rsc
@@ -855,7 +866,11 @@ class _ChildRun:
         # Resolved after seed_workspace so a multimodal goal's text part carries the worktree note too.
         _images = list(getattr(child, "_delegate_images", None) or [])
         user_message: Any = _build_child_goal_message(self.goal, _images, child) if _images else self.goal
-        history = vars(child).pop("_delegate_fork_history", None)
+        from tools.delegate_sessions import assignment_message
+        user_message = assignment_message(child, user_message)
+        history = vars(child).pop("_delegate_resume_history", None)
+        if history is None:
+            history = vars(child).pop("_delegate_fork_history", None)
         history_kwargs = {"conversation_history": history} if history else {}
 
         def _run_with_thread_capture():

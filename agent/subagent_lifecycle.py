@@ -20,6 +20,7 @@ from concurrent.futures import Future, TimeoutError
 from typing import Any, Callable, Mapping, Optional
 
 from agent.interrupt_compat import request_hard_interrupt
+from agent.subagent_sessions import SubagentSessionMethods
 
 PUBLIC_CONTRACT_VERSION = 1
 _MAX_GOAL_CHARS = 16_000
@@ -236,7 +237,7 @@ def _handle_is_well_formed(handle: Any) -> bool:
     return isinstance(handle, SubagentHandle) and all(check(getattr(handle, field)) for field, check in _HANDLE_FIELD_CHECKS)
 
 
-class SubagentLifecycleService:
+class SubagentLifecycleService(SubagentSessionMethods):
     """Stable public service behind :attr:`PluginContext.subagent_lifecycle`. Children run in-process only;
     completed results stay until process exit; ``reconnect`` reports that a serialized handle cannot
     reconnect after a restart instead of launching work again."""

@@ -74,3 +74,60 @@ parent-broadening toolsets are rejected, and per-tool blocks, working-directory
 overrides, and per-launch timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
+
+## Retained conversations (opt-in)
+
+The same host service also offers explicit retained-conversation operations:
+`launch_session(goal=..., context=None, title=None, fork_context=True,
+model=None, provider=None, background=False)`,
+`resume_session(session_id, message, model=None, background=False)`,
+`list_sessions(query=None, limit=20)`, `observe_session(session_id, limit=20)`,
+`close_session(session_id)`, `steer_session(session_id, message)`, and `stop_session(session_id)`. Optional arguments are keyword-only. These return
+normal delegation result dictionaries; refusals raise `SubagentLifecycleError`.
+Background execution still requires a host capable of delivering later results.
+
+Conversation methods use stable session IDs stored in the parent's profile
+database. The existing immutable run handles and their reconnect/retention
+contract are unchanged. Use `launch_session` when future continuation is needed.
+The parent conversation owns the child across reconstruction and compression;
+another conversation cannot adopt it. Each accepted activation has exclusive
+admission and uses the normal transcript turn lease.
+
+Idle children have no AIAgent instance and no automatic expiry. Explicit close
+retires them without deleting history; normal session deletion still applies.
+Process loss ends the active run without replaying it; the saved conversation can
+be continued after the recorded process is proven dead. This is not durable
+execution or crash recovery.
+
+
+## Delegation extensions
+
+`ctx.register_subagent_extension(extension)` accepts an instance of the public
+`agent.subagent_extension.SubagentExtension` contract. It requires the same operator
+consent as replacing a built-in tool: `plugins.entries.<plugin>.allow_tool_override: true`.
+There is one active extension per profile; normal registration leases restore its
+predecessor when unloaded. The callbacks receive plain data, never live agents:
+
+- `enabled()` determines whether the extension participates.
+- `extend_schema(schema)` receives a deep copy of the dynamic `delegate_task` schema
+  and returns its model-facing description/parameters. Existing native fields should be preserved.
+- `handle_action(action, request)` returns a JSON tool result or `None` for native
+  dispatch. The active caller is bound to `ctx.subagent_lifecycle` for the callback.
+  Spawn remains host-owned. Plugin-owned parameters travel through both native
+  registry and inline model dispatch without adding fields to core.
+- `child_options(task)` returns optional `retain` and `review_skills` booleans and
+  `title`. A retained child uses its existing conversation on continuation. Review
+  remains host-budgeted, skills-only, cancellable, and subject to normal eligibility.
+- `format_assignment(message, session_id=..., timestamp=...)` formats the new assignment.
+  It cannot change persisted parentage or acquire control over an unrelated child.
+
+The host owns retention storage, ownership, provider reconstruction, activation
+admission, live controls, transcript safety, and teardown even after plugin unload.
+Raw conversation-service records contain routing identity and ownership metadata;
+plugins own bounded presentation and should avoid exposing unnecessary fields to models.
+Existing rows need no migration when policy moves into a plugin.
+
+This extension currently requires `plugins.isolation: in_process`; host-isolated
+registration fails explicitly because the synchronous activation-context callback
+contract has not been implemented across the process boundary. There are no private
+agent objects, runtime monkeypatches, or plugin-name checks in the host integration.
