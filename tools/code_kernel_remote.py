@@ -130,6 +130,7 @@ class RemoteKernel:
     rpc_state: Any = None
     cell_authority: Any = None
     birth_identity: Optional[str] = None
+    session_identity: Optional[int] = None
 
     def sh(self, cmd: str, timeout: int = 15) -> str:
         return _sh(self.env, cmd, timeout)

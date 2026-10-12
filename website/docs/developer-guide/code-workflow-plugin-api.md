@@ -85,6 +85,8 @@ the separate 300-second budget. Reconnect acceptance records survive for ten
 minutes after cell retirement; they are not durable across a host restart.
 
 A delegated child keeps one resident interpreter across transcript compaction.
+Remote runners own an OS session; teardown persists descendant process identities
+before signaling and checks surviving session members after the runner exits.
 Backend or tool-set changes retire its previous kernel before replacement. Remote
 runners publish a private startup receipt before accepting code; teardown checks
 that process identity, escalates termination when needed, and confirms exit. If
