@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, wait as _cf_wait
 from dataclasses import dataclass, field, replace
@@ -64,6 +65,8 @@ class _Batch:
 
     def run_child(self, i: int, task: dict[str, Any], child: Any) -> dict[str, Any]:
         from tools.delegate_tool import _run_single_child
+        child._delegate_execution_owned = True
+        child._delegate_worker_started = True
         return _run_single_child(task_index=i, goal=task["goal"], child=child, parent_agent=self.parent_agent, **self.owner_kwargs())
 
 
@@ -120,10 +123,15 @@ def _record_finished_child(batch: _Batch, entry: Any, honor_parent_interrupt: bo
     if not honor_parent_interrupt and batch.unit_id and isinstance(entry, dict):
         record_unit_child(batch.unit_id, entry)
 
+def _close_unstarted_child(parent, child):
+    """Only an admission owner, a cancelled Future or a gate-stopped child may call this."""
+    child._delegate_execution_owned = True  # cleanup is now owned too; do not close twice on unwind
+    _detach_child(parent, child)
+    _close_child(child, "Failed to close a subagent that never started")
+
 def _release_unstarted_child(batch: _Batch, child: Any) -> None:
     """Teardown for a child whose run never started (``_run_single_child``'s finally never runs for it)."""
-    _detach_child(batch.parent_agent, child)
-    _close_child(child, "Failed to close a subagent that never started")
+    _close_unstarted_child(batch.parent_agent, child)
 
 def _run_gated(batch: _Batch, gate: Any, honor_parent_interrupt: bool, i: int, task: dict[str, Any],
                child: Any) -> dict[str, Any]:
@@ -399,6 +407,14 @@ def _dispatched_payload(batch: _Batch, units: list[tuple[_Batch, str]]) -> dict:
         payload["control_hint"] = _BACKGROUND_NOTES["control_hint"]
     if batch.refused:
         payload["refused"] = batch.refused
+    session_ids = [getattr(c, "_delegate_session_id", None) for _, _, c in batch.children]
+    if all(isinstance(s, str) and s for s in session_ids):
+        payload.pop("subagent_ids", None)
+        payload["session_ids"] = session_ids
+        payload["control_hint"] = (
+            "Use session_id with steer/stop while running, or resume with a new message after completion. "
+            "list shows running and idle children; observe reads their history."
+        )
     if batch.live_paths:
         payload["live_transcripts"] = list(batch.live_paths)
         payload["live_transcripts_hint"] = _BACKGROUND_NOTES["live_transcripts_hint"]
@@ -430,22 +446,61 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
         for c in child_agents:
             _signal_child_stop(c, "Async delegation cancelled")
 
-    return dispatch_async_delegation_batch(
-        # Call-wide goals: completion formatting indexes them by task_index.
-        goals=[t["goal"] for t in unit.task_list], context=unit.context,
-        toolsets=None,  # metadata for the completion block only; subagents inherit the parent's toolsets
-        # creds["model"] is None when delegation.model is blank (children inherit): report what the child runs on.
-        role=unit.top_role, model=unit.creds["model"] or next(
-            (getattr(c, "model", None) for c in child_agents if getattr(c, "model", None)), None),
-        runner=lambda: _execute_and_aggregate(unit, honor_parent_interrupt=False),
-        interrupt_fn=_interrupt, delegation_id=unit_id, slot_key=slot_key,
-        task_indexes=[i for (i, _, _) in unit.children] if len(unit.children) < len(unit.task_list) else None,
-        # Persist locators before starting workers; live_paths omits failed writers and can be compressed.
-        task_transcripts={str(i): str(unit.live_writers[i].path) for i, _, _ in unit.children
-                          if i < len(unit.live_writers) and unit.live_writers[i] is not None
-                          and unit.live_writers[i].path is not None},
-        progress_fn=lambda: _batch_progress_token(child_agents), **routing,
-    )
+    # submit() may succeed before later admission bookkeeping raises. Gate the
+    # queued runner against that failure: either it owns cleanup, or it never
+    # touches the children and the dispatcher may safely release them.
+    gate = threading.Lock()
+    started = abandoned = False
+
+    def run():
+        nonlocal started
+        with gate:
+            if abandoned:
+                return {"results": [_fabricated_entry(i, "interrupted", "Dispatch admission failed", child)
+                                    for i, _, child in unit.children]}
+            started = True
+            for child in child_agents:
+                child._delegate_execution_owned = True
+        try:
+            return _execute_and_aggregate(unit, honor_parent_interrupt=False)
+        except BaseException:
+            for child in child_agents:
+                if getattr(child, "_delegate_worker_started", False) is not True:
+                    _close_unstarted_child(unit.parent_agent, child)
+            raise
+
+    try:
+        dispatch = dispatch_async_delegation_batch(
+            # Call-wide goals: completion formatting indexes them by task_index.
+            goals=[t["goal"] for t in unit.task_list], context=unit.context,
+            toolsets=None,  # metadata for the completion block only; subagents inherit the parent's toolsets
+            # creds["model"] is None when delegation.model is blank (children inherit): report what the child runs on.
+            role=unit.top_role, model=unit.creds["model"] or next(
+                (getattr(c, "model", None) for c in child_agents if getattr(c, "model", None)), None),
+            runner=run,
+            interrupt_fn=_interrupt, delegation_id=unit_id, slot_key=slot_key,
+            task_indexes=[i for (i, _, _) in unit.children] if len(unit.children) < len(unit.task_list) else None,
+            # Persist locators before starting workers; live_paths omits failed writers and can be compressed.
+            task_transcripts={str(i): str(unit.live_writers[i].path) for i, _, _ in unit.children
+                              if i < len(unit.live_writers) and unit.live_writers[i] is not None
+                              and unit.live_writers[i].path is not None},
+            progress_fn=lambda: _batch_progress_token(child_agents), **routing,
+        )
+    except BaseException:
+        with gate:
+            abandoned = True
+        raise
+    with gate:
+        if isinstance(dispatch, dict) and dispatch.get("status") == "dispatched":
+            for child in child_agents:
+                child._delegate_execution_owned = True
+        elif started:
+            # A scheduler may report rejection after submit; never run an
+            # already-started unit again through the synchronous fallback.
+            return {"status": "dispatched", "delegation_id": unit_id}
+        else:
+            abandoned = True
+    return dispatch
 
 def _restore_parent_cancellation(unit: _Batch) -> None:
     """Rejected children stay owned by the parent: re-attach them (``_attach_child`` replays a stop that
@@ -512,9 +567,15 @@ def _run_batch(batch: _Batch, background: bool) -> str:
     """Tool result JSON: a dispatch handle (background) or the joined combined results."""
     from tools.delegate_tool import session_joins_delegation
     # Every unit of this call shares task_list, so its last joined unit emits the call's one row.
-    begin_delegation_run(
-        batch.task_list, subagents=len(batch.children), depth=getattr(batch.parent_agent, "_delegate_depth", 0) + 1,
-    )
-    if background and not session_joins_delegation(batch.parent_agent):
-        return _dispatch_background(batch)
-    return json.dumps(_execute_and_aggregate(batch), ensure_ascii=False)
+    try:
+        begin_delegation_run(
+            batch.task_list, subagents=len(batch.children), depth=getattr(batch.parent_agent, "_delegate_depth", 0) + 1,
+        )
+        if background and not session_joins_delegation(batch.parent_agent):
+            return _dispatch_background(batch)
+        return json.dumps(_execute_and_aggregate(batch), ensure_ascii=False)
+    except BaseException:
+        for _, _, child in batch.children:
+            if getattr(child, "_delegate_execution_owned", False) is not True:
+                _close_unstarted_child(batch.parent_agent, child)
+        raise

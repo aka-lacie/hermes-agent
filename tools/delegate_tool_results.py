@@ -13,6 +13,12 @@ from tools.delegation_redaction import (
 
 logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
+
+def _child_session_metadata(child: Any) -> dict[str, Any]:
+    """The retained child's stable session identity for its result entry (empty when not retained)."""
+    session_id = getattr(child, "_delegate_session_id", None)
+    return {"session_id": session_id} if isinstance(session_id, str) else {}
+
 def _stringify_tool_content(content: Any) -> str:
     """Stable text for tool-result content. Some OpenAI-compatible paths return
     content-block lists; observability must never crash on them."""
