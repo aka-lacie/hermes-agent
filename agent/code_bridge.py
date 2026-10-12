@@ -149,6 +149,7 @@ def _invoke_code_tool_inner(tool_name, tool_args, parent, workflow_contract, cal
         if expected is not None and expected != contract[2][name]:
             raise ValueError("workflow_schema_mismatch: explicit fingerprint conflicts with saved contract")
         expected = contract[2][name]
+        call_context.approval_workflow = (contract[0], contract[1])
     if expected is not None:
         preflight_tools(parent, {name: expected})
     definition = describe_tool(parent, name)

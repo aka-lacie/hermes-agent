@@ -53,6 +53,7 @@ def bind_child(parent, child, task, resume=None, *, extension, options, routing_
     from agent.prompt_builder import clear_skills_system_prompt_cache
     clear_skills_system_prompt_cache(clear_snapshot=True)
     child._delegate_session_id = record["session_id"]
+    child._approval_title = record["title"]
     child._delegate_session_token = token
     child._delegate_store_path = str(Path(db.db_path).resolve())
     child._delegate_assignment_at = record["last_activity_at"]

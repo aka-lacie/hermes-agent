@@ -34,6 +34,8 @@ class CallContext:
     evidence: list = field(default_factory=list)
     expected_fingerprint: str | None = None
     dispatched: bool = False
+    approval_origin: object | None = None
+    approval_workflow: tuple[str, str] | None = None
 
     def __post_init__(self):
         inherited = vars(self.agent).get("_workflow_deadline") if self.agent is not None else None
@@ -102,6 +104,8 @@ then record their outcome without appending synthetic conversation messages.
     from agent import tool_executor as executor
     context.validate()
     name, arguments = call["name"], call["arguments"]
+    from agent.approval_provenance import capture_origin
+    context.approval_origin = capture_origin(context, name)
     is_code = execute is None
     if is_code:
         from agent.code_tool_catalog import describe_tool, validate_arguments
