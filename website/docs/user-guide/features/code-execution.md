@@ -27,7 +27,20 @@ for r in results["data"]["web"]:
 print(summary)
 ```
 
-**Available tools inside scripts:** `web_search`, `web_extract`, `read_file`, `write_file`, `search_files`, `patch`, `terminal` (foreground only).
+**Generic tool access:** `from hermes_tools import tools`; use `tools.search(query)`
+and `tools.describe(name)` to inspect current session tools, then
+`tools.call(name, arguments)` for enabled built-in, plugin and MCP tools. Results
+expose `data`, `text`, `media`, `artifact` and `meta`; known failures raise
+`ToolCallError`. Large results remain readable through `tools.read_artifact` or
+`tools.open_artifact`, without rerunning their operation. Approval policy is the
+same as an ordinary call from this session.
+
+**Compatibility imports:** `web_search`, `web_extract`, `read_file`, `write_file`,
+`search_files`, `patch`, `terminal` (foreground only) retain their existing dict
+results. Agent-loop tools and recursive execution-tool calls require explicit
+adapters rather than the generic bridge. Workflow plugins can register `agents`
+and `workflows` namespaces plus a direct `run_workflow` tool; see the
+[plugin API](../../developer-guide/code-workflow-plugin-api.md).
 
 ## When the Agent Uses This
 
@@ -170,7 +183,8 @@ setting is no longer a separate switch.
 
 | Resource | Limit | Notes |
 |----------|-------|-------|
-| **Timeout** | 5 minutes (300s) | Script is killed with SIGTERM, then SIGKILL after 5s grace |
+| **Local-code budget** | 5 minutes (300s) | Accepted host-tool waits pause this budget; expiry kills the kernel |
+| **Absolute workflow deadline** | 1 hour (3600s) | Starts at cell acceptance; includes preflight, queueing and waits, and cancels descendant work |
 | **Stdout** | 50 KB | Shown head-and-tail inline; the full output is saved to `~/.hermes/cache/exec/` and the path is included in the result |
 | **Stderr** | 10 KB | Included in output on non-zero exit for debugging |
 | **Tool calls** | 50 per execution | Error returned when limit reached |
@@ -181,7 +195,8 @@ All limits are configurable via `config.yaml`:
 # In ~/.hermes/config.yaml
 code_execution:
   mode: project      # project (default) | strict
-  timeout: 300       # Max seconds per script (default: 300)
+  timeout: 300       # Local-code seconds, excluding accepted host waits
+  workflow_timeout: 3600 # Absolute seconds from outer-cell acceptance
   max_tool_calls: 50 # Max tool calls per execution (default: 50)
 ```
 

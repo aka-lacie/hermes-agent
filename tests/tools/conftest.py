@@ -189,3 +189,32 @@ def disable_lazy_stt_install():
     """
     with patch("tools.transcription_tools._try_lazy_install_stt", return_value=False):
         yield
+
+
+@pytest.fixture
+def rpc_transport_context(monkeypatch):
+    """Explicit caller identity for transport-only tests with fixture handlers.
+
+    Policy parity is tested through invoke_tool separately. These tests keep
+    the actual child process, RPC, authority, callbacks and lifetime machinery
+    while replacing only the final public tool-dispatch boundary.
+    """
+    from types import SimpleNamespace
+    from tools.code_kernel import CellAuthority
+    from agent.tool_invocation import CallContext, bind_call_context, current_call_context
+    import model_tools
+    original_init = CellAuthority.__init__
+
+    def initialize(authority, task_id, *args, **kwargs):
+        context = CallContext(agent=SimpleNamespace(), task_id=task_id or "fixture", call_id="fixture-call")
+        with bind_call_context(context):
+            original_init(authority, task_id, *args, **kwargs)
+
+    def dispatch(name, arguments, task_id, **kwargs):
+        context = current_call_context()
+        assert context is not None and context.task_id == (task_id or "fixture")
+        context.validate()
+        return model_tools.handle_function_call(name, arguments, task_id=task_id)
+
+    monkeypatch.setattr(CellAuthority, "__init__", initialize)
+    monkeypatch.setattr("agent.code_bridge.dispatch_code_call", dispatch)

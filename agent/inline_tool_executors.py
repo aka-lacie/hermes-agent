@@ -19,12 +19,14 @@ from tools.arg_coercion import coerce_tool_args
 
 def tool_hook_ids(agent, effective_task_id: str, tool_call_id: Optional[str]) -> dict[str, str]:
     """Identity kwargs every tool hook/middleware call carries (all coerced to ``""``)."""
+    from agent.tool_invocation import invocation_provenance
     return {
         "task_id": effective_task_id or "",
         "session_id": getattr(agent, "session_id", "") or "",
         "tool_call_id": tool_call_id or "",
         "turn_id": getattr(agent, "_current_turn_id", "") or "",
         "api_request_id": getattr(agent, "_current_api_request_id", "") or "",
+        **invocation_provenance(tool_call_id),
     }
 
 

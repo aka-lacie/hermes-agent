@@ -87,6 +87,9 @@ def _append_missed_steer(entry: dict[str, Any], late_steer: Optional[str]) -> No
 
 def _close_child(child: Any, log_message: str) -> None:
     """Best-effort ``child.close()`` (tool sandboxes, browser daemons, httpx clients)."""
+    from tools.code_kernel_cleanup import prepare_child_kernel_cleanup
+    if not prepare_child_kernel_cleanup(child):
+        return
     if getattr(child, "_delegate_resumable", False) is True:
         with _quiet("Could not hand off delegated skills review", exc_info=True):
             from agent.delegated_review import finish_delegated_review
@@ -99,6 +102,13 @@ def _close_child(child: Any, log_message: str) -> None:
         with _quiet("Could not release delegated session", exc_info=True):
             from tools.delegate_sessions import release_child
             release_child(child)
+
+    workflow = vars(child).get("_workflow_request")
+    if workflow is not None:
+        workflow.finished.set()
+    from tools.code_kernel_cleanup import finish_child_kernels
+    finish_child_kernels(child)
+
 
 def _with_children_lock(parent_agent: Any, op: str, child: Any) -> None:
     """``parent_agent._active_children.<op>(child)`` under the parent's lock when it has one."""
@@ -533,6 +543,10 @@ def _validate_child_output_schema(
 ) -> _SchemaOutcome:
     """Validate the final answer against the attached output_schema with ONE bounded retry. Schema-less children (no
     dict on ``child._delegate_output_schema``) take no branch here so their result entry stays byte-identical."""
+    workflow = vars(child).get("_workflow_request")
+    if workflow is not None and workflow.output_schema is not None:
+        from agent.workflow_agents_output import validate_workflow_output
+        return validate_workflow_output(child, result)
     _output_schema = getattr(child, "_delegate_output_schema", None)
     if not isinstance(_output_schema, dict):
         return _SchemaOutcome(_output_schema, None, [], 0)
@@ -665,6 +679,8 @@ def _build_result_entry(
         "_child_role": getattr(child, "_delegate_role", None),
         "_child_cost_usd": float(_cost or 0.0) if isinstance(_cost, (int, float)) else 0.0,
     }
+    if "workflow_output" in result:
+        entry["workflow_output"] = result["workflow_output"]
     # Model-visible per-delegation spend (unlike _child_cost_usd above).
     entry["cost_usd"] = round(entry["_child_cost_usd"], 6)
     entry["cost_status"] = _cost_status if isinstance(_cost_status, str) and _cost_status else "unknown"
@@ -863,6 +879,13 @@ class _ChildRun:
         every sign of progress, exactly the signals the heartbeat's stale verdict reads. Genuinely frozen children
         keep two authorities: this budget (when configured) and the heartbeat's stale threshold.
         """
+        workflow = vars(self.child).get("_workflow_request")
+        if workflow is not None:
+            # Workflow deadlines are absolute and never reset by activity.
+            while not settled.wait(.05):
+                workflow.check()
+            workflow.check()
+            return
         if child_timeout is None:
             settled.wait()
             return
@@ -1037,7 +1060,7 @@ class _ChildRun:
             "diagnostic_path": diagnostic_path,
         }
         _error_entry = self.finish_failed(_error_entry, _late_pending_steer, preview=f"Timed out after {duration}s" if is_timeout else str(exc))
-        close_deferred = is_timeout and not future.done()
+        close_deferred = (is_timeout or vars(child).get("_workflow_request") is not None) and not future.done()
         if close_deferred:
             _defer_close_after_timeout(child, future)
         return None, _error_entry, close_deferred
@@ -1151,9 +1174,10 @@ class _ChildRun:
             _close_child(child, "Failed to close child agent after delegation")
         # The child's execute_code kernels live exactly as long as the child (pinned against the LRU
         # cap while it runs); dispose them here so they never squat the cap after the child is gone.
-        with _quiet("Failed to dispose child execute_code kernels: %s"):
-            from tools.code_kernel import shutdown_kernels_for_delegated_child
-            shutdown_kernels_for_delegated_child(str(getattr(child, "session_id", "") or ""))
+        if close_deferred:
+            with _quiet("Failed to dispose child execute_code kernels: %s"):
+                from tools.code_kernel import shutdown_kernels_for_delegated_agent
+                shutdown_kernels_for_delegated_agent(child)
 
         # The AIAgent turn boundary normally closes the child scope itself. This fallback covers failures before that
         # boundary starts, but must not pop a scope while a timed-out child worker is still unwinding.

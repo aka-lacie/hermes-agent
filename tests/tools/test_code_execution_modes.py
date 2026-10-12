@@ -9,7 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.tools._child_env_fixtures import child_env, project_python, run_code
+from tests.tools._child_env_fixtures import child_env as _child_env_fixture, project_python as _project_python_fixture, run_code
+
+child_env = _child_env_fixture
+project_python = _project_python_fixture
 from tools import code_execution_env as ce
 from tools.code_execution_tool import build_execute_code_schema
 
@@ -17,7 +20,8 @@ from tools.code_execution_tool import build_execute_code_schema
 @pytest.mark.platforms("linux", "macos", "windows")
 @pytest.mark.parametrize("mode", ["strict", "project"])
 @pytest.mark.parametrize("activation", ["VIRTUAL_ENV", "CONDA_PREFIX"])
-def test_selected_interpreter_environment_and_real_rpc(child_env, project_python, monkeypatch, mode, activation):
+def test_selected_interpreter_environment_and_real_rpc(child_env, project_python, monkeypatch, mode, activation,
+                                                     rpc_transport_context):
     python, prefix = project_python
     monkeypatch.setenv(activation, str(prefix))
     repo = Path(__file__).resolve().parents[2]

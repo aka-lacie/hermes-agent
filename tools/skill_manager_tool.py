@@ -81,12 +81,15 @@ def _skills_dir() -> Path:
     return configured if configured != _SKILLS_DIR_AT_IMPORT else get_hermes_home() / "skills"
 
 
-def _skill_lock_path(name: str) -> Path:
+def _skill_lock_path(name: str | Path) -> Path:
     """Per-skill lock file under ``<skills>/.locks/`` (same idiom as the usage ledger's
     ``.usage.json.lock``), never inside the skill dir so delete/recreate cannot unlink it under a
-    waiting writer. Keyed by a digest of the basename so ``foo`` and ``category/foo`` share one
-    lock and no name can hit a filesystem limit (callers validate the basename first)."""
-    digest = hashlib.sha256(Path(name).name.encode("utf-8", "surrogatepass")).hexdigest()
+    waiting writer. Existing aliases resolve to the physical directory basename; readers
+    pass their already-resolved Path. Uncreated names keep the same basename key, so
+    create/category batches retain their fence before and after the directory exists."""
+    found = _find_skill(name) if isinstance(name, str) else None
+    physical = Path(found["path"]) if found else Path(name)
+    digest = hashlib.sha256(physical.name.encode("utf-8", "surrogatepass")).hexdigest()
     return _skills_dir() / ".locks" / f"{digest}.lock"
 
 
@@ -110,7 +113,7 @@ MAX_DESCRIPTION_LENGTH = 1024
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
 MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 VALID_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]*$')  # filesystem-safe, URL-friendly
-ALLOWED_SUBDIRS = {"references", "templates", "scripts", "assets"}  # for write_file/remove_file
+ALLOWED_SUBDIRS = {"references", "templates", "scripts", "assets", "examples"}  # for write_file/remove_file
 _FRONTMATTER_END_RE = re.compile(r'\n---\s*\n')
 _NAME_RULE = "Use lowercase letters, numbers, hyphens, dots, and underscores."
 
@@ -361,6 +364,8 @@ def _validate_file_path(file_path: str) -> Optional[str]:
     # Traversal first, so the SKILL.md exception is unreachable by a traversal-laden path.
     if has_traversal_component(file_path):
         return "Path traversal ('..') is not allowed."
+    if file_path == "workflows.json":
+        return None
     # SKILL.md lives at the skill root; accept 'SKILL.md' and '<skill>/SKILL.md'.
     if parts and parts[-1] == "SKILL.md" and len(parts) in (1, 2):
         return None
@@ -694,7 +699,7 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
 
 
 _FLAT_OP_KEYS = ("content", "category", "file_path", "file_content", "old_string", "new_string",
-                 "absorbed_into", "operations")
+                 "absorbed_into", "operations", "expected_revision")
 
 
 def _skill_manage_from(payload: dict[str, Any], **extra) -> str:
@@ -776,19 +781,20 @@ def skill_manage(
     action: str, name: str, content: str | None = None, category: str | None = None, file_path: str | None = None,
     file_content: str | None = None, old_string: str | None = None, new_string: str | None = None,
     replace_all: bool = False, absorbed_into: str | None = None, task_id: str | None = None,
-    session_id: str | None = None, operations=None) -> str:
+    session_id: str | None = None, operations=None, expected_revision=None) -> str:
     """Dispatch to the action handler -> JSON string. ``operations`` (atomic batch shape,
     see _skill_manage_batch) overrides the flat fields."""
     if operations is not None:
         return _skill_manage_batch(
-            operations, default_name=name or None, task_id=task_id, session_id=session_id)
+            operations, default_name=name or None, task_id=task_id, session_id=session_id,
+            expected_revision=expected_revision)
     if (preflight := _background_review_preflight(action, name)) is not None:
         return json.dumps(preflight, ensure_ascii=False)
     # Approval gate: skills are too large to review inline, so they always stage regardless
     # of origin; bypassed when replaying an approved staged write.
     args = dict(content=content, category=category, file_path=file_path, file_content=file_content,
                 old_string=old_string, new_string=new_string, replace_all=replace_all,
-                absorbed_into=absorbed_into)
+                absorbed_into=absorbed_into, expected_revision=expected_revision)
     if (gate_result := _apply_skill_write_gate(action, name, **args)) is not None:
         return gate_result
     if (shape_err := _op_shape_error(action, args)) is not None:
@@ -801,6 +807,20 @@ def skill_manage(
     # to a helper: guards, ledger capture, patch matching, validation, rollback,
     # and the atomic replacement all belong to the same ownership window.
     with _skill_mutation_lock(name):
+        from tools.skill_manager_workflows import publication_active, has_workflow_mutation
+        if not publication_active() and (expected_revision is not None or has_workflow_mutation(name, file_path)):
+            if action == "delete":
+                from tools.skill_manager_workflows import check_revision
+                from tools.workflow_packages import read_package
+                found = _find_skill(name)
+                try:
+                    check_revision(name, read_package(found["path"]) if found else {}, expected_revision)
+                except (ValueError, OSError) as exc:
+                    return tool_error(str(exc), success=False)
+            else:
+                return _skill_manage_batch(
+                    [{"action": "patch" if action == "edit" else action, "name": name, **args}], default_name=name,
+                    task_id=task_id, session_id=session_id, expected_revision=expected_revision)
         # Ledger pre-capture: telemetry, not a gate — failures must NEVER block the mutation. delete
         # destroys the whole package (consolidation may have re-homed support files first), so
         # complete it from the newest curator backup or a restore is hollow.
@@ -853,7 +873,7 @@ _FILE_PATH = {
     "type": "string",
     "description": (
         "Path RELATIVE to the skill's own directory, e.g. 'references/api.md' — no leading "
-        "slash, never absolute; first segment references/, templates/, scripts/, or assets/."
+        "slash, never absolute; root workflows.json or first segment references/, templates/, scripts/, assets/, examples/."
     ),
 }  # stated once (write_file); patch/remove_file point at it
 
@@ -918,6 +938,10 @@ SKILL_MANAGE_SCHEMA = {
                                                          "that absorbed this one (must exist)."},
                     }, ()),
                 ]},
+            },
+            "expected_revision": {
+                "description": "Required for workflow package changes: base snapshot hash; use a skill-name-to-hash map for multiple skills.",
+                "anyOf": [{"type": "string"}, {"type": "object", "additionalProperties": {"type": "string"}}],
             },
             # Also accepted, never advertised: the legacy flat single-op fields.
         },

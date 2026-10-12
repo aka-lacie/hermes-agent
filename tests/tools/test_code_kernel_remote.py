@@ -61,6 +61,8 @@ def _spawn_ok_handlers(cell_results):
         return {"output": "", "returncode": 0}
 
     return [
+        ("HERMES_KERNEL_IDENTITY:", lambda c: {"output": 'HERMES_KERNEL_IDENTITY:{"pid":"4242","identity":"fixture-birth"}\n', "returncode": 0}),
+        ("HERMES_KERNEL_STOP_CONFIRMED", lambda c: {"output": "HERMES_KERNEL_STOP_CONFIRMED\n", "returncode": 0}),
         ("nohup", lambda c: {"output": "PID:4242\n", "returncode": 0}),
         ("kill -0", lambda c: {"output": "ALIVE\n", "returncode": 0}),
         ("cat ", cat_handler),
@@ -397,12 +399,13 @@ class TestSharedHostLockdown(RemoteKernelBase):
                         if p and "kernel.env" in c)
         env_content = base64.b64decode(env_ship).decode()
         self.assertIn(f"HERMES_RPC_TOKEN={kernel.rpc_token}", env_content)
-        # Fail closed on a failed cell ship: the checked write raises and the
-        # kernel is evicted, so the next call cannot reuse a kernel whose
-        # state silently missed this cell.
+        # A failed cell ship is an unknown outcome: the acknowledgement may
+        # have been lost after publication. Evict without throwing into the
+        # caller's per-call fallback, which would replay possible effects.
         env.handlers.insert(0, ("cell_req_", lambda c: {"output": "ENOSPC", "returncode": 1}))
-        with self.assertRaises(RuntimeError):
-            _run(env, timeout=1)
+        unknown = _run(env, timeout=1)
+        self.assertEqual(unknown["status"], "error")
+        self.assertIn("outcome_unknown", unknown["error"])
         self.assertEqual(len(_REMOTE_KERNELS), 0)
         # Fail closed on a failed dir setup: nothing (env file, runner) is
         # shipped into a dir that may still be missing or permissive.

@@ -18,6 +18,7 @@ Also hosts what ``tools.code_kernel_remote`` shares: owner resolution, registry,
 from __future__ import annotations
 
 import atexit
+import contextlib
 import glob
 import json
 import logging
@@ -54,6 +55,8 @@ def _clip(text):
 
 def run_cell(request, execution_count):
     """Exec one cell; returns (response payload, FULL stdout text)."""
+    import hermes_tools
+    context_token = hermes_tools._bind_cell(request.get("cell"))
     out, err = io.StringIO(), io.StringIO()
     status, trace = "ok", ""
     try:
@@ -63,6 +66,8 @@ def run_cell(request, execution_count):
         status, trace = "exit", "SystemExit: " + repr(exc.code)
     except BaseException:
         status, trace = "error", traceback.format_exc()
+    finally:
+        hermes_tools._reset_cell(context_token)
     stdout_text, stdout_clipped = _clip(out.getvalue())
     stderr_text, stderr_clipped = _clip(err.getvalue())
     return {
@@ -238,11 +243,34 @@ class CellAuthority:
     refused instead of running under a stale approval/session/turn identity.
     """
 
-    def __init__(self, task_id: str):
+    def __init__(self, task_id: str, timeout: float = 3600):
         import contextvars
+        from tools.code_execution_acceptance import HOST_ID
         self.task_id = task_id
         self.ctx = contextvars.copy_context()
         self.active = True
+        self.cell_id, self.nonce, self.host_id = uuid.uuid4().hex, secrets.token_hex(24), HOST_ID
+        self.started_at = time.monotonic()
+        self.deadline = self.started_at + timeout if timeout else float("inf")
+        self.cancel = threading.Event()
+        self.retired_at = None
+        self.in_flight = 0
+        self._wait_lock = threading.Lock()
+        self._worker_lock = threading.Lock()
+        self._workers = set()
+        self.artifact_delivery = {"kind": "local"}
+        self.parent_context = None
+        self._parent_cancel = None
+        from agent.tool_invocation import current_call_context
+        self.parent_context = current_call_context()
+        if self.parent_context is not None:
+            self._parent_cancel = self.parent_context.cancelled
+            inherited = getattr(self.parent_context, "deadline", None)
+            if inherited is not None:
+                self.deadline = min(self.deadline, inherited)
+            capture = getattr(self.parent_context, "capture_fork_boundary", None)
+            if capture is not None:
+                capture()
         # ((getter, setter), captured value) per thread-local prompt callback (approval, sudo, vault unlock…)
         self._callbacks: list = []
         try:
@@ -252,19 +280,66 @@ class CellAuthority:
             # Fail-closed like propagate_context_to_thread: no callbacks → dangerous approvals deny.
             self._callbacks = []
 
-    def retire(self) -> None:
-        self.active = False
+    def identity(self) -> dict:
+        return {"host_id": self.host_id, "cell_id": self.cell_id, "nonce": self.nonce}
 
-    def dispatch(self, tool_name: str, tool_args: dict) -> str:
+    def begin_wait(self):
+        with self._wait_lock:
+            self.in_flight += 1
+
+    def end_wait(self):
+        with self._wait_lock:
+            self.in_flight -= 1
+
+    def cancelled(self):
+        return (self.cancel.is_set() or time.monotonic() >= self.deadline
+                or (self._parent_cancel is not None and self._parent_cancel.is_set()))
+
+    @contextlib.contextmanager
+    def track_worker(self):
+        """Bind cancellation to this dispatch thread until its handler has settled."""
+        from tools.interrupt import set_interrupt as _set_interrupt
+        tid = threading.get_ident()
+        with self._worker_lock:
+            if not self.active or self.cancelled():
+                raise RuntimeError("cancelled: cell authority has retired")
+            self._workers.add(tid)
+        try:
+            yield tid
+        finally:
+            # Serialize clearing with retirement, preventing a delayed interrupt from
+            # landing after this thread ID has been released for unrelated work.
+            with self._worker_lock:
+                self._workers.discard(tid)
+                _set_interrupt(False, tid)
+
+    def retire(self) -> None:
+        from tools.interrupt import set_interrupt as _set_interrupt
+        with self._worker_lock:
+            self.active = False
+            self.cancel.set()
+            if self.retired_at is None:
+                self.retired_at = time.monotonic()
+            for tid in self._workers:
+                _set_interrupt(True, tid)
+
+    def dispatch(self, tool_name: str, tool_args: dict, *, workflow_contract=None) -> str:
         """Run one tool call under THIS cell's context and callbacks."""
         from tools.registry import tool_error
         if not self.active:
             return tool_error("No active execute_code cell: the cell this kernel call "
                               "belonged to has settled, so its tool authority is retired.")
-        return self.ctx.run(self._invoke, tool_name, tool_args)
+        if self.parent_context is None:
+            return tool_error("missing_call_context: code tools require a validated originating agent call")
+        self.parent_context.validate()
+        if self.parent_context.task_id != self.task_id:
+            return tool_error("missing_call_context: originating task identity does not match")
+        if self.cancelled():
+            return tool_error("cancelled: cell deadline or cancellation reached")
+        return self.ctx.copy().run(self._invoke, tool_name, tool_args, workflow_contract)
 
-    def _invoke(self, tool_name: str, tool_args: dict) -> str:
-        from model_tools import handle_function_call
+    def _invoke(self, tool_name: str, tool_args: dict, workflow_contract=None) -> str:
+        from agent.code_bridge import bind_cell_authority, dispatch_code_call
         previous = None
         if self._callbacks:
             try:
@@ -274,7 +349,8 @@ class CellAuthority:
             except Exception:
                 previous = None
         try:
-            return handle_function_call(tool_name, tool_args, task_id=self.task_id)
+            with self.track_worker(), bind_cell_authority(self):
+                return dispatch_code_call(tool_name, tool_args, self.task_id, workflow_contract=workflow_contract)
         finally:
             if previous is not None:
                 try:
@@ -326,6 +402,8 @@ class SessionKernel:
         self.raw, self.stderr = _BoundedBuffer(), _BoundedBuffer()
         self.execution_count, self.last_used = 0, time.monotonic()
         self.cell_authority: Optional[CellAuthority] = None
+        from tools.code_execution_acceptance import RPCState
+        self.rpc_state = RPCState()
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -361,30 +439,37 @@ class SessionKernel:
 
 
 class KernelRegistry:
-    """Key -> kernel map plus its lock (shared with the remote registry). Kernels are popped
-    under the lock and torn down outside it — teardown may block on the child or the transport."""
+    """Key -> kernel map plus its lock. Teardown runs outside the lock; selected
+    resident handles remain recoverable until teardown confirms completion."""
 
-    def __init__(self, teardown: Callable[[Any], None]):
+    def __init__(self, teardown: Callable[[Any], None], *, retain_until_closed=None):
         self.kernels: dict[tuple, Any] = {}
         self.lock, self._teardown = threading.Lock(), teardown
+        self._retain_until_closed = retain_until_closed or (lambda kernel: False)
 
     def shutdown(self, owner: Optional[str] = None, *, owner_matches: Optional[Callable[[str], bool]] = None) -> None:
         """Tear down every kernel, every kernel one owner (key[0]) holds, or every kernel whose owner
         satisfies ``owner_matches``."""
         with self.lock:
-            doomed = [self.kernels.pop(key) for key in list(self.kernels)
+            doomed = [(key, self.kernels[key]) for key in list(self.kernels)
                       if (owner is None and owner_matches is None) or key[0] == owner
                       or (owner_matches is not None and owner_matches(key[0]))]
-        for kernel in doomed:
-            self._teardown(kernel)
+            for key, kernel in doomed:
+                if not self._retain_until_closed(kernel):
+                    self.kernels.pop(key, None)
+        for key, kernel in doomed:
+            self.discard(key, kernel)
 
     def discard(self, key: tuple, kernel: Any) -> None:
-        """Drop *kernel*'s registry entry (only if it is still the one registered under *key* —
-        never a replacement) and tear the kernel down."""
+        """Retain selected resident handles; other kernels keep eager removal."""
+        if not self._retain_until_closed(kernel):
+            with self.lock:
+                if self.kernels.get(key) is kernel:
+                    self.kernels.pop(key, None)
+        self._teardown(kernel)
         with self.lock:
             if self.kernels.get(key) is kernel:
                 self.kernels.pop(key, None)
-        self._teardown(kernel)
 
 
 _REGISTRY = KernelRegistry(lambda kernel: kernel.teardown())
@@ -434,9 +519,26 @@ def _resolve_owner(task_id: str) -> str:
             from gateway.session_context import get_session_env
             child_id = get_session_env("HERMES_SESSION_ID", "") or (task_id or "")
             owner = f"{owner}{_CHILD_OWNER_QUALIFIER}{child_id}"
+            from tools.code_kernel_delegation import remember_owner
+            owner = remember_owner(owner)
     except Exception:
         pass
     return owner
+
+
+def shutdown_kernels_for_delegated_agent(child):
+    """Dispose all transcript segments before releasing the live child allocation."""
+    owners = set(vars(child).get("_delegated_kernel_owners", ()))
+    current = str(getattr(child, "session_id", "") or "")
+    legacy = delegated_child_owner_matcher(current) if current else lambda owner: False
+    def matches(owner):
+        return owner in owners or legacy(owner)
+    _REGISTRY.shutdown(owner_matches=matches)
+    from tools.code_kernel_remote import shutdown_remote_kernels_where
+    shutdown_remote_kernels_where(matches)
+    # Retain the set until the agent itself is released: timeout cleanup can
+    # overlap a still-unwinding worker, which may create another kernel under
+    # an already-seen owner. Final worker cleanup must cover that owner again.
 
 
 def shutdown_all_kernels() -> None:
@@ -493,7 +595,7 @@ def _rpc_forever(kernel: SessionKernel, max_tool_calls: int,
     while not kernel.stop_event.is_set():
         _rpc_server_loop(kernel.server_sock, "", kernel.tool_call_log, kernel.tool_call_counter,
                          max_tool_calls, sandbox_tools, kernel.stop_event, kernel.rpc_token,
-                         dispatch=_dispatch)
+                         dispatch=_dispatch, rpc_state=kernel.rpc_state)
 
 
 def _stdout_reader(kernel: SessionKernel) -> None:
@@ -733,6 +835,8 @@ def _reap_once() -> None:
     for doomed in expired:
         doomed.teardown()
     _sweep_stale_staging_dirs()
+    from tools.code_kernel_cleanup import retry_pending_child_cleanup
+    retry_pending_child_cleanup()
 
 
 def _ensure_background_reaper() -> None:
@@ -757,18 +861,50 @@ def _background_reaper() -> None:
             logger.exception("kernel idle reaper pass failed; retrying next interval")
 
 
+def cell_stop_status(authority, remaining, is_interrupted):
+    """Cancellation wins over a response received at the same completion boundary."""
+    status = "interrupted" if is_interrupted() else None
+    if status is None and (remaining <= 0 or authority is not None and authority.cancelled()):
+        status = "timeout"
+    if status is not None and authority is not None:
+        authority.stop_reason = ("absolute_deadline" if time.monotonic() >= authority.deadline else status)
+        authority.cancel.set()
+    return status
+
+
+def cell_timeout_message(authority, timeout, *, remote=False):
+    reason = ("Cell reached its absolute workflow deadline" if getattr(authority, "stop_reason", None)
+              == "absolute_deadline" else f"Cell timed out after {timeout}s")
+    location = "remote session" if remote else "session"
+    return (f"{reason}; the {location} kernel was killed and its state was lost. "
+            "The next execute_code call starts a fresh kernel.")
+
+
 def _await_cell(kernel: SessionKernel, timeout: int, is_interrupted) -> tuple[str, dict[str, Any]]:
     """Wait for the cell's reply; returns (host status, payload)."""
-    deadline = time.monotonic() + timeout if timeout else None
+    remaining = timeout if timeout else float("inf")
+    last_tick = time.monotonic()
     while True:
-        if is_interrupted():
-            return "interrupted", {}
-        if deadline is not None and time.monotonic() > deadline:
-            return "timeout", {}
+        now = time.monotonic()
+        authority = kernel.cell_authority
+        if authority is None or not authority.in_flight:
+            remaining -= now - last_tick
+        last_tick = now
+        stopped = cell_stop_status(authority, remaining, is_interrupted)
+        if stopped:
+            return stopped, {}
         try:
             payload = kernel.response_q.get(timeout=0.05)
         except queue.Empty:
             continue
+        # A blocking receive may outlast the deadline or wake on the RPC's
+        # cancellation exception. Recheck before accepting any terminal payload.
+        now = time.monotonic()
+        if authority is None or not authority.in_flight:
+            remaining -= now - last_tick
+        stopped = cell_stop_status(authority, remaining, is_interrupted)
+        if stopped:
+            return stopped, payload
         if payload.get("status") in ("kernel-eof", "protocol-error"):
             return "error", payload
         return "success", payload
@@ -803,7 +939,8 @@ def _cell_result(kernel: SessionKernel, key: tuple, status: str, payload: dict[s
                    "execution_count": kernel.execution_count, "state_reset": state_reset},
     }
     result.update(stdout_metadata)
-    from tools.code_execution_rpc import tool_errors_since
+    from tools.code_execution_rpc import tool_errors_since, call_receipts
+    result["call_receipts"] = call_receipts(kernel.tool_call_log, kernel.cell_log_start)
     tool_errors = tool_errors_since(kernel.tool_call_log, kernel.cell_log_start)
     if tool_errors:
         result["tool_errors"] = tool_errors
@@ -817,8 +954,7 @@ def _cell_result(kernel: SessionKernel, key: tuple, status: str, payload: dict[s
             "(Kernel state persists: printing a narrower slice next call is often cheaper.)"
         )
     if status == "timeout":
-        message = (f"Cell timed out after {timeout}s; the session kernel was killed and its "
-                   "state was lost. The next execute_code call starts a fresh kernel.")
+        message = cell_timeout_message(kernel.cell_authority, timeout)
         result.update(exit_code=-1, error=message,
                       output=(stdout_text + "\n\n⏰ " + message) if stdout_text else ("⏰ " + message))
     elif status == "interrupted":
@@ -847,6 +983,10 @@ def _cell_result(kernel: SessionKernel, key: tuple, status: str, payload: dict[s
     return result
 
 
+from tools.code_kernel_teardown import teardown_errors_as_result
+
+
+@teardown_errors_as_result(remote=False)
 def execute_in_session_kernel(
     code: str, *, task_id: str, mode: str, child_python: str, child_cwd: str,
     sandbox_tools: frozenset, timeout: int, max_tool_calls: int, reset: bool, is_interrupted,
@@ -856,20 +996,24 @@ def execute_in_session_kernel(
     key = (_resolve_owner(task_id) or "", mode, child_python, child_cwd, tuple(sorted(sandbox_tools)))
     exec_start = time.monotonic()
     from agent.delegation_context import is_delegated_child_context
-    kernel, state_reset = _acquire_kernel(key, reset, pinned=is_delegated_child_context())
-    try:
-        return _run_cell(kernel, key, code, task_id=task_id, child_python=child_python, child_cwd=child_cwd,
-                         sandbox_tools=sandbox_tools, timeout=timeout, max_tool_calls=max_tool_calls,
-                         is_interrupted=is_interrupted, exec_start=exec_start, state_reset=state_reset)
-    finally:
-        with _REGISTRY.lock:
-            kernel.attached -= 1
-            kernel.last_used = time.monotonic()
-            # Dropped from the registry (reset/dead/reaped) while cells were still attached:
-            # the last one out owns the teardown.
-            orphaned = kernel.attached == 0 and _KERNELS.get(key) is not kernel
-        if orphaned:
-            kernel.teardown()
+    from tools.code_kernel_delegation import kernel_slot
+    with kernel_slot(_REGISTRY, key) as (allowed, replaced):
+        if not allowed:
+            return json.dumps({"status": "error", "error": "kernel_busy: this child already has an active cell"})
+        kernel, state_reset = _acquire_kernel(key, reset, pinned=is_delegated_child_context())
+        try:
+            return _run_cell(kernel, key, code, task_id=task_id, child_python=child_python, child_cwd=child_cwd,
+                             sandbox_tools=sandbox_tools, timeout=timeout, max_tool_calls=max_tool_calls,
+                             is_interrupted=is_interrupted, exec_start=exec_start, state_reset=state_reset or replaced)
+        finally:
+            with _REGISTRY.lock:
+                kernel.attached -= 1
+                kernel.last_used = time.monotonic()
+                # Dropped from the registry (reset/dead/reaped) while cells were still attached:
+                # the last one out owns the teardown.
+                orphaned = kernel.attached == 0 and _KERNELS.get(key) is not kernel
+            if orphaned:
+                kernel.teardown()
 
 
 def _run_cell(kernel: SessionKernel, key: tuple, code: str, *, task_id: str, child_python: str,
@@ -878,8 +1022,10 @@ def _run_cell(kernel: SessionKernel, key: tuple, code: str, *, task_id: str, chi
     reused = kernel.proc is not None
     # Captured on the calling thread BEFORE the cell runs (the snapshot a per-call RPC thread
     # would get) and installed on the kernel so RPC dispatches under THIS cell's identity.
-    authority = CellAuthority(task_id)
-    with kernel.lock:
+    authority = accepted_cell_authority(task_id)
+    if not kernel.lock.acquire(blocking=False):
+        return json.dumps({"status": "error", "error": "kernel_busy: this session already has an active cell"})
+    try:
         try:
             if kernel.proc is None:
                 _spawn(kernel, task_id=task_id, child_python=child_python, child_cwd=child_cwd,
@@ -887,10 +1033,12 @@ def _run_cell(kernel: SessionKernel, key: tuple, code: str, *, task_id: str, chi
             assert kernel.proc is not None and kernel.proc.stdin is not None
             # Per-cell tool budget: the RPC loop enforces counter < max; reset without restarting.
             kernel.tool_call_counter[0] = 0
-            kernel.cell_log_start = len(kernel.tool_call_log)
+            kernel.tool_call_log.clear()
+            kernel.cell_log_start = 0
             kernel.raw.drain(), kernel.stderr.drain()  # raw output leaked between cells belongs to no cell
             kernel.cell_authority = authority
-            kernel.proc.stdin.write((json.dumps({"id": uuid.uuid4().hex, "code": code}) + "\n").encode("utf-8"))
+            kernel.rpc_state.authority = authority
+            kernel.proc.stdin.write((json.dumps({"id": uuid.uuid4().hex, "code": code, "cell": authority.identity()}) + "\n").encode("utf-8"))
             kernel.proc.stdin.flush()
             status, payload = _await_cell(kernel, timeout, is_interrupted)
             result = _cell_result(
@@ -898,6 +1046,11 @@ def _run_cell(kernel: SessionKernel, key: tuple, code: str, *, task_id: str, chi
                 timeout=timeout, sandbox_tools=sandbox_tools, reused=reused,
                 state_reset=state_reset, exec_start=exec_start,
             )
+            incomplete = kernel.rpc_state.retire()
+            if incomplete:
+                result["incomplete_teardown"] = incomplete
+                _REGISTRY.discard(key, kernel)
+                result["kernel"].update(ended=True, state_lost=True)
             return json.dumps(result, ensure_ascii=False)
         except Exception as exc:  # pragma: no cover - defensive parity with per-call
             from tools.code_execution_tool import _error_result
@@ -909,3 +1062,18 @@ def _run_cell(kernel: SessionKernel, key: tuple, code: str, *, task_id: str, chi
             # The cell has settled on every path: its tool authority retires with it, so
             # nothing the cell left running can dispatch under it.
             authority.retire()
+
+    finally:
+        kernel.lock.release()
+
+
+def accepted_cell_authority(task_id: str) -> CellAuthority:
+    """Reuse the public entry's preflight authority; direct kernels accept here."""
+    from agent.code_bridge import current_cell_authority
+    from agent.tool_invocation import current_call_context
+    authority = current_cell_authority()
+    context = current_call_context()
+    if (authority is not None and authority.parent_context is context
+            and authority.task_id == task_id):
+        return authority
+    return CellAuthority(task_id)

@@ -589,7 +589,13 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
         logger.warning("Skill security warning for '%s': %s", name, "; ".join(warnings))
 
 
-def skill_view(
+def skill_view(name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
+    """View a skill and, for workflow packages, its consistent publication revision."""
+    from tools.skills_tool_workflows import view_with_workflow_revision
+    return view_with_workflow_revision(name, file_path, task_id, preprocess, _skill_view_content)
+
+
+def _skill_view_content(
     name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
     or path ("axolotl", "03-fine-tuning/axolotl"); "plugin:skill" resolves plugin-provided

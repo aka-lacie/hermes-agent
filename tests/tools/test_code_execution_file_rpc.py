@@ -9,6 +9,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("rpc_transport_context")
+
 from tools.code_execution_tool import generate_hermes_tools_module
 from tools.code_execution_rpc import _rpc_poll_loop
 
@@ -62,10 +64,16 @@ def test_generated_file_rpc_kwargs_correlation_and_authority(tmp_path, monkeypat
             assert result.returncode == 0, result.stderr
             return {"output": result.stdout}
 
+    from tools.code_kernel import CellAuthority
+    from tools.code_execution_acceptance import RPCState
+    authority = CellAuthority("owner")
+    cell_token = namespace["_bind_cell"](authority.identity())
+    state = RPCState(authority)
     stop = threading.Event()
     budget = len(CALLS) + 8
     poller = threading.Thread(target=_rpc_poll_loop, args=(Shell(), str(rpc), "owner", log, counter,
-                               budget, frozenset(CALLS), stop, "right-token"), daemon=True)
+                               budget, frozenset(CALLS), stop, "right-token"),
+                              kwargs={"rpc_state": state}, daemon=True)
     poller.start()
     try:
         # Raw clients bypass stub visibility; neither missing nor wrong token may dispatch.
@@ -90,10 +98,16 @@ def test_generated_file_rpc_kwargs_correlation_and_authority(tmp_path, monkeypat
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda i: namespace["terminal"](f"tag-{i}", 3, "/tmp"), range(8)))
         assert [r["args"]["command"] for r in results] == [f"tag-{i}" for i in range(8)]
-        assert "not available" in namespace["_call"]("unauthorized-tool", {})["error"]
-        assert "limit reached" in namespace["terminal"]("over-budget")["error"]
+        with pytest.raises(namespace["ToolCallError"]) as unavailable:
+            namespace["_call"]("unauthorized-tool", {})
+        assert unavailable.value.code == "tool_unavailable"
+        with pytest.raises(namespace["ToolCallError"]) as limited:
+            namespace["terminal"]("over-budget")
+        assert limited.value.code == "tool_call_limit"
         assert counter == [budget] and len(seen) == len(log) == budget
     finally:
+        namespace["_reset_cell"](cell_token)
+        state.retire()
         stop.set()
         poller.join(timeout=10)
         assert not poller.is_alive()

@@ -40,6 +40,16 @@ def suppress_post_tool_call_hook(suppressed: bool = True):
     finally:
         _post_tool_call_hook_suppressed.reset(token)
 
+
+@contextmanager
+def allow_post_tool_call_hook():
+    """A nested invocation owns its terminal observer independently of its caller."""
+    token = _post_tool_call_hook_suppressed.set(False)
+    try:
+        yield
+    finally:
+        _post_tool_call_hook_suppressed.reset(token)
+
 # Platform-bundle names already flagged in disabled_toolsets (advisory logged once per name).
 _WARNED_DISABLED_BUNDLES: set = set()
 
@@ -216,8 +226,9 @@ def get_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_
 
     enabled_toolsets None = all; disabled_toolsets are subtracted after enabling.
     quiet_mode suppresses status prints and enables memoization.
-    skip_tool_search_assembly returns raw schemas for every enabled tool — only
-    the tool_search bridge should use it (it reads the real, uncollapsed catalog).
+    skip_tool_search_assembly returns the uncollapsed provider-ready catalog.
+    Execution validation must use get_execution_tool_definitions instead: model
+    compatibility sanitization can remove authoritative validation constraints.
     """
     def compute():
         return _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
@@ -479,15 +490,23 @@ _TOOL_SEARCH_LISTING_FORMS = {
 }
 
 
+def get_execution_tool_definitions(enabled_toolsets=None, disabled_toolsets=None, quiet_mode=True):
+    """Current available schemas before lossy provider presentation rewrites.
+
+    Execution validates the authoritative constraints, including combinators and
+    wire property names. Model compatibility sanitization must never weaken them.
+    Session/config dynamic schemas and availability checks apply to both paths.
+    """
+    tools_to_include = _select_tool_names(enabled_toolsets, disabled_toolsets, quiet_mode)
+    from tools.kanban_toolset_context import scoped_kanban_toolset_selection
+    with scoped_kanban_toolset_selection(enabled_toolsets):
+        return _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
+
+
 def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_toolsets: Optional[list[str]] = None,
                               quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> list[dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
-    tools_to_include = _select_tool_names(enabled_toolsets, disabled_toolsets, quiet_mode)
-    # Selection is per schema, not per process/profile. Kanban's local checks
-    # are uncached; the outer definitions cache already keys on this selection.
-    from tools.kanban_toolset_context import scoped_kanban_toolset_selection
-    with scoped_kanban_toolset_selection(enabled_toolsets):
-        filtered_tools = _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
+    filtered_tools = get_execution_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
     global _last_resolved_tool_names
     _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
 
@@ -629,10 +648,16 @@ class _CallIds:
     tool_call_id: Optional[str] = None
     turn_id: Optional[str] = None
     api_request_id: Optional[str] = None
+    parent_call_id: Optional[str] = None
+    origin: Optional[str] = None
+    cell_id: Optional[str] = None
 
     def hook_kwargs(self) -> dict[str, str]:
         """Same fields with None -> "" (hook/middleware wire contract)."""
-        return {k: v or "" for k, v in asdict(self).items()}
+        from agent.tool_invocation import invocation_provenance
+        values = {k: v or "" for k, v in asdict(self).items()
+                  if k not in {"parent_call_id", "origin", "cell_id"} or v is not None}
+        return {**values, **invocation_provenance(self.tool_call_id)}
 
 
 def _tool_result_observer_fields(tool_name: str, result: Any) -> tuple[str, Optional[str], Optional[str]]:
@@ -659,6 +684,7 @@ def _emit_post_tool_call_hook(
     turn_id: Optional[str] = None, api_request_id: Optional[str] = None, duration_ms: int = 0,
     status: Optional[str] = None, error_type: Optional[str] = None, error_message: Optional[str] = None,
     middleware_trace: Optional[list[dict[str, Any]]] = None,
+    parent_call_id: Optional[str] = None, origin: Optional[str] = None, cell_id: Optional[str] = None,
 ) -> None:
     """Emit the ``post_tool_call`` observer hook; gated on has_hook, and ok/error
     fields are derived from the result only past that gate when status is None."""
@@ -672,7 +698,8 @@ def _emit_post_tool_call_hook(
             status, error_type, error_message = _tool_result_observer_fields(function_name, result)
         invoke_hook(
             "post_tool_call", tool_name=function_name, args=function_args, result=result,
-            **_CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id).hook_kwargs(),
+            **_CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id,
+                       parent_call_id, origin, cell_id).hook_kwargs(),
             duration_ms=duration_ms, status=status, error_type=error_type, error_message=error_message,
             middleware_trace=list(middleware_trace or []),
         )
@@ -859,6 +886,7 @@ def handle_function_call(
     skip_pre_tool_call_hook: bool = False, skip_tool_request_middleware: bool = False,
     skip_tool_execution_middleware: bool = False, tool_request_middleware_trace: Optional[list[dict[str, Any]]] = None,
     enabled_toolsets: Optional[list[str]] = None, disabled_toolsets: Optional[list[str]] = None,
+    parent_call_id: Optional[str] = None, origin: Optional[str] = None, cell_id: Optional[str] = None,
 ) -> str:
     """Route a tool call through hooks/middleware to the registry; returns a JSON string.
 
@@ -868,12 +896,18 @@ def handle_function_call(
     it (single-fire contract). enabled/disabled_toolsets scope the Tool Search
     bridge catalog to this session's grant (None = unrestricted).
     """
-    function_args = coerce_tool_args(function_name, function_args)
+    from agent.tool_invocation import current_call_context
+    call_context = current_call_context()
+    # Scripts already use the authoritative wire schema. Model presentation
+    # repairs (including renamed properties) must not mutate validated input.
+    if call_context is None or call_context.origin != "code":
+        function_args = coerce_tool_args(function_name, function_args)
     if not isinstance(function_args, dict):
         function_args = {}
     trace = list(tool_request_middleware_trace or [])
     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
-    ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id)
+    ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id,
+                   parent_call_id, origin, cell_id)
     start = time.monotonic()
 
     def _emit(result: Any, **extra: Any) -> Any:
