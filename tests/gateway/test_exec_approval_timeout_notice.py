@@ -133,4 +133,19 @@ def test_other_settle_reasons_withdraw_card_with_unknown_origin(pending_entry, r
 
     assert len(adapter.edits) == 1 and adapter.sends == []
     assert "Origin unavailable" in adapter.edits[0][1]
-    assert "cancelled" in adapter.edits[0][1]
+    from agent.i18n import t
+    assert t("approval.summary.cancelled", noun=t("approval.noun.command")) in adapter.edits[0][1]
+
+
+@pytest.mark.parametrize("text_fallback", [False, True])
+@pytest.mark.parametrize("reason,choice", [("resolved", "once"), ("resolved", "deny"),
+    ("interrupted", "once"), ("notify_failed", None), ("session_closed", None), ("timeout", "once")])
+def test_non_timeout_settlement_never_posts_a_new_message(pending_entry, text_fallback, reason, choice):
+    # Attribution may update an existing card; it must not add new chat traffic.
+    adapter = _PlainAdapter() if text_fallback else _ButtonAdapter(editable=False)
+    _runner(adapter)._approval_notify_sync(dict(pending_entry.data))
+    before = list(adapter.sends)
+    pending_entry.result = choice
+    pending_entry.settle(reason)
+    assert adapter.sends == before
+    assert len(adapter.edits) == (0 if text_fallback else 1)

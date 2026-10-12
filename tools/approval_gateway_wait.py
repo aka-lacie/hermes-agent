@@ -165,13 +165,13 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
     primary_key = approval_data.get("pattern_key", "")
     if surface == "gateway":
         surface = _ctx.gateway_approval_surface()
+    # Card identity stays in entry.data; observer hooks retain classic CLI parity.
     payload = {
         "command": approval_data.get("command", ""),
         "description": approval_data.get("description", ""),
         "pattern_key": primary_key,
         "pattern_keys": list(approval_data.get("pattern_keys", [primary_key])),
         "session_key": session_key, "surface": surface,
-        "request_id": entry.data["request_id"], "provenance": deepcopy(entry.data["provenance"]),
     }
     keys = list(approval_data.get("pattern_keys") or [])
     def _enqueue() -> None:
