@@ -1,4 +1,5 @@
-"""Real Discord callbacks resolve the clicked request, never another pending card."""
+"""Discord button callbacks resolve the clicked request, never another pending card."""
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,8 +7,39 @@ import pytest
 
 from tools import approval
 from tools.approval_gateway_wait import _ApprovalEntry
-pytest.importorskip("discord")
+from tests.gateway.conftest import _ensure_discord_mock
+_ensure_discord_mock()
 from plugins.platforms.discord.adapter import ExecApprovalView
+
+
+@pytest.fixture(autouse=True)
+def decorated_buttons(monkeypatch):
+    # The repository mock deliberately leaves @button methods unmaterialized.
+    # Supply only that SDK behavior; production binding, callbacks and queue
+    # resolution remain real. Real discord.py already supplies these buttons.
+    import discord
+    base = ExecApprovalView.__bases__[0]
+    localize = base._localize_buttons
+    def materialize(view, **keys):
+        for name in keys:
+            callback = getattr(view, name)
+            if not inspect.ismethod(callback):
+                continue
+            button = discord.ui.Button()
+            async def invoke(interaction, callback=callback, button=button):
+                await callback(interaction, button)
+            button.callback = invoke
+            setattr(view, name, button)
+            view.add_item(button)
+        localize(view, **keys)
+    monkeypatch.setattr(base, "_localize_buttons", materialize)
+
+
+_BUTTONS = {"once": "allow_once", "session": "allow_session", "always": "allow_always", "deny": "deny"}
+
+
+def button(view, choice):
+    return getattr(view, _BUTTONS[choice])
 
 
 @pytest.fixture(autouse=True)
@@ -24,12 +56,11 @@ def card(request_id):
 
 
 async def click(view, choice="once", user="123", custom_id=None, message=12):
-    import discord
     interaction = SimpleNamespace(user=SimpleNamespace(id=user, display_name="Human"),
         message=SimpleNamespace(id=message, embeds=[]),
-        data={"custom_id": custom_id or view._approval_binding.ids[choice]},
+        data={"custom_id": custom_id or button(view, choice).custom_id},
         response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock()))
-    await view._resolve(interaction, choice, discord.Color.green(), "gateway.exec_approval.action_once")
+    await button(view, choice).callback(interaction)
     return interaction
 
 
@@ -56,7 +87,7 @@ async def test_stale_or_unbound_cards_never_answer_newer_requests(bad):
         view = card(newer.data["request_id"])
     kwargs = {}
     if bad in {"wrong-token", "restart"}:
-        kwargs["custom_id"] = card(newer.data["request_id"])._approval_binding.ids["once"]
+        kwargs["custom_id"] = button(card(newer.data["request_id"]), "once").custom_id
     if bad == "wrong-user":
         kwargs["user"] = "456"
     if bad == "wrong-message":
@@ -79,4 +110,6 @@ async def test_every_settlement_replacement_retains_frozen_origin(reason, choice
     assert "Publish plan" in content and "#1c6dff" in content and "Tool: terminal" in content
     assert not adapter.send.called
     if reason == "interrupted":
-        assert "cancelled" in content and "Approved" not in content
+        from agent.i18n import t
+        assert t("approval.summary.cancelled", noun=t("approval.noun.command")) in content
+        assert t("approval.allowed_once").strip() not in content

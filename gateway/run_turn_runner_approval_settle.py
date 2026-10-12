@@ -85,22 +85,22 @@ async def _post_settled_notice(ctx, command, card_message_id, timeout_s, *, prov
     if not automatic_notices_allowed(getattr(ctx, "source", None)):
         return
     if reason == "interrupted":
-        notice = "Approval cancelled; the command was NOT run."
+        notice = t("approval.summary.cancelled", noun=t("approval.noun.command"))
     elif choice in {"once", "session", "always"}:
-        notice = "Approved (" + choice + ")."
+        notice = t("approval.allowed_" + choice).strip()
     elif choice == "deny":
-        notice = "Denied."
+        notice = t("approval.denied").strip()
     elif reason == "timeout":
         notice = format_approval_timed_out_notice(timeout_s)
     else:
-        notice = "Approval cancelled; the command was NOT run."
+        notice = t("approval.summary.cancelled", noun=t("approval.noun.command"))
     origin = format_provenance(provenance)
     try:
         # Plain markdown, not the card's platform markup: ``edit_message`` re-formats it itself.
         if card_message_id and await _edit_card(adapter, ctx._status_chat_id, card_message_id, notice, command,
                                                 flagged, origin=origin):
             return
-        if allow_send:
+        if allow_send and reason == "timeout" and choice is None:
             await adapter.send(ctx._status_chat_id, notice + "\n\n" + origin,
                                metadata=_interim_metadata(ctx._status_thread_metadata))
     except Exception:
@@ -141,6 +141,6 @@ async def _edit_card(adapter, chat_id: str, message_id: str, notice: str, comman
     try:
         result = await edit(chat_id, message_id, _timed_out_card_body(adapter, chat_id, notice, command, reason, origin))
     except Exception:
-        logger.debug("Approval card edit failed; sending the notice as a new message", exc_info=True)
+        logger.debug("Approval card edit failed", exc_info=True)
         return False
     return bool(getattr(result, "success", False))
