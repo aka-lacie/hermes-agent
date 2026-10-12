@@ -18,7 +18,7 @@ _INJECTION_PATTERNS: list = [  # shared by local-skill and plugin-skill paths
     "ignore previous instructions", "ignore all previous", "you are now",
     "disregard your", "forget your instructions", "new instructions:",
     "system prompt:", "<system>", "]]>"]
-_SUPPORT_DIRS = ("references", "templates", "assets", "scripts")
+_SUPPORT_DIRS = ("references", "templates", "assets", "scripts", "examples")
 _SKILL_FILE_EXTS = {".md", ".py", ".yaml", ".yml", ".json", ".tex", ".sh"}
 
 
@@ -163,7 +163,7 @@ def _serve_plugin_skill(
 
 def _plugin_skill_linked_files(skill_root: Path) -> dict[str, list[str]] | None:
     from tools.path_security import validate_within_dir
-    linked: dict[str, list[str]] = {}
+    linked: dict[str, list[str]] = {"workflows": ["workflows.json"]} if (skill_root / "workflows.json").is_file() else {}
     for category in _SUPPORT_DIRS:
         files = [
             str(path.relative_to(skill_root)) for path in sorted((skill_root / category).rglob("*"))

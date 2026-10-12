@@ -100,6 +100,9 @@ def _validate_batch_ops(operations, default_name, tool_error):
         nm = op.get("name") or default_name
         if not nm:
             return fail(i, " needs a 'name' (the skill it targets).")
+        from tools.skill_packages import plugin_write_refusal
+        if refusal := plugin_write_refusal(nm):
+            return fail(i, ": " + refusal)
         # Reject a misfiled op here, before any sibling is applied: a runtime failure on
         # op[1] would first apply op[0] and then roll the whole batch back.
         if (shape_err := _op_shape_error(act, op)) is not None:

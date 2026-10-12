@@ -788,6 +788,9 @@ def skill_manage(
         return _skill_manage_batch(
             operations, default_name=name or None, task_id=task_id, session_id=session_id,
             expected_revision=expected_revision)
+    from tools.skill_packages import plugin_write_refusal
+    if refusal := plugin_write_refusal(name):
+        return tool_error(refusal, success=False)
     if (preflight := _background_review_preflight(action, name)) is not None:
         return json.dumps(preflight, ensure_ascii=False)
     # Approval gate: skills are too large to review inline, so they always stage regardless

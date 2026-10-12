@@ -7,6 +7,7 @@ Bound into the class body (``from hermes_cli.plugins_content import ...``), so t
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
@@ -45,11 +46,14 @@ def register_skill(
     if self.manifest.portable and qualified in self._manager._plugin_skills:
         raise ValueError(f"Plugin skill '{qualified}' is already registered")
     entry = {
+        "registration_id": uuid.uuid4().hex,
         "path": path, "plugin": namespace, "plugin_key": self.plugin_id, "bare_name": name,
         "description": description, "frontmatter": dict(frontmatter or {}),
     }
-    return self._register_entry("skill", qualified, self._manager._plugin_skills, entry,
-                                "Plugin %s registered skill: %s", qualified)
+    registered = self._register_entry("skill", qualified, self._manager._plugin_skills, entry,
+                                      "Plugin %s registered skill: %s", qualified)
+    vars(self._manager).setdefault("_plugin_skill_namespaces", set()).add(namespace)
+    return registered
 
 def register_automation_blueprint(
     self, key: str, *, title: str, description: str, schedule_template: str,
@@ -77,3 +81,31 @@ def register_automation_blueprint(
     return self._register_entry("automation_blueprint", blueprint.key,
                                 self._manager._automation_blueprints, blueprint,
                                 "Plugin %s registered automation blueprint: %s", blueprint.key)
+
+
+def is_plugin_skill_namespace(self, namespace: str) -> bool:
+    """Known provider namespaces remain reserved while a provider is disabled/unloaded."""
+    return (namespace in vars(self).get("_plugin_skill_namespaces", set())
+            or any(qn.startswith(namespace + ":") for qn in self._plugin_skills)
+            or any((p.manifest.skill_namespace or p.manifest.name) == namespace for p in self._plugins.values()))
+
+def get_plugin_skill_registration(self, qualified_name: str) -> Optional[dict]:
+    """Public read-only package identity. A replacement receives a new registration id."""
+    entry = self._plugin_skills.get(qualified_name)
+    if entry is None:
+        return None
+    return {key: entry.get(key) for key in ("path", "plugin", "plugin_key", "registration_id")}
+
+def list_plugin_skills(self, plugin_name: str) -> list[str]:
+    """Return sorted bare names of all skills registered by *plugin_name*."""
+    prefix = f"{plugin_name}:"
+    return sorted(e["bare_name"] for qn, e in self._plugin_skills.items() if qn.startswith(prefix))
+
+def list_plugin_skill_metadata(self) -> list[dict[str, Any]]:
+    """Return progressive-disclosure metadata for registered plugin skills."""
+    return [
+        {
+            "name": qualified, "description": str(entry.get("description", "")),
+            "category": "plugin", "frontmatter": dict(entry.get("frontmatter", {})),
+        } for qualified, entry in sorted(self._plugin_skills.items())
+    ]

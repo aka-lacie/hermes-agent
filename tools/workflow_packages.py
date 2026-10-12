@@ -77,17 +77,27 @@ def materialize_snapshot(files):
 
 def snapshot_skill(name):
     """Resolve under current profile visibility and hold its mutation lock while copying."""
+    from hermes_cli.plugins_loader import replacement_coordinator
+    from tools.skill_packages import resolve_skill_package, _resolve_skill_package
     from tools.skill_manager_tool import _skill_mutation_lock
-    from tools.skills_tool import _skill_catalog
-    matches = [row for row in _skill_catalog() if row.get("load_name") == name]
-    if len(matches) != 1:
-        raise ValueError(f"workflow_skill_unavailable: {name!r} is not a visible unambiguous skill")
-    source = Path(matches[0]["path"]).parent
-    with _skill_mutation_lock(source):
+    # Never wait for discovery while holding replacement: loaders register on worker
+    # threads. Mutation precedes replacement consistently, including nested skill_view.
+    package = resolve_skill_package(name)
+    source = package["path"]
+    with _skill_mutation_lock(source), replacement_coordinator.transaction():
+        if _resolve_skill_package(name) != package:
+            raise ValueError("workflow_package_changed: provider changed before capture; resolve it again")
+        before = source.stat()
         files = read_package(source)
+        after = source.stat()
+        current = _resolve_skill_package(name)
+        if (before.st_dev, before.st_ino, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_mtime_ns) or current != package:
+            raise ValueError("workflow_package_changed: package replaced during capture; resolve it again")
+        if files != read_package(source):
+            raise ValueError("workflow_package_changed: files changed during capture; resolve it again")
         if "SKILL.md" not in files:
             raise ValueError("workflow_skill_unavailable: skill disappeared; resolve it again")
-        return materialize_snapshot(files)
+        return {**materialize_snapshot(files), "name": package["name"], "read_only": package["read_only"]}
 
 
 def validate_candidate(files):

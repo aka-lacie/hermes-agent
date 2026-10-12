@@ -426,6 +426,7 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
 
 # (support dir, globs, recursive, files only) — order is the linked_files key order.
 _LINKED_FILE_SPECS = (
+    ("examples", ["*.json"], True, True),
     ("references", ["*.md"], False, False),
     ("templates", ["*.md", "*.py", "*.yaml", "*.yml", "*.json", "*.tex", "*.sh"], True, False),
     ("assets", ["*"], True, True),
@@ -434,7 +435,7 @@ _LINKED_FILE_SPECS = (
 
 def _skill_linked_files(skill_dir: Optional[Path]) -> dict:
     """references/templates/assets/scripts of a directory skill (empty groups dropped)."""
-    files: dict = {}
+    files: dict = {"workflows": ["workflows.json"]} if skill_dir and (skill_dir / "workflows.json").is_file() else {}
     for sub, globs, recursive, files_only in _LINKED_FILE_SPECS if skill_dir else ():
         base = skill_dir / sub
         found = [
@@ -589,10 +590,12 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
         logger.warning("Skill security warning for '%s': %s", name, "; ".join(warnings))
 
 
-def skill_view(name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
+def skill_view(name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True,
+               *, include_workflows: bool = False) -> str:
     """View a skill and, for workflow packages, its consistent publication revision."""
     from tools.skills_tool_workflows import view_with_workflow_revision
-    return view_with_workflow_revision(name, file_path, task_id, preprocess, _skill_view_content)
+    return view_with_workflow_revision(name, file_path, task_id, preprocess, _skill_view_content,
+                                       include_workflows=include_workflows)
 
 
 def _skill_view_content(
@@ -725,6 +728,8 @@ SKILL_VIEW_SCHEMA = {
                 "type": "string",
                 "description": "The skill name (use skills_list to see available skills). For plugin-provided skills, use the qualified form 'plugin:skill' (e.g. 'superpowers:writing-plans').",
             },
+            "include_workflows": {"type": "boolean", "default": False,
+                "description": "Inspect current package revision and static workflow descriptors, including before converting an ordinary skill."},
             "file_path": {
                 "type": "string",
                 "description": "OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.",
@@ -751,7 +756,8 @@ def _skill_view_with_bump(args, **kw):
     # possibly-pruned transcript copy (#95976). No dedup in the fork; None also keeps its views
     # out of the parent's bucket.
     dedup_task_id = None if is_background_review() else task_id
-    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id)
+    options = {"include_workflows": True} if args.get("include_workflows") else {}
+    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id, **options)
     with suppress(Exception):
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):

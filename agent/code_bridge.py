@@ -64,9 +64,22 @@ class CodeCallContext:
             self.call_context.packages[name] = prepare()
         return self.call_context.packages[name]
 
+    def resolve_skill_package(self, name):
+        from tools.skill_packages import resolve_skill_package
+        return resolve_skill_package(name)
+
     def snapshot_skill(self, name):
         from tools.workflow_packages import snapshot_skill
         return snapshot_skill(name)
+
+    def list_skill_packages(self):
+        from tools.skill_packages import list_skill_packages
+        return [{"name": p["name"], "read_only": p["read_only"]} for p in list_skill_packages()
+                if (p["path"] / "workflows.json").is_file()]
+
+    def inspect_skill_package(self, name, *, snapshot=None):
+        from tools.workflow_inspection import inspect_snapshot
+        return inspect_snapshot(snapshot if snapshot is not None else self.snapshot_skill(name))
 
     def execute(self, source, *, package_files=None, invocation_contract=None):
         from tools.code_execution_tool import execute_code
