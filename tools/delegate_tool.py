@@ -332,6 +332,8 @@ def _build_child_agent(
     child_session_ref["session_id"] = getattr(child, "session_id", "") or ""
     child._progress_identity_ref = child_session_ref
     child._delegate_depth, child._delegate_role = child_depth, effective_role  # post-degrade role
+    from agent.approval_provenance import attach_child_actor
+    attach_child_actor(child, parent_agent)
     child._delegate_workspace = workspace_path
     child._delegate_forked_context = has_fork_context
     child._subagent_id, child._parent_subagent_id = subagent_id, parent_subagent_id

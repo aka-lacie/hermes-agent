@@ -12,6 +12,7 @@ Best-effort by design: a failed notice is logged at debug — the approval alrea
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any, Callable, Optional
 
 from agent.i18n import t
@@ -39,36 +40,54 @@ def register_timeout_notice(
         return
     timeout_s = approval_timeout_seconds()
 
-    def settle(reason: str) -> None:
-        if reason != "timeout":
-            return  # answered / interrupted / notify_failed already produced their own feedback
-        # Same guard as every other late notice in TurnRunner: after /stop, /new or a restart the
-        # turn is over and this chat belongs to a newer run — do not edit or post into it.
+    provenance = deepcopy(approval_data.get("provenance"))
+
+    def settle(reason: str, choice=None) -> None:
         still_current = getattr(runner._ctx, "_run_still_current", None)
-        if callable(still_current) and not still_current():
+        current = not callable(still_current) or still_current()
+        # An old card can be settled in place; never post a late notice into a new turn.
+        if not current and not card_message_id:
             return
         runner._schedule(
-            _post_timeout_notice(runner._ctx, command, card_message_id, timeout_s),
-            "Approval timeout notice scheduling error")
+            _post_settled_notice(runner._ctx, command, card_message_id, timeout_s,
+                                 provenance=provenance, reason=reason, choice=choice, allow_send=current),
+            "Approval settlement notice scheduling error")
 
-    register_gateway_settle(session_key, request_id, settle)
+    register_gateway_settle(session_key, request_id, settle, include_outcome=True)
 
 
-async def _post_timeout_notice(ctx, command: str, card_message_id: Optional[str], timeout_s: int) -> None:
+async def _post_timeout_notice(ctx, command: str, card_message_id: Optional[str], timeout_s: int,
+                               *, provenance=None) -> None:
+    await _post_settled_notice(ctx, command, card_message_id, timeout_s,
+                               provenance=provenance, reason="timeout")
+
+
+async def _post_settled_notice(ctx, command, card_message_id, timeout_s, *, provenance=None,
+                               reason, choice=None, allow_send=True):
+    from agent.approval_provenance import format_provenance
     from gateway.run import _interim_metadata
 
     adapter = ctx._status_adapter
-    notice = format_approval_timed_out_notice(timeout_s)
-    metadata = _interim_metadata(ctx._status_thread_metadata)
+    if reason == "interrupted":
+        notice = "Approval cancelled; the command was NOT run."
+    elif choice in {"once", "session", "always"}:
+        notice = "Approved (" + choice + ")."
+    elif choice == "deny":
+        notice = "Denied."
+    elif reason == "timeout":
+        notice = format_approval_timed_out_notice(timeout_s)
+    else:
+        notice = "Approval cancelled; the command was NOT run."
+    origin = format_provenance(provenance)
+    body = t("gateway.exec_approval.timed_out_card_body", notice=notice, command=command) + "\n\n" + origin
     try:
-        # Plain markdown, not the card's platform markup: ``edit_message`` re-formats it itself.
-        if card_message_id and await _edit_card(
-                adapter, ctx._status_chat_id, card_message_id,
-                t("gateway.exec_approval.timed_out_card_body", notice=notice, command=command)):
+        if card_message_id and await _edit_card(adapter, ctx._status_chat_id, card_message_id, body):
             return
-        await adapter.send(ctx._status_chat_id, notice, metadata=metadata)
+        if allow_send:
+            await adapter.send(ctx._status_chat_id, notice + "\n\n" + origin,
+                               metadata=_interim_metadata(ctx._status_thread_metadata))
     except Exception:
-        logger.debug("Approval timeout notice failed", exc_info=True)
+        logger.debug("Approval settlement notice failed", exc_info=True)
 
 
 async def _edit_card(adapter, chat_id: str, message_id: str, content: str) -> bool:

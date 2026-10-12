@@ -11,6 +11,7 @@ call time.
 """
 
 import logging
+from copy import deepcopy
 import threading
 import time
 import uuid
@@ -22,13 +23,22 @@ from tools.approval_human_wait import activity_heartbeat, human_wait_window
 logger = logging.getLogger("tools.approval")
 
 
+# Entries remain observable by settle registration while notify_cb is presenting a card.
+# Answer lookup ONLY uses the unresolved queue; this index never grants or resolves.
+_presenting_entries = {}  # (session_key, request_id) -> waiter-owned entry
+
+
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("acknowledged", "cancelled", "data", "event", "expired", "reason", "result", "settle")
+    __slots__ = ("acknowledged", "cancelled", "data", "event", "expired", "origin_identity", "reason", "result", "settle")
 
     def __init__(self, data: dict):
         self.event = threading.Event()
-        self.data = dict(data)
+        from agent.approval_provenance import current_origin
+        origin = current_origin()
+        self.origin_identity = origin.identity if origin else None
+        self.data = deepcopy(data)
+        self.data["provenance"] = origin.provenance.to_dict() if origin else None
         self.data.setdefault("request_id", uuid.uuid4().hex)
         self.acknowledged = False
         # Surface hook run once when the wait ends by ANY path (answer, timeout, interrupt, /approve from
@@ -150,6 +160,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
     from tools import approval as _approval
     from agent.terminal_approval_batch import approval_published, preparing_terminal_approval, register_prepared_approval
 
+    entry = _ApprovalEntry(approval_data)
+    approval_data = entry.data
     primary_key = approval_data.get("pattern_key", "")
     if surface == "gateway":
         surface = _ctx.gateway_approval_surface()
@@ -159,13 +171,13 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         "pattern_key": primary_key,
         "pattern_keys": list(approval_data.get("pattern_keys", [primary_key])),
         "session_key": session_key, "surface": surface,
+        "request_id": entry.data["request_id"], "provenance": deepcopy(entry.data["provenance"]),
     }
     keys = list(approval_data.get("pattern_keys") or [])
-    entry = _ApprovalEntry(approval_data)
-
     def _enqueue() -> None:
         register_prepared_approval(session_key, entry)
         _approval._gateway_queues.setdefault(session_key, []).append(entry)
+        _presenting_entries[(session_key, entry.data["request_id"])] = entry
 
     # The leader lookup and our enqueue are ONE critical section: split, two identical requests both
     # miss each other, both enqueue and the user gets duplicate prompts. A ``once`` releases the
@@ -176,7 +188,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
             leader = None
             if not preparing_terminal_approval():
                 leader = next((e for e in _approval._gateway_queues.get(session_key, [])
-                               if e.data.get("command") == approval_data.get("command")
+                               if entry.origin_identity is not None and e.origin_identity == entry.origin_identity
+                               and e.data.get("command") == approval_data.get("command")
                                and list(e.data.get("pattern_keys") or []) == keys), None)
             if leader is None:
                 _enqueue()
@@ -193,6 +206,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         nothing was pending instead of being acked "ok" while the agent denies)."""
         with _approval._lock:
             choice = entry.result
+            _presenting_entries.pop((session_key, entry.data["request_id"]), None)
             queue = _approval._gateway_queues.get(session_key, [])
             if entry in queue:
                 queue.remove(entry)
@@ -226,7 +240,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         _ctx._fire_approval_hook("pre_approval_request", **payload)
         # Bridges sync agent thread → async gateway.
         try:
-            notify_cb(dict(entry.data))
+            notify_cb(deepcopy(entry.data))
             approval_published()
         except Exception as exc:
             logger.warning("Gateway approval notify failed: %s", exc)

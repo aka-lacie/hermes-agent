@@ -49,14 +49,7 @@ _CARD_DESTINATION_REFUSALS = {
 }
 
 
-def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
-    """True when the adapter class renders native approval buttons. BasePlatformAdapter subclasses
-    say so through ``supports_exec_approval_buttons``; anything else (test doubles, relay-style
-    duck types) counts when it defines ``send_exec_approval`` itself."""
-    probe = getattr(adapter_cls, "supports_exec_approval_buttons", None)
-    if callable(probe) and issubclass(adapter_cls, BasePlatformAdapter):
-        return bool(probe())
-    return getattr(adapter_cls, "send_exec_approval", None) is not None
+from gateway.platforms.approval_cards import renders_exec_approval_buttons as _renders_exec_approval_buttons
 
 
 # Rendered on a native clarify card whose wait ended without a click (mirrors the notice the
@@ -691,6 +684,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # Redact credentials before display: the raw command string can carry secrets. Both the button and plain-text paths use this value.
         cmd = _redact_approval_command(approval_data.get("command", ""))
         desc = approval_data.get("description") or ea_default_reason_text()
+        from gateway.platforms.approval_cards import approval_metadata
+        card_metadata = approval_metadata(ctx._status_thread_metadata, approval_data)
         flags = {k: approval_data.get(k, d) for k, d in (("allow_permanent", True), ("allow_session", True), ("smart_denied", False))}
         # Check the *class*, not the instance — MagicMock auto-creates attributes in tests.
         if _renders_exec_approval_buttons(type(adapter)):
@@ -698,7 +693,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 fut = self._schedule(
                     adapter.send_exec_approval(
                         chat_id=ctx._status_chat_id, command=cmd, session_key=ctx.session_key or "",
-                        description=desc, metadata=ctx._status_thread_metadata, **flags,
+                        description=desc, metadata=card_metadata, **flags,
                     ),
                     "send_exec_approval scheduling error",
                 )
@@ -757,7 +752,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 logger.warning("Button-based approval failed, falling back to text: %s", e)
         # Plain-text prompt with the adapter's typed prefix (e.g. `!approve`): typed "/" is blocked
         # in Slack threads and reserved by Matrix clients.
+        from agent.approval_provenance import format_provenance
         msg = _format_exec_approval_fallback(cmd, desc, getattr(adapter, "typed_command_prefix", "/"), **flags)
+        msg += "\n\n" + format_provenance(approval_data.get("provenance"))
         try:
             # Mark as approval prompt: WeCom routes it through the control lane and Telegram pushes it
             # in "important" mode (#132516). Never ``notify`` — A2A reads that as the turn-final reply.

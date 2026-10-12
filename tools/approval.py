@@ -199,13 +199,17 @@ def list_gateway_approvals(session_key: str) -> list[dict]:
         return [dict(entry.data) for entry in _gateway_queues.get(session_key, [])]
 
 
-def register_gateway_settle(session_key: str, request_id: str, settle) -> bool:
+def register_gateway_settle(session_key: str, request_id: str, settle, *, include_outcome: bool = False) -> bool:
     """Attach ``settle(reason)`` to one pending approval; it runs once when that wait ends by any path.
-    False when the request is no longer pending (the surface should withdraw its prompt itself)."""
+    Includes an answer committed while its waiter is still presenting the card.
+    False once the wait has ended (the surface should withdraw its prompt itself)."""
+    from tools.approval_gateway_wait import _presenting_entries
     with _lock:
-        for entry in _gateway_queues.get(session_key, []):
+        presenting = _presenting_entries.get((session_key, request_id))
+        entries = [presenting] if presenting is not None else _gateway_queues.get(session_key, [])
+        for entry in entries:
             if entry.data.get("request_id") == request_id:
-                entry.settle = settle
+                entry.settle = (lambda reason, e=entry: settle(reason, e.result)) if include_outcome else settle
                 return True
     return False
 

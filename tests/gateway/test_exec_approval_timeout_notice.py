@@ -104,7 +104,9 @@ def test_timeout_edits_the_card_to_say_the_command_did_not_run(pending_entry, tm
     assert "NOT run" in content and "5 minutes" in content
     assert adapter.sends == [], "an editable card needs no extra message"
     # ``notify`` is A2A's turn-final marker; an approval card must not carry it (#132516).
-    assert adapter.card_metadata == [{"thread_id": "t1"}]  # no notify: A2A's turn-final marker
+    assert adapter.card_metadata == [{"thread_id": "t1", "_hermes_approval": {
+        "request_id": pending_entry.data["request_id"], "provenance": None}}]
+    assert "notify" not in adapter.card_metadata[0]
 
 
 @pytest.mark.parametrize("text_fallback", [False, True])
@@ -123,10 +125,12 @@ def test_timeout_falls_back_to_a_new_message_when_the_card_cannot_be_edited(pend
 
 
 @pytest.mark.parametrize("reason", ["answered", "interrupted", "notify_failed"])
-def test_other_settle_reasons_post_nothing(pending_entry, reason):
+def test_other_settle_reasons_withdraw_card_with_unknown_origin(pending_entry, reason):
     adapter = _ButtonAdapter()
     _runner(adapter)._approval_notify_sync(dict(pending_entry.data))  # what notify_cb receives
 
     pending_entry.settle(reason)
 
-    assert adapter.edits == [] and adapter.sends == []
+    assert len(adapter.edits) == 1 and adapter.sends == []
+    assert "Origin unavailable" in adapter.edits[0][1]
+    assert "cancelled" in adapter.edits[0][1]
