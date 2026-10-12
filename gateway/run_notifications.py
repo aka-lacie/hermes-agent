@@ -1158,7 +1158,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         if verdict == "terminal":
             if evt_type == "async_delegation":
                 logger.warning(
-                    "Async delegation %s targets permanently-gone session %s; "
+                    "Async delegation %s targets unavailable gateway session %s; "
                     "terminally dropping delivery (result remains in the delegation records).",
                     claim.delegation_id or "<legacy>", parent_session_id,
                 )
@@ -1167,8 +1167,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             else:
                 logger.warning(
                     "Background process %s completion targets "
-                    "permanently-gone session %s (user boundary such as "
-                    "/new); dropping notification (output remains available via process(action='log')).",
+                    "unavailable gateway session %s (closed or delegated); "
+                    "dropping notification (output remains available via process(action='log')).",
                     evt.get("session_id") or "<unknown>", parent_session_id,
                 )
             claim.proceed = False
