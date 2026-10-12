@@ -1,5 +1,6 @@
 """Transport loss must retain the remote process handle and resident allocation."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -89,7 +90,8 @@ def test_unreachable_remote_retains_handle_and_lease_until_recovery(tmp_path, in
 
 
 @pytest.mark.platforms('posix')
-def test_remote_retry_does_not_signal_a_reused_pid(tmp_path):
+@pytest.mark.parametrize('reused', ['root', 'descendant'])
+def test_remote_retry_does_not_signal_a_reused_pid(tmp_path, reused):
     from tools.code_kernel_remote import RemoteKernel
 
     class Shell:
@@ -100,12 +102,23 @@ def test_remote_retry_does_not_signal_a_reused_pid(tmp_path):
 
     process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
     try:
-        kernel = RemoteKernel(env=Shell(), env_type='fixture', kernel_dir=str(tmp_path / 'retired'),
-                              pid=str(process.pid), rpc_token='fixture', owner='retired', pinned=True)
+        directory = tmp_path / 'retired'
+        directory.mkdir()
+        original_pid = process.pid if reused == 'root' else os.getpid()
+        if reused == 'descendant':
+            (directory / 'kernel_teardown.json').write_text(json.dumps({str(process.pid): 'original-child-birth'}))
+        kernel = RemoteKernel(env=Shell(), env_type='fixture', kernel_dir=str(directory),
+                              pid=str(original_pid), rpc_token='fixture', owner='retired', pinned=True)
         # The saved identity belongs to the original process. The PID now
         # identifies a different, live process that cleanup must never signal.
         kernel.birth_identity = 'original-process-birth-identity'
-        kernel.kill()
+        kernel.session_identity = original_pid
+        from tools.code_kernel_teardown import KernelTeardownError
+        try:
+            kernel.kill()
+        except KernelTeardownError as error:
+            # A reused SID whose ownership cannot be proved stays retained.
+            assert 'unconfirmed' in str(error) or 'did not confirm' in str(error)
         assert process.poll() is None
     finally:
         process.terminate()
