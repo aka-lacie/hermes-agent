@@ -547,10 +547,14 @@ def delegate_task(
 
     normalized_action = (action or "").strip().lower()
     from agent.subagent_extension import dispatch_extension
-    result = dispatch_extension(normalized_action, parent_agent, _extension_request if _extension_request is not None else {
+    extension_request = dict(_extension_request) if _extension_request is not None else {
         "session_id": session_id, "subagent_id": subagent_id, "message": message, "model": model,
-        "query": query, "limit": limit, "background": background,
-    })
+        "query": query, "limit": limit,
+    }
+    # Model surfaces choose execution mode in the host, independently of hidden
+    # model arguments. Preserve that decision through plugin-owned actions too.
+    extension_request["background"] = is_truthy_value(background, default=False)
+    result = dispatch_extension(normalized_action, parent_agent, extension_request)
     if result is not None:
         return result
     if normalized_action in _CONTROL_ACTIONS:
