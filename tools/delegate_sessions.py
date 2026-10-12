@@ -100,7 +100,7 @@ def assignment_message(child, message):
                      timestamp=datetime.now(UTC).isoformat(timespec="seconds"))
 
 
-def control(action, parent, *, session_id=None, message=None, model=None, query=None, limit=20, background=False):
+def control(action, parent, *, session_id=None, message=None, model=None, query=None, limit=20, background=False, _workflow_request=None):
     from tools.delegate_session_store import DelegateSessionError
     try:
         store = _store(parent)
@@ -119,7 +119,7 @@ def control(action, parent, *, session_id=None, message=None, model=None, query=
             _cancel_review(parent, session_id)
             return json.dumps({"action": action, **record})
         if action == "resume":
-            return _resume(parent, store, record, message, model, background)
+            return _resume(parent, store, record, message, model, background, _workflow_request)
         return _live_control(action, parent, record, message)
     except (ValueError, DelegateSessionError) as exc:
         return tool_error(str(exc))
@@ -130,7 +130,7 @@ def _cancel_review(parent, session_id):
     cancel_delegated_review(session_id, db_path=parent._session_db.db_path)
 
 
-def _resume(parent, store, record, message, model, background):
+def _resume(parent, store, record, message, model, background, _workflow_request=None):
     from tools.delegate_tool import (
         delegate_task, is_spawn_paused, _resolve_delegation_credentials,
     )
@@ -148,7 +148,8 @@ def _resume(parent, store, record, message, model, background):
     try:
         _cancel_review(parent, record["session_id"])
         return delegate_task(tasks=[task], parent_agent=parent, background=background,
-                             credentials_cfg=route, _resume=reservation)
+                             credentials_cfg=route, _resume=reservation, _workflow_request=_workflow_request,
+                             output_schema=(_workflow_request.output_schema if _workflow_request else None))
     finally:
         if not reservation["transferred"]:
             store.release(record["session_id"], token)

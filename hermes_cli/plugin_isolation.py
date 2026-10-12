@@ -34,6 +34,9 @@ _ISOLATION_MODES = frozenset({ISOLATION_IN_PROCESS, ISOLATION_HOST})
 # launch-scope dashboard auth registry. A plugin calling one of these runs only in-process.
 HOST_UNSUPPORTED_CTX_METHODS: dict[str, str] = {
     "register_subagent_extension": "delegation callbacks require the host activation context",
+    "register_code_namespace": "code callbacks require the in-process cell authority",
+    "register_cell_entry_point": "cell handlers require the in-process parent CallContext",
+    "register_workflow_validator": "static snapshot validation requires the in-process publication context",
     "register_platform": "platform adapters run on the gateway's event loop with native SDK clients",
     "register_platform_handler": "the handler factory receives the platform's native SDK client",
     "register_telegram_handler": "the handler factory receives the native Telegram Application",

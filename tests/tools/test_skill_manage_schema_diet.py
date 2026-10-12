@@ -26,10 +26,12 @@ class TestSkillManageSchemaDiet(unittest.TestCase):
     def test_single_call_shape(self):
         """Maintainer-directed: operations[] IS the interface — each op
         names its skill; a single edit is a list of one. Flat fields are
-        handler-only compat. Every per-action branch is a flat op object
+        handler-only compat. The batch-level expected_revision adds the accepted
+        workflow CAS contract without restoring flat mutation fields.
+        Every per-action branch is a flat op object
         (memory-tool pattern), not a nested sub-object."""
         props = SKILL_MANAGE_SCHEMA["parameters"]["properties"]
-        self.assertEqual(sorted(props), ["operations"])
+        self.assertEqual(sorted(props), ["expected_revision", "operations"])
         self.assertEqual(SKILL_MANAGE_SCHEMA["parameters"]["required"], ["operations"])
         for branch in self._branches():
             self.assertEqual(branch["required"][:2], ["name", "action"])

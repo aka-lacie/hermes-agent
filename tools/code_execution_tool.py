@@ -151,10 +151,10 @@ def _missing_hermes_tools_import_hint(m, enabled_tools) -> str:
                 "If that import failed, the generated module may be stale or another "
                 "hermes_tools may be first on sys.path. Check hermes_tools.__file__ "
                 "and retry with reset=true.")
-    available = sorted(SANDBOX_ALLOWED_TOOLS & set(enabled_tools or SANDBOX_ALLOWED_TOOLS))
+    available = sorted(SANDBOX_ALLOWED_TOOLS & set(SANDBOX_ALLOWED_TOOLS if enabled_tools is None else enabled_tools))
     return (f"'{missing}' is not available inside the execute_code sandbox. "
-            f"Importable tools here: {', '.join(available)}. For anything "
-            "else, use the normal tool call instead of execute_code.")
+            f"Compatibility imports here: {', '.join(available)}. For other enabled tools, "
+            "use `from hermes_tools import tools`, then tools.describe(name) and tools.call(name, arguments).")
 
 
 # (regex, formatter(match, enabled_tools)) — first match wins. Production mining (state.db) ranked
@@ -195,7 +195,9 @@ def generate_hermes_tools_module(enabled_tools: list[str],
                                  transport: str = "uds") -> str:
     """Source of the hermes_tools.py stub module for SANDBOX_ALLOWED_TOOLS ∩ *enabled_tools*.
     ``transport``: ``"uds"`` (local socket client) or ``"file"`` (file RPC, remote backends)."""
-    header = _FILE_TRANSPORT_HEADER if transport == "file" else _UDS_TRANSPORT_HEADER
+    from tools.code_execution_client import client_source
+    from agent.code_bridge import namespace_sources
+    header = client_source(transport) + _COMMON_HELPERS + namespace_sources()
     return header + "\n".join(
         f"def {name}({sig}):\n    {doc}\n    return _call({name!r}, {args_expr})\n"
         for name, (sig, doc, args_expr) in sorted(_TOOL_STUBS.items()) if name in set(enabled_tools)
@@ -577,19 +579,21 @@ def _finish_remote_kernel_result(kernel_result: dict[str, Any], *,
     result = _remote_result(kernel_result.get("status", "error"), stdout_text, exec_start,
                             {"tool_calls_made": kernel_result.get("tool_calls_made", 0)},
                             kernel=kernel_result.get("kernel", {"remote": True}))
-    if kernel_result.get("tool_errors"):
-        result["tool_errors"] = kernel_result["tool_errors"]
+    for key in ("tool_errors", "call_receipts", "incomplete_teardown"):
+        if key in kernel_result:
+            result[key] = kernel_result[key]
     if result["status"] == "timeout":
-        _apply_timeout(result, f"Cell timed out after {timeout}s; the remote session kernel was "
-                               "killed and its state was lost. The next call starts fresh.")
+        _apply_timeout(result, kernel_result.get("error") or
+                       f"Cell timed out after {timeout}s; the remote session kernel was "
+                       "killed and its state was lost. The next call starts fresh.")
     elif result["status"] == "error" and kernel_result.get("error"):
         result["error"] = kernel_result["error"]
     return json.dumps(result, ensure_ascii=False)
 
 
 def _sandbox_tools_for(enabled_tools: Optional[list[str]]) -> frozenset:
-    """Enabled ∩ SANDBOX_ALLOWED_TOOLS, or every sandbox tool when the intersection is empty."""
-    return frozenset(SANDBOX_ALLOWED_TOOLS & set(enabled_tools or ())) or SANDBOX_ALLOWED_TOOLS
+    """An explicit empty grant stays empty; current-session tools use host validation."""
+    return SANDBOX_ALLOWED_TOOLS if enabled_tools is None else frozenset(enabled_tools)
 
 
 def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
@@ -599,6 +603,15 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
     serve file-RPC from a polling thread, run, clean up."""
     sandbox_dir = f"{_env_temp_dir(env)}/hermes_exec_{uuid.uuid4().hex[:12]}"
     quoted_sandbox_dir = shlex.quote(sandbox_dir)
+    from tools.code_kernel import accepted_cell_authority
+    from tools.code_execution_acceptance import RPCState
+    authority = accepted_cell_authority(effective_task_id)
+    authority.artifact_delivery = {"kind": "remote", "env": env, "directory": sandbox_dir + "/artifacts"}
+    rpc_state = RPCState(authority)
+    remaining = max(0.1, authority.deadline - time.monotonic())
+    code = ("import hermes_tools as _ht\n_ht._bind_cell(" + repr(authority.identity()) + ")\n"
+            + f"_ht._start_cell_watchdog({timeout!r}, {remaining!r})\n"
+            + "exec(compile(" + repr(code) + ", '<cell>', 'exec'), globals())\n")
     tool_call_counter, tool_call_log, stop_event, rpc_thread = [0], [], threading.Event(), None
     try:
         # Private dirs: the sandbox lives under a shared temp dir and carries the
@@ -616,7 +629,8 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         rpc_thread = threading.Thread(
             target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
             args=(env, f"{sandbox_dir}/rpc", effective_task_id, tool_call_log, tool_call_counter,
-                  max_tool_calls, sandbox_tools, stop_event, rpc_token))
+                  max_tool_calls, sandbox_tools, stop_event, rpc_token),
+            kwargs={"rpc_state": rpc_state})
         rpc_thread.start()
         # The token travels in a sourced env file, never in argv. No umask on
         # the launch command: the 700 dirs + explicit 0600 writes cover Hermes'
@@ -625,7 +639,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
             env, sandbox_dir, "sandbox.env", "exec python3 script.py",
             rpc_dir=f"{sandbox_dir}/rpc", rpc_token=rpc_token)
         logger.info("Executing code on %s backend (task %s)...", env_type, effective_task_id[:8])
-        script_result = env.execute(launch_cmd, timeout=timeout)
+        script_result = env.execute(launch_cmd, timeout=max(1, int(authority.deadline - time.monotonic()) + 1))
         stdout_text = script_result.get("output", "") or ""
         exit_code = script_result.get("returncode", -1)
         # Backend exit codes: 124 = timeout wrapper, 130 = SIGINT.
@@ -633,6 +647,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
     except Exception as exc:
         return _remote_failure(exc, exec_start, tool_call_counter[0])
     finally:
+        incomplete = rpc_state.retire()
         stop_event.set()
         if rpc_thread is not None:
             rpc_thread.join(timeout=5)
@@ -642,6 +657,10 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
             logger.debug("Failed to clean up remote sandbox %s", sandbox_dir)
     result = _remote_result(status, stdout_text, exec_start,
                             {"exit_code": exit_code, "tool_calls_made": tool_call_counter[0]})
+    if incomplete:
+        result["incomplete_teardown"] = incomplete
+    from tools.code_execution_rpc import call_receipts
+    result["call_receipts"] = call_receipts(tool_call_log)
     tool_errors = tool_errors_since(tool_call_log)
     if tool_errors:
         result["tool_errors"] = tool_errors
@@ -701,7 +720,19 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[l
 # ---- Main entry point ----
 
 
-def execute_code(
+def execute_code(code, task_id=None, enabled_tools=None, reset=False):
+    from agent.tool_invocation import current_call_context
+    from agent.code_bridge import current_cell_authority
+    from agent.code_cells import accept_cell, attach_cell_evidence
+    context = current_call_context()
+    authority = current_cell_authority()
+    if context is not None and (authority is None or authority.parent_context.agent is not context.agent):
+        with accept_cell(context):
+            return attach_cell_evidence(_execute_code_body(code, task_id, enabled_tools, reset), context)
+    return _execute_code_body(code, task_id, enabled_tools, reset)
+
+
+def _execute_code_body(
     code: str,
     task_id: Optional[str] = None,
     enabled_tools: Optional[list[str]] = None,
@@ -885,7 +916,7 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
         mode = _get_execution_mode()
     tool_lines = "\n".join(doc for name, doc in _TOOL_DOC_LINES if name in enabled_sandbox_tools)
     import_examples = [n for n in ("web_search", "terminal") if n in enabled_sandbox_tools]
-    import_examples = import_examples or sorted(enabled_sandbox_tools)[:2]
+    import_examples = import_examples or sorted(SANDBOX_ALLOWED_TOOLS & enabled_sandbox_tools)[:2]
     import_str = ", ".join(import_examples) + ", ..." if import_examples else "..."
     if mode == "strict":
         cwd_note = (
@@ -910,13 +941,21 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
         "need 3+ tool calls with logic between them: filtering/reducing "
         "large outputs before they enter context, branching, or loops "
         "(N pages/files, retry on failure). Use normal tool calls for "
-        "single calls, results you must reason over in full, or anything needing user interaction.\n\n"
+        "single calls or results you must reason over in full. Bridged calls inherit this session's approval policy.\n\n"
         "Calls run in a persistent session kernel: variables, imports, and "
         "loaded data survive across execute_code calls, so build on earlier "
         "work instead of re-loading it. A timed-out or interrupted call loses that state.\n\n"
-        f"Available via `from hermes_tools import ...`:\n\n"
+        "Generic API: `from hermes_tools import tools, ToolCallError`. tools.search(query) lists current names; "
+        "tools.describe(name) returns schema and fingerprint; tools.call(name, arguments, expected_fingerprint=None) "
+        "returns data/text/media/artifact/meta. It supports enabled built-in, plugin and MCP tools. "
+        "Failures raise typed errors with receipts; inspect partial effects and unknown outcomes before retrying. "
+        "Read retained large results with tools.read_artifact(handle), without repeating the tool. "
+        "Agent-loop tools and recursive execute_code/run_workflow are unsupported through tools.call.\n\n"
+        f"Compatibility imports via `from hermes_tools import ...`:\n\n"
         f"{tool_lines}\n\n"
-        "Limits: 5-minute timeout, max 50 tool calls per call. Stdout over "
+        "Limits: default 5-minute local-code budget, max 50 tool calls per cell. Accepted host-tool waits "
+        "pause local-code time; an absolute workflow deadline (default 1 hour) includes waits and queueing. "
+        "Same-kernel cells are exclusive. Stdout over "
         "50KB shows head/tail inline; the FULL text is auto-saved to a file whose path rides in the result.\n\n"
         f"{cwd_note}\n\n"
         "Helpers require imports: `from hermes_tools import json_parse, shell_quote, retry`. "
@@ -924,6 +963,10 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
         "json.loads for terminal() output; shell_quote(s) — shlex.quote for "
         "dynamic shell args; retry(fn, max_attempts=3, delay=2) — exponential backoff."
     )
+    from hermes_cli.plugins import get_plugin_manager
+    for entry in getattr(get_plugin_manager(), "_code_namespaces", {}).values():
+        if entry.get("description"):
+            description += "\n\n" + entry["description"]
     return {
         "name": "execute_code",
         "description": description,

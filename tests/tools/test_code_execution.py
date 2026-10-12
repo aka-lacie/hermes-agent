@@ -13,6 +13,8 @@ Run with:  python -m pytest tests/test_code_execution.py -v
 """
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("rpc_transport_context")
 # pytestmark removed — tests run fine (61 pass, ~99s)
 
 import json
@@ -733,9 +735,8 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
 
 
     @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
-    def test_nonoverlapping_tools_fallback(self):
-        """When enabled_tools has no overlap with SANDBOX_ALLOWED_TOOLS,
-        should fall back to all allowed tools."""
+    def test_nonoverlapping_tools_do_not_broaden_grants(self):
+        """An explicit grant never falls back to otherwise available tools."""
         code = (
             "from hermes_tools import terminal\n"
             "print('fallback ok')\n"
@@ -746,8 +747,9 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
                 code, task_id="test-nonoverlap",
                 enabled_tools=["vision_analyze", "browser_snapshot"],
             ))
-        self.assertEqual(result["status"], "success")
-        self.assertIn("fallback ok", result["output"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("ImportError", result["error"])
+        self.assertEqual(result["tool_calls_made"], 0)
 
 
 # ---------------------------------------------------------------------------

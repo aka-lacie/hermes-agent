@@ -86,33 +86,43 @@ def _rpc_token_ok(request: dict, rpc_token: str) -> bool:
 
 def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_counter: list,
                         max_tool_calls: int, dispatch, tool_call_log: list, call_start: float,
-                        where: str) -> str:
+                        where: str, allow_namespaces: bool = False, propagate_errors: bool = False) -> str:
     """Enforce allow-list + budget, then dispatch one authenticated request. Only a dispatched
     call consumes budget and is logged; refusals are free."""
     tool_name = request.get("tool", "")
     tool_args = request.get("args", {})
-    if tool_name not in allowed_tools:
-        return tool_error(f"Tool '{tool_name}' is not available in execute_code. "
-                          f"Available: {', '.join(sorted(allowed_tools))}")
+    if isinstance(tool_args, dict):
+        tool_args = dict(tool_args)
+    if tool_name not in allowed_tools and not (allow_namespaces and "." in tool_name):
+        message = f"Tool '{tool_name}' is not available in execute_code. Available: {', '.join(sorted(allowed_tools))}"
+        return _rpc_refusal("tool_unavailable", message, propagate_errors)
     if tool_call_counter[0] >= max_tool_calls:
-        return tool_error(f"Tool call limit reached ({max_tool_calls}). "
-                          "No more tool calls allowed in this execution.")
+        return _rpc_refusal("tool_call_limit", f"Tool call limit reached ({max_tool_calls}). "
+                            "No more tool calls allowed in this execution.", propagate_errors)
     if tool_name == "terminal" and isinstance(tool_args, dict):
         for param in _TERMINAL_BLOCKED_PARAMS:
             tool_args.pop(param, None)
+    tool_call_counter[0] += 1
     # Silence handler status prints so they don't leak into the CLI spinner.
     try:
         with thread_scoped_silence():
             result = dispatch(tool_name, tool_args)
     except Exception as exc:
         logger.error("Tool call failed in %s: %s", where, exc, exc_info=True)
+        if propagate_errors:
+            tool_call_log.append({"tool": tool_name, "error": str(exc)[:300],
+                                  "request_id": request.get("request_id"), "cell_id": request.get("cell_id"),
+                                  "status": "failed", "complete": False,
+                                  "duration": round(time.monotonic() - call_start, 2)})
+            raise
         result = tool_error(str(exc))
-    tool_call_counter[0] += 1
     entry = {"tool": tool_name, "args_preview": str(tool_args)[:80],
+             "request_id": request.get("request_id"), "cell_id": request.get("cell_id"),
+             "status": "completed", "complete": True,
              "duration": round(time.monotonic() - call_start, 2)}
     error = _result_error(result)
     if error:
-        entry["error"] = error
+        entry.update(error=error, status="failed", complete=False)
     tool_call_log.append(entry)
     return result
 
@@ -138,7 +148,7 @@ def tool_errors_since(tool_call_log: list, start: int = 0) -> list:
 
 def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: list,
                      tool_call_counter: list, max_tool_calls: int, allowed_tools: frozenset,
-                     stop_event: threading.Event, rpc_token: str, dispatch=None):
+                     stop_event: threading.Event, rpc_token: str, dispatch=None, rpc_state=None):
     """Accept one client and serve newline-delimited JSON requests until it disconnects, idles
     300s, or the call limit is reached. ``tool_call_counter`` is a mutable ``[int]``. ``dispatch``
     overrides how an allowed, budgeted call runs: per-call sandboxes use the default (the thread
@@ -157,15 +167,19 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
                 continue
         if conn is None:
             return
-        conn.settimeout(300)
+        conn.settimeout(0.1)
+        idle_until = time.monotonic() + 300
         buf = b""
-        while True:
+        while not stop_event.is_set():
             try:
                 chunk = conn.recv(65536)
             except TimeoutError:
-                break
+                if time.monotonic() >= idle_until:
+                    break
+                continue
             if not chunk:
                 break
+            idle_until = time.monotonic() + 300
             buf += chunk
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
@@ -178,11 +192,11 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                     resp = tool_error(f"Invalid RPC request: {exc}")
                 else:
-                    resp = _handle_rpc_request(
-                        request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
+                    resp = _route_rpc_request(
+                        request, rpc_token=rpc_token, rpc_state=rpc_state,
+                        allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
                         max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
-                        call_start=call_start, where="sandbox",
-                    ) if _rpc_token_ok(request, rpc_token) else tool_error("Unauthorized RPC request")
+                        call_start=call_start, where="sandbox")
                 conn.sendall((resp + "\n").encode())
     except TimeoutError:
         logger.debug("RPC listener socket timeout")
@@ -198,7 +212,7 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
 
 def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_call_counter: list,
                    max_tool_calls: int, allowed_tools: frozenset, stop_event: threading.Event,
-                   rpc_token: str):
+                   rpc_token: str, rpc_state=None):
     """Poll the remote filesystem for request files and answer them. Background thread; each
     ``env.execute()`` is an independent process, so this is safe alongside the script-execution
     thread. Malformed or unauthorized requests are removed without a response."""
@@ -226,7 +240,7 @@ def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_ca
                     logger.debug("Malformed RPC request in %s", req_file)
                     env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
                     continue
-                if not _rpc_token_ok(request, rpc_token):
+                if not isinstance(request, dict) or not _rpc_token_ok(request, rpc_token):
                     logger.debug("Unauthorized RPC request in %s", req_file)
                     env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
                     continue
@@ -238,11 +252,16 @@ def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_ca
                     logger.debug("RPC request with malformed seq in %s", req_file)
                     env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
                     continue
-                tool_result = _handle_rpc_request(
-                    request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
-                    max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
-                    call_start=call_start, where="remote sandbox",
-                )
+                if request.get("version") == 2:
+                    tool_result = _serve_v2(request, rpc_state, allowed_tools, tool_call_counter,
+                                            max_tool_calls, tool_call_log, call_start, "remote sandbox")
+                elif rpc_state is not None:
+                    tool_result = tool_error("RPC v2 cell identity is required")
+                else:
+                    tool_result = _handle_rpc_request(
+                        request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
+                        max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
+                        call_start=call_start, where="remote sandbox")
                 # Atomic (tmp + rename) and owner-only; results carry tool output
                 # on a shared-host backend.
                 _remote_write(env, f"{rpc_dir}/res_{seq:06d}", tool_result,
@@ -253,3 +272,47 @@ def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_ca
                 logger.debug("RPC poll error: %s", e, exc_info=True)
         if not stop_event.is_set():
             stop_event.wait(poll_interval)
+
+
+def _serve_v2(request, state, allowed_tools, counter, max_calls, log, started, where):
+    from tools.code_execution_acceptance import rpc_error
+    if state is None:
+        return json.dumps(rpc_error("missing_cell_context", "No accepted cell authority.", request))
+    def execute(authority):
+        return _handle_rpc_request(
+            request, allowed_tools=allowed_tools, tool_call_counter=counter,
+            max_tool_calls=max_calls,
+            dispatch=lambda name, args: authority.dispatch(name, args, workflow_contract=request.get("workflow_contract")),
+            tool_call_log=log,
+            call_start=started, where=where, allow_namespaces=True, propagate_errors=True)
+    return json.dumps(state.handle(request, execute), ensure_ascii=False)
+
+
+def _route_rpc_request(request, *, rpc_token, rpc_state, allowed_tools, tool_call_counter,
+                       max_tool_calls, dispatch, tool_call_log, call_start, where):
+    if not isinstance(request, dict):
+        return tool_error("Invalid RPC request: expected an object")
+    if not _rpc_token_ok(request, rpc_token):
+        return tool_error("Unauthorized RPC request")
+    if request.get("version") == 2:
+        return _serve_v2(request, rpc_state, allowed_tools, tool_call_counter,
+                         max_tool_calls, tool_call_log, call_start, where)
+    if rpc_state is not None:
+        return tool_error("RPC v2 cell identity is required")
+    return _handle_rpc_request(
+        request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
+        max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
+        call_start=call_start, where=where)
+
+
+def _rpc_refusal(code, message, propagate_errors):
+    if propagate_errors:
+        from agent.code_artifacts import ToolCallError
+        raise ToolCallError(code, message, dispatched=False)
+    return tool_error(message)
+
+
+def call_receipts(log, start=0):
+    """Bounded model-visible receipts exclude request arguments and tool payloads."""
+    fields = ("tool", "request_id", "cell_id", "status", "complete", "duration", "error")
+    return [{key: item[key] for key in fields if key in item} for item in log[start:][-100:]]

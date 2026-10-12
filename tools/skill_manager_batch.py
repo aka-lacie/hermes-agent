@@ -217,7 +217,7 @@ _ADVISORY_KEYS = ("lint_warnings", "lint_hint")
 
 
 def _skill_manage_batch(operations, default_name: str | None = None, task_id: str | None = None,
-                        session_id: str | None = None) -> str:
+                        session_id: str | None = None, expected_revision=None) -> str:
     """Apply operations atomically: every touched skill is snapshotted first and any
     failure rolls ALL of them back (batch-created skills are removed). ``delete`` is
     only legal as the SOLE op (its recoverable-archive path doesn't compose with
@@ -237,7 +237,7 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
         if not nm:
             return tool_error("operations[0] (delete) needs a 'name'.", success=False)
         return _smt.skill_manage(action="delete", name=nm, task_id=task_id, session_id=session_id,
-                                 absorbed_into=operations[0].get("absorbed_into"))
+                                 absorbed_into=operations[0].get("absorbed_into"), expected_revision=expected_revision)
     names, err = _validate_batch_ops(operations, default_name, tool_error)
     if err is not None:
         return err
@@ -246,7 +246,7 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
         def _staging(wa):
             acts = ", ".join(op["action"] for op in operations)
             gist = f"batch({len(operations)} ops: {acts}) on {', '.join(sorted(set(names)))}"
-            return {"action": "batch", "operations": operations}, gist
+            return {"action": "batch", "operations": operations, "expected_revision": expected_revision}, gist
         staged = _smt._run_write_gate(_staging)
         if staged is not None:
             return staged
@@ -254,6 +254,12 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
     # skill_manage() calls re-enter them. Without the outer fence a concurrent writer landing
     # between the snapshot and a rollback would be silently reverted.
     with _smt._skill_mutation_locks(names):
+        from tools.skill_manager_workflows import prepare_publications, verify_publications, _PUBLICATION
+        try:
+            prepared = prepare_publications(operations, names, expected_revision)
+        except Exception as exc:
+            logger.error("Workflow candidate validation failed", exc_info=True)
+            return tool_error(str(exc), success=False)
         snap_root = Path(tempfile.mkdtemp(prefix="skill_batch_"))
         create_targets = {names[i]: _smt._resolve_skill_dir(names[i], op.get("category"))
                           for i, op in enumerate(operations) if op.get("action") == "create"}
@@ -265,14 +271,16 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
         results = []
         rollback_failed = False
         token = _smt._skill_gate_bypass.set(True)
+        publication_token = _PUBLICATION.set(True)
         try:
             for i, op in enumerate(operations):
-                raw = _smt._skill_manage_from({**op, "name": names[i], "operations": None},
-                                              task_id=task_id, session_id=session_id)
                 try:
+                    raw = _smt._skill_manage_from({**op, "name": names[i], "operations": None},
+                                                  task_id=task_id, session_id=session_id)
                     parsed = json.loads(raw)
-                except Exception:
-                    parsed = {"success": False, "error": "unparseable op result"}
+                except Exception as exc:
+                    logger.error("Managed publication operation failed", exc_info=True)
+                    parsed = {"success": False, "error": str(exc)}
                 if not parsed.get("success"):
                     note, rollback_failed = _rollback(snapshots, _smt._find_skill, results)
                     fail = {  # key order is wire-visible
@@ -292,7 +300,13 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
                 # compact success row otherwise hides them and the model never sees a finding.
                 entry.update({k: parsed[k] for k in _ADVISORY_KEYS if parsed.get(k) is not None})
                 results.append(entry)
+            try:
+                verify_publications(prepared)
+            except (ValueError, OSError) as exc:
+                note, rollback_failed = _rollback(snapshots, _smt._find_skill, results)
+                return tool_error(f"{exc}; {note}", success=False)
         finally:
+            _PUBLICATION.reset(publication_token)
             _smt._skill_gate_bypass.reset(token)
             if rollback_failed:
                 # Keep the snapshots so the operator can still recover by hand.
@@ -304,5 +318,8 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
     # — falling back to the machine locale (cp1252/GBK) would make the same skill render differently per
     # host (see PR #51701).
     return json.dumps(
-        {"success": True, "operations_applied": len(results), "results": results},
+        {"success": True, "operations_applied": len(results), "results": results,
+         **({"workflow_revisions": {name: item["revision"] for name, item in prepared.items()},
+             "workflow_publication_notice": {name: item["notice"] for name, item in prepared.items()}}
+            if prepared else {})},
         ensure_ascii=False)

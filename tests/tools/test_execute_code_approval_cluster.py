@@ -95,6 +95,16 @@ def test_rpc_carries_authority_to_real_dispatch(child_env, monkeypatch, transpor
     from tests.tools._child_env_fixtures import RunToCompletionEnv, run_code
     from tools import terminal_tool
     from tools.code_execution_tool import _run_remote_per_call
+    from agent.tool_invocation import CallContext, bind_call_context
+    from run_agent import AIAgent
+    from unittest.mock import patch
+
+    with patch("agent.process_bootstrap.OpenAI"):
+        parent = AIAgent(api_key="fixture", base_url="http://127.0.0.1:1/v1", model="fixture", provider="custom",
+                         enabled_toolsets=[], quiet_mode=True, skip_memory=True, skip_context_files=True,
+                         session_id="authority-owner")
+    parent.valid_tool_names = {"read_file"}
+    parent.enabled_toolsets = ["file"]
 
     witness = child_env / "authority.txt"
 
@@ -115,15 +125,17 @@ def test_rpc_carries_authority_to_real_dispatch(child_env, monkeypatch, transpor
             token = marker.set(turn)
             terminal_tool.set_approval_callback(callback)
             try:
-                if transport == "local":
-                    result = run_code(code, reset=(turn == "first"))
-                else:
-                    raw = json.loads(_run_remote_per_call(
-                        RunToCompletionEnv(child_env), "ssh", code, "authority-test",
-                        frozenset({"read_file"}), timeout=30, max_tool_calls=2, exec_start=time.monotonic()))
-                    assert raw["status"] == "success", raw
-                    assert raw["tool_calls_made"] == 1
-                    result = json.loads(raw["output"])
+                task_id = "child-env-test" if transport == "local" else "authority-test"
+                with bind_call_context(CallContext(parent, task_id, turn)):
+                    if transport == "local":
+                        result = run_code(code, reset=(turn == "first"))
+                    else:
+                        raw = json.loads(_run_remote_per_call(
+                            RunToCompletionEnv(child_env), "ssh", code, "authority-test",
+                            frozenset({"read_file"}), timeout=30, max_tool_calls=2, exec_start=time.monotonic()))
+                        assert raw["status"] == "success", raw
+                        assert raw["tool_calls_made"] == 1
+                        result = json.loads(raw["output"])
                 assert "content" in result, result
                 assert f"real RPC payload {turn}" in result["content"]
                 assert seen[-1] == (turn, callback)
@@ -131,6 +143,7 @@ def test_rpc_carries_authority_to_real_dispatch(child_env, monkeypatch, transpor
                 marker.reset(token)
     finally:
         terminal_tool.set_approval_callback(None)
+        parent.close()
     assert len(seen) == 2
 
 

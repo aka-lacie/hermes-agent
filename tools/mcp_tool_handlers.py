@@ -465,6 +465,11 @@ def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float,
     except InterruptedError:
         return tool_error("MCP call interrupted: user sent a new message")
     except Exception as exc:
+        from agent.code_artifacts import ToolCallError
+        if isinstance(exc, ToolCallError):
+            details = exc.to_dict()
+            details.pop("message", None)
+            return tool_error(str(exc), **details)
         for recover in recoverers:
             recovered = recover(server_name, exc, call_once, op)
             if recovered is not None:

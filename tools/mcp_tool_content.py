@@ -31,6 +31,13 @@ _MCP_RESOURCE_MAX_B64_CHARS = _MCP_RESOURCE_MAX_BYTES * 4 // 3 + 4
 
 def _truncate_mcp_text_result(text: str, max_chars: int = _MCP_HARD_RESULT_CAP_CHARS) -> str:
     """Bound pathological MCP text before it propagates (#56059)."""
+    if len(text) > max_chars:
+        from agent.tool_invocation import current_call_context
+        context = current_call_context()
+        if context is not None and context.origin == "code":
+            from agent.code_artifacts import ToolCallError
+            raise ToolCallError("result_limit_exceeded", "MCP text exceeds its execution flood limit.",
+                                complete=False, limit_chars=max_chars, size_chars=len(text), dispatched=True)
     return truncate_head_tail(text, max_chars, label="MCP RESULT")
 
 

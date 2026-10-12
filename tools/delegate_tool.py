@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import is_truthy_value
+from agent.workflow_agents_admission import inherit_workflow_admission
 
 logger = logging.getLogger(__name__)
 
@@ -383,6 +384,9 @@ def _run_single_child(
     child_progress_cb = getattr(child, "tool_progress_callback", None)
     child_pool = leased_cred_id = _subagent_id = None
     try:
+        workflow = vars(child).get("_workflow_request")
+        if workflow is not None:
+            child._workflow_admission_lease.activate(workflow.check)
         child_pool, leased_cred_id = _lease_child_credential(child)
         heartbeat = _start_heartbeat(child, parent_agent, task_index)
         _subagent_id = _register_child(
@@ -404,6 +408,7 @@ def _run_single_child(
     # Set when a timed-out Future still owns the child: closing it from this
     # thread before the worker settles races the conversation's finally path.
     _child_close_deferred = False
+    entry = None
     try:
         heartbeat.start()
         _safe_progress(child_progress_cb, "subagent.start", preview=goal)
@@ -430,12 +435,18 @@ def _run_single_child(
         _late_pending_steer = run.close_steering()
         logging.exception(f"[subagent-{task_index}] failed")
         # Entry status "error" (contract), progress event status "failed" (UI vocabulary).
+        failure = _fabricated_entry(task_index, "error", str(exc), child, run.elapsed())
+        from agent.workflow_agents import AgentError
+        if isinstance(exc, AgentError):
+            failure["workflow_error"] = exc.to_dict()
         return run.finish_failed(
-            _fabricated_entry(task_index, "error", str(exc), child, run.elapsed()), _late_pending_steer,
-            preview=str(exc), summary=str(exc), status="failed",
+            failure, _late_pending_steer, preview=str(exc), summary=str(exc), status="failed",
         )
     finally:
         run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred)
+        cleanup_error = vars(child).get("_workflow_cleanup_error")
+        if entry is not None and cleanup_error:
+            entry["incomplete_teardown"] = [cleanup_error]
 
 
 def _credential_overrides(creds: dict[str, Any], routing_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -463,19 +474,20 @@ def _build_children(
     task_list: list[dict[str, Any]], task_schemas: list[Optional[dict[str, Any]]], routes: list[Any], *,
     top_role: str, max_iterations: int, parent_agent,
     live_deleg_id: Optional[str], live_writers: list, task_images: Optional[list[Optional[list[str]]]] = None,
-    resume: Optional[dict] = None, retain_sessions: bool = False,
+    resume: Optional[dict] = None, retain_sessions: bool = False, workflow_request=None,
 ) -> tuple[list[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe), each on its task's route;
     ``(children, None)`` or ``([], error)`` on a construction or session-admission failure."""
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
     children = []
-    from agent.subagent_context import attach_fork_history, fork_history
+    from agent.subagent_context import attach_fork_history, fork_history, format_fork_history
     from agent.subagent_extension import get_subagent_extension, resolve_child_options
     extension = get_subagent_extension()
     try:
         options = [resolve_child_options(extension, task) for task in task_list]
-        histories = [fork_history(parent_agent, task=task, extension=extension)
+        histories = [(format_fork_history(workflow_request.history, task=task, extension=extension)
+                      if workflow_request is not None else fork_history(parent_agent, task=task, extension=extension))
                      if option["fork_context"] and not resume and not route.error else []
                      for task, option, route in zip(task_list, options, routes)]
     except Exception as exc:
@@ -484,7 +496,9 @@ def _build_children(
     for i, t in enumerate(task_list):
         route = routes[i]
         if route.error:
-            continue  # refused by its backend: no child; its result entry is the refusal
+            continue  # refused by its backend: no workflow or child is allocated
+        from agent.workflow_agents_admission import prepare_child_workflow, close_unattached_workflow
+        child_workflow = prepare_child_workflow(parent_agent, workflow_request, children)
         overrides = _route_overrides(route)
         if resume:
             overrides["session_id"] = resume["record"]["current_session_id"]
@@ -505,6 +519,7 @@ def _build_children(
             )
         except Exception as exc:
             logger.warning("Subagent construction failed", exc_info=True)
+            close_unattached_workflow(child_workflow)
             from tools.delegate_tool_child_run import _close_child, _detach_child
             for _, _, built in children:
                 _detach_child(parent_agent, built)
@@ -542,8 +557,11 @@ def _build_children(
             from tools.delegate_sessions import bind_child
             bind_child(parent_agent, child, t, resume, extension=extension, options=options[i], routing_cfg=route.routing_cfg,
                        retain=retain_sessions)
+            if child_workflow is not None:
+                child_workflow.attach(child)
         except Exception as exc:
             logger.warning("Subagent session reservation failed", exc_info=True)
+            close_unattached_workflow(child_workflow)
             from tools.delegate_tool_child_run import _close_child, _detach_child
             for built in [child, *(c for _, _, c in children)]:
                 _detach_child(parent_agent, built)
@@ -598,6 +616,7 @@ def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
     return None
 
 
+@inherit_workflow_admission
 def delegate_task(
     goal: Optional[str] = None, context: Optional[str] = None, tasks: Optional[list[dict[str, Any]]] = None,
     max_iterations: Optional[int] = None, role: Optional[str] = None, background: Optional[bool] = None,
@@ -606,7 +625,7 @@ def delegate_task(
     credentials_cfg: Optional[dict[str, Any]] = None,
     session_id: Optional[str] = None, model: Optional[str] = None, query: Optional[str] = None,
     limit: int = 20, _resume: Optional[dict] = None,
-    _retain_sessions: bool = False, _extension_request: Optional[dict] = None,
+    _retain_sessions: bool = False, _extension_request: Optional[dict] = None, _workflow_request=None,
 ) -> str:
     """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control running ones. ``action``
     list/steer/stop run synchronously and bypass the pause gate, depth limit and async dispatch. ``role`` is legacy
@@ -718,11 +737,16 @@ def delegate_task(
     _announce_batch(parent_agent, len(task_list), live_deleg_id)
     origin = _capture_origin()
 
-    children, err = _build_children(
-        task_list, task_schemas, routes, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
-        live_deleg_id=live_deleg_id, live_writers=live_writers, task_images=task_images,
-        resume=_resume, retain_sessions=_retain_sessions,
-    )
+    from contextlib import nullcontext
+    from agent.workflow_agents_admission import HOST_ADMISSION
+    with HOST_ADMISSION.construct_lock if _workflow_request is not None else nullcontext():
+        if _workflow_request is not None:
+            _workflow_request.check()
+        children, err = _build_children(
+            task_list, task_schemas, routes, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
+            live_deleg_id=live_deleg_id, live_writers=live_writers, task_images=task_images,
+            resume=_resume, retain_sessions=_retain_sessions, workflow_request=_workflow_request,
+        )
     if err:
         return tool_error(err)
     batch = _Batch(

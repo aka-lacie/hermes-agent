@@ -760,7 +760,7 @@ def _dispatch_authorized_once(
             state.data_use = frozenset(data_use)
 
 
-def _run_agent_tool_execution_middleware(
+def _execute_policy_pipeline(
     agent,
     *,
     function_name: str,
@@ -838,6 +838,14 @@ def _run_agent_tool_execution_middleware(
         },
     )
     return state
+
+
+def _run_agent_tool_execution_middleware(agent, *, function_name, function_args,
+                                        effective_task_id, tool_call_id, execute, **options):
+    from agent.tool_invocation import CallContext, invoke_tool
+    context = CallContext(agent, effective_task_id, tool_call_id)
+    return invoke_tool({"name": function_name, "arguments": function_args}, context,
+                       execute=execute, **options)
 
 
 # Sequential wait-loop poll cadence: /stop lands within ~1s even if the tool never polls is_interrupted().
@@ -918,8 +926,9 @@ def _run_sequential_tool_execution_middleware(
     are ``_NEVER_PARALLEL_TOOLS`` and run inline below, before any deadline is armed, so
     they need no ``_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS`` entry."""
     from agent.tool_dispatch_helpers import _extend_tool_timeout
-
-    timeout_s = None if function_name in _SEQUENTIAL_DEADLINE_EXEMPT_TOOLS else _resolve_sequential_tool_timeout()
+    from agent.code_cells import is_cell_entry_point
+    cell_entry = function_name == "execute_code" or is_cell_entry_point(function_name)
+    timeout_s = None if cell_entry or function_name in _SEQUENTIAL_DEADLINE_EXEMPT_TOOLS else _resolve_sequential_tool_timeout()
     timeout_s = _extend_tool_timeout(function_name, timeout_s)
     ref = _ToolCallRef(function_name, function_args, effective_task_id, tool_call_id, middleware_trace)
     kwargs = dict(ref.middleware_kwargs(), execute=execute, scope_block=scope_block, display_index=display_index)

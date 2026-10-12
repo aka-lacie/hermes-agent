@@ -30,6 +30,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("rpc_transport_context")
+
 os.environ["TERMINAL_ENV"] = "local"
 
 
@@ -405,16 +407,29 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
             return proc
 
         results = []
+        release_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(release_dir.cleanup)
+        release = Path(release_dir.name) / "release"
+        results_lock = threading.Lock()
+        code = ("import os, time\nwhile not os.path.exists(" + repr(str(release))
+                + "): time.sleep(0.01)")
         with patch("tools.code_kernel.subprocess.Popen", side_effect=_capturing_popen):
             with _kernel_config():
                 def _cell():
-                    results.append(self._run_as("conv-a", "import time; time.sleep(0.3)", task_id="t"))
+                    result = self._run_as("conv-a", code, task_id="t")
+                    with results_lock:
+                        results.append(result)
+                        if len(results) == 5:
+                            release.touch()
                 threads = [threading.Thread(target=_cell) for _ in range(6)]
                 for t in threads:
                     t.start()
                 for t in threads:
                     t.join()
-        self.assertEqual([r["status"] for r in results], ["success"] * 6)
+        self.assertEqual(sum(r["status"] == "success" for r in results), 1)
+        refused = [r for r in results if r["status"] != "success"]
+        self.assertEqual(len(refused), 5)
+        self.assertTrue(all("kernel_busy" in r["error"] for r in refused))
         self.assertEqual(len(_KERNELS), 1)
         runners = [proc for proc, args in spawned
                    if len(args) == 2 and Path(args[1]).name == "hermes_kernel_runner.py"]
