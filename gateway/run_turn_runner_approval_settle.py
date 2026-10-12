@@ -69,21 +69,21 @@ async def _post_settled_notice(ctx, command, card_message_id, timeout_s, *, prov
 
     adapter = ctx._status_adapter
     if reason == "interrupted":
-        notice = "Approval cancelled; the command was NOT run."
+        notice = t("approval.summary.cancelled", noun=t("approval.noun.command"))
     elif choice in {"once", "session", "always"}:
-        notice = "Approved (" + choice + ")."
+        notice = t("approval.allowed_" + choice).strip()
     elif choice == "deny":
-        notice = "Denied."
+        notice = t("approval.denied").strip()
     elif reason == "timeout":
         notice = format_approval_timed_out_notice(timeout_s)
     else:
-        notice = "Approval cancelled; the command was NOT run."
+        notice = t("approval.summary.cancelled", noun=t("approval.noun.command"))
     origin = format_provenance(provenance)
     body = t("gateway.exec_approval.timed_out_card_body", notice=notice, command=command) + "\n\n" + origin
     try:
         if card_message_id and await _edit_card(adapter, ctx._status_chat_id, card_message_id, body):
             return
-        if allow_send:
+        if allow_send and reason == "timeout" and choice is None:
             await adapter.send(ctx._status_chat_id, notice + "\n\n" + origin,
                                metadata=_interim_metadata(ctx._status_thread_metadata))
     except Exception:
@@ -98,6 +98,6 @@ async def _edit_card(adapter, chat_id: str, message_id: str, content: str) -> bo
     try:
         result = await edit(chat_id, message_id, content)
     except Exception:
-        logger.debug("Approval card edit failed; sending the notice as a new message", exc_info=True)
+        logger.debug("Approval card edit failed", exc_info=True)
         return False
     return bool(getattr(result, "success", False))
