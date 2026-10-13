@@ -52,7 +52,8 @@ async def test_child_completion_cannot_change_route_or_close_parent(conversation
                           model_config={"_delegate_from": entry.session_id})
         child = "delegate-tip"
     assert db.try_acquire_session_turn_lease(child, "delegate-worker", ttl_seconds=300)
-    event = {"type": "completion", "session_id": "proc-child", "parent_session_id": child}
+    event = {"type": "completion", "session_id": "proc-child", "parent_session_id": child,
+             "session_key": entry.session_key}
 
     # Preflight must terminally decline before adapter acceptance, not falsely
     # acknowledge or retry forever. Already-admitted events need the same guard.
@@ -98,8 +99,7 @@ async def test_queued_child_watch_event_never_starts_foreground_turn(conversatio
 async def test_parent_results_and_compression_continuations_still_deliver(conversation):
     runner, db, entry, _ = conversation
     parent_id = entry.session_id
-    # The delegate's RESULT and a process explicitly handed to the parent target
-    # this parent ID, unlike an intermediate process owned by the child.
+    # Ordinary parent-owned processes and delegation results use this parent ID.
     claim = await runner._preflight_completion_delivery(
         {"type": "completion", "session_id": "handed-off", "parent_session_id": entry.session_id},
     )
@@ -113,3 +113,67 @@ async def test_parent_results_and_compression_continuations_still_deliver(conver
     assert resolved.session_id == "parent-tip"
     assert runner.session_store.lookup_by_session_key(entry.session_key).session_id == "parent-tip"
     assert db.get_session(parent_id)["end_reason"] == "compression"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["same", "compressed-root", "compressed-tip"])
+async def test_explicit_resume_keeps_background_delivery(conversation, target):
+    runner, db, entry, _ = conversation
+    child = "explicit-child"
+    db.create_session(child, source="subagent", parent_session_id=entry.session_id,
+                      model_config={"_delegate_from": entry.session_id})
+    resumed = runner.session_store.switch_session(entry.session_key, child, preserve_prompt_pin=False)
+    target_id = child
+    expected = child
+    if target != "same":
+        db.end_session(child, end_reason="compression")
+        db.create_session("explicit-tip", source="discord", parent_session_id=child,
+                          model_config={"_delegate_from": entry.session_id})
+        expected = "explicit-tip"
+        if target == "compressed-tip":
+            target_id = expected
+    claim = await runner._preflight_completion_delivery(
+        {"type": "completion", "session_id": "proc-resumed", "parent_session_id": target_id,
+         "session_key": entry.session_key},
+    )
+    resolved = await runner._resolve_async_delegation_session(resumed, target_id)
+    assert claim.proceed
+    assert resolved.session_id == expected
+    assert runner.session_store.lookup_by_session_key(entry.session_key).session_id == expected
+    if target != "same":
+        assert db.get_session(child)["end_reason"] == "compression"
+
+
+@pytest.mark.asyncio
+async def test_real_handoff_retargets_an_already_registered_watcher(conversation, monkeypatch):
+    import gateway.run as gateway_run
+    import tools.process_registry as processes
+    from tools.delegate_tool_registry import _active_subagents
+    from tools.terminal_tool_background import _register_completion_watcher
+
+    runner, db, entry, source = conversation
+    child_id, owner = "handoff-child", "sa-handoff-child"
+    db.create_session(child_id, source="subagent", parent_session_id=entry.session_id)
+    registry = processes.ProcessRegistry()
+    proc = processes.ProcessSession(
+        id="proc-handoff", command="synthetic", task_id=owner, owner_task_id=owner,
+        session_key=entry.session_key, parent_session_id=child_id, watcher_platform="discord",
+        watcher_chat_id=source.chat_id, watcher_user_id=source.user_id, notify_on_complete=True,
+    )
+    registry._running[proc.id] = proc  # No OS process or provider is launched.
+    monkeypatch.setattr(gateway_run, "_gateway_runner_ref", None)
+    _register_completion_watcher(registry, proc, entry.session_key)
+    watcher = registry.pending_watchers[0]
+    parent = SimpleNamespace(session_id=entry.session_id, _current_task_id="parent-turn")
+    child = SimpleNamespace(_delegate_parent_ref=lambda: parent)
+    monkeypatch.setitem(_active_subagents, owner, {"agent": child})
+    monkeypatch.setattr(processes, "process_registry", registry)
+
+    result = processes._handoff_process(proc.id, {"data": "report this synthetic result"}, owner)
+    assert result["status"] == "handed_off"
+    proc.exit_code = 0
+    event = runner._build_process_completion_event(watcher, proc, proc.id)
+    assert event["parent_session_id"] == entry.session_id
+    assert (await runner._preflight_completion_delivery(event)).proceed
+    assert await runner._resolve_async_delegation_session(entry, event["parent_session_id"]) is entry
+    assert runner.session_store.lookup_by_session_key(entry.session_key).session_id == entry.session_id

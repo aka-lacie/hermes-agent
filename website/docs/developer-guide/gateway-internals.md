@@ -698,11 +698,12 @@ while it stops, drained at startup and post-turn. Agent-notify watchers send no 
 receipt (the agent's next turn is the report) unless the launching turn is still running at exit
 — then the injection only queues a follow-up, so the concise receipt goes out immediately.
 
-Delegate-owned process notifications cannot wake a foreground gateway agent or switch the
-chat to the child's transcript. The child polls its process or explicitly hands it to the
-parent; process output remains available. A delegation's final result targets its parent and
-continues through normal delivery. Both completion preflight and queued-event resolution
-enforce this boundary, including when a child's transport metadata says Discord or Telegram.
+Delegate-owned process notifications cannot switch a chat into the child's transcript.
+The child polls its process or hands it to the parent; handoff updates the completion's
+target even if a watcher was registered earlier. Explicitly resuming a child in the chat
+allows notifications in that conversation, including its compression continuations.
+A delegation's final result still targets its parent. Both completion preflight and
+queued-event resolution enforce this boundary independently of inherited transport metadata.
 
 The idle completion watcher also drains `watch_match` / `watch_disabled`; no user follow-up is
 required. Notify-off drains these without waking. Transport failures are retried; unavailable

@@ -7,7 +7,7 @@ logger = logging.getLogger("gateway.run")
 
 
 def is_delegate_target(row: dict) -> bool:
-    """A delegate (including compression continuations) has no gateway wake lane.
+    """Identify delegate lineage independently of its current transport.
 
     Transport metadata can overwrite source with discord/telegram. The creation
     source and inherited delegation marker still identify the owner.
@@ -23,12 +23,42 @@ def is_delegate_target(row: dict) -> bool:
     return isinstance(config, dict) and bool(config.get("_delegate_from"))
 
 
-async def classify_completion_target(session_db, parent_session_id: str) -> str:
-    """deliver, terminal (closed/missing/delegate), or retry on uncertain storage.
+async def delegate_route_verdict(session_db, target_id: str, current_id: str) -> str:
+    """A delegate may wake only a route already bound to its conversation.
+
+    Explicit /resume is allowed, including subsequent compression. A descendant
+    relation alone is not ownership: a delegate is NOT its parent's continuation.
+    """
+    if not current_id:
+        return "terminal"
+    if current_id == target_id:
+        return "deliver"
+    try:
+        current_tip = await session_db.get_compression_tip(current_id)
+        target_tip = await session_db.get_compression_tip(target_id)
+    except Exception:
+        logger.debug("Delegate notification lineage lookup failed", exc_info=True)
+        return "retry"
+    return "deliver" if current_tip and current_tip == target_tip else "terminal"
+
+
+async def _delegate_preflight(session_db, target_id, session_store, session_key):
+    if session_store is None or not session_key:
+        return "terminal"
+    try:
+        entry = await session_store.lookup_by_session_key(session_key)
+    except Exception:
+        logger.debug("Delegate notification route lookup failed", exc_info=True)
+        return "retry"
+    return await delegate_route_verdict(session_db, target_id, entry.session_id if entry else "")
+
+
+async def classify_completion_target(session_db, parent_session_id: str, *, session_store=None, session_key="") -> str:
+    """deliver, terminal (closed/missing/off-route), or retry on uncertain storage.
 
     Children poll their processes or hand them to the parent. Their notifications
-    must not create foreground agents on child transcripts. A delegation's final
-    result targets the parent and still uses normal gateway delivery.
+    must not switch the chat into a child transcript. Explicitly resumed children
+    and a delegation's final result targeting the parent retain normal delivery.
     """
     from gateway.run import _USER_BOUNDARY_END_REASONS
     if session_db is None:
@@ -38,8 +68,12 @@ async def classify_completion_target(session_db, parent_session_id: str) -> str:
     except Exception:
         logger.debug("Async-completion pre-flight parent lookup failed for %s", parent_session_id, exc_info=True)
         return "retry"
-    if parent is None or is_delegate_target(parent):
+    if parent is None:
         return "terminal"
+    if is_delegate_target(parent):
+        verdict = await _delegate_preflight(session_db, parent_session_id, session_store, session_key)
+        if verdict != "deliver":
+            return verdict
     if not parent.get("ended_at"):
         return "deliver"
     end_reason = str(parent.get("end_reason") or "")
