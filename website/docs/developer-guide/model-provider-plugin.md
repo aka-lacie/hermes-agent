@@ -301,6 +301,7 @@ meaning says otherwise.
 | `supports_vision` | API accepts images inside tool-result messages | `False` |
 | `supports_vision_tool_messages` | API accepts list-type (multipart) tool message content | `True` |
 | `supports_prompt_cache_key` | Chat Completions endpoint documents `prompt_cache_key` | `False` |
+| `anthropic_prompt_cache_upstream_owned` | The upstream places Anthropic Messages cache breakpoints; Hermes adds no `cache_control` markers | `False` |
 | `native_reasoning_details_type` | Namespaced `<provider>.native_assistant` reasoning carrier only this profile receives | `None` |
 | `process_command` | External-process default binary | `""` |
 | `process_args` | External-process default argv tail | `()` |
