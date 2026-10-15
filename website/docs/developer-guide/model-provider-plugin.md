@@ -96,6 +96,7 @@ Full definition in `providers/base.py`. The most useful ones:
 | `name` | str | Canonical id — matches `model.provider` in `config.yaml` and the `--provider` flag |
 | `aliases` | `tuple[str, ...]` | Alternative names resolved by `get_provider_profile()` (e.g. `grok` → `xai`) |
 | `api_mode` | str | `chat_completions` \| `codex_responses` \| `anthropic_messages` \| `bedrock_converse` |
+| `anthropic_native` | bool | Explicitly declares that this entire provider identity's `anthropic_messages` route verifies native Anthropic thinking signatures and supports the native prompt-cache/tool-marker path, including on a custom endpoint. Defaults to `False` |
 | `display_name` | str | Human label shown in `hermes model` picker |
 | `description` | str | Picker subtitle |
 | `signup_url` | str | Shown during first-run setup ("get an API key here") |
@@ -215,6 +216,56 @@ class AcmeProfile(ProviderProfile):
         standard client."""
         return None
 ```
+
+## Native Anthropic client factories
+
+A native Messages provider may override the typed
+`ProviderProfile.create_anthropic_client(options)` hook. Import
+`AnthropicClientOptions`, `AnthropicClient`, and `ProviderContractError` from
+`providers.anthropic`. The default hook (or returning `None`) retains Hermes'
+existing official SDK construction. For custom clients, return an SDK-compatible
+Messages client, not an OpenAI chat facade.
+
+`options` contains resolved `api_key`, `base_url`, `timeout` and
+`drop_context_1m_beta`. Do not log or persist this credential-bearing object.
+`options.build_default(http_client=...)` constructs the official SDK with Hermes'
+existing auth/header/retry policy **without redispatching the factory**. This lets
+a thin wrapper own its HTTP transport without duplicating message conversion,
+thinking replay, cache placement, or usage normalization. Callable bearer auth
+retains its core auth-hook transport and cannot replace that HTTP client.
+
+Preserve the SDK surfaces Hermes consumes: `messages.create`, `messages.stream`
+(native events and context/final-message behavior), `with_options`, `close`,
+`is_closed`, `api_key`, `base_url`, and `_client` for watchdog socket shutdown.
+Factories owning route restrictions must also enforce them after request
+overrides, on lazy stream sends, and on every option clone. Private HTTP access
+is for trusted lifecycle machinery, not a security sandbox for hostile plugins.
+
+Hermes dispatches this hook for main construction, per-request reconstruction,
+credential refresh/rotation, model switching, primary restore, fallback, and
+native auxiliary/summary/compression routes. Existing auxiliary facades remain
+outside the returned client. Request caches distinguish provider identity and
+current profile/discovery scope. Auto auxiliary cache entries also revalidate the
+effective selected provider's factory and route, including a fallback selected
+instead of the main provider. Construction captures the selected declaration
+before invoking its factory and carries that immutable provenance through the
+auxiliary facades. A declaration replaced during construction cannot certify the
+older client: obsolete or missing provenance declines auto caching. An in-flight
+caller may finish using its own client; later acquisitions resolve current policy.
+
+Raise `ProviderContractError` with a credential-free message for local policy
+rejection. A factory's unexpected exception or incompatible return is converted
+to that same terminal error. Core does not retry, rotate credentials, invoke a
+fallback provider, or construct a generic client after it. Ordinary errors from
+an accepted client retain normal recovery behavior. This terminal exception is
+also honored at legacy client-factory boundaries; other legacy exceptions keep
+their existing fail-open semantics. Do not use exceptions to decline a native
+factory: return `None` deliberately instead.
+
+`anthropic_native=True` is the separate replay/cache capability declaration;
+the factory does not imply or replace it. Multi-protocol relays need separate
+provider identities. A user-defined provider with the same name can replace a
+plugin profile and its factory; do not shadow a guarded provider in config.
 
 ## Account usage
 
@@ -344,6 +395,21 @@ Four built-in values are recognized (`chat_completions`, `codex_responses`, `ant
 5. Default `chat_completions`
 
 Set `profile.api_mode` to match the default your provider ships — it acts as a hint. User URL overrides still win.
+
+For a provider that terminates or faithfully proxies the native Anthropic Messages contract, set
+`api_mode="anthropic_messages"` and `anthropic_native=True`. This is an explicit trust declaration:
+Hermes will replay signed `thinking`/`redacted_thinking` blocks and use the existing native
+Anthropic prompt-cache path even when the endpoint hostname is custom. Do not set it merely because
+an endpoint accepts Anthropic-shaped JSON; undeclared unknown relays deliberately retain
+conservative signature stripping. The declaration applies to **every model served by that provider
+identity** and takes precedence over URL/model-family routing heuristics, including Kimi, DeepSeek,
+and MiniMax. A multi-protocol relay must therefore
+register separate provider identities and set `anthropic_native=True` only on its Anthropic-native
+identity.
+
+This selects the existing native policy, not a new replay or caching algorithm: native model-generation
+rules still decide whether closed historical thinking is retained, and explicit cache disables remain
+effective. It does not change authentication or force a different wire protocol.
 
 ### Shipping your own wire dialect
 

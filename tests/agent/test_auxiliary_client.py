@@ -5258,6 +5258,8 @@ class TestAutoRoutedProviderProfileHooks:
         profile = DynamicProfile(name="agentgateway")
         client = MagicMock()
         client.base_url = "https://gateway.example.com/v1"
+        from providers.anthropic import bind_client_provenance, provider_client_binding
+        bind_client_provenance(client, provider_client_binding("agentgateway", profile=profile))
         response = MagicMock()
         response.choices = [MagicMock(message=MagicMock(content="ok"))]
 

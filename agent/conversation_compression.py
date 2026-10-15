@@ -1029,9 +1029,10 @@ def _run_pinned_compression_retry(
                 on_timeout_cause=on_timeout_cause, fence=retry_fence, telemetry_agent=telemetry_agent,
                 stall_fallback=False,
             )
-    except Exception:
-        # The primary already failed; a failing fallback must degrade, never
-        # turn "continue without compression" into a raised turn.
+    except Exception as exc:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(exc)
+        # Ordinary fallback failures still degrade; local provider policy is terminal.
         logger.warning("Context compression fallback attempt on %s failed", route["label"], exc_info=True)
         return None
     if result_msgs is messages:

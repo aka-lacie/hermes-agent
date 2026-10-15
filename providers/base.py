@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from agent.account_usage import AccountUsageSnapshot
+    from providers.anthropic import AnthropicClient, AnthropicClientOptions
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,11 @@ class ProviderProfile:
     # ── Identity ─────────────────────────────────────────────
     name: str
     api_mode: str = "chat_completions"
+    # This entire provider identity's Anthropic Messages route verifies native Anthropic thinking
+    # signatures even when served from a non-Anthropic endpoint. Unknown compatible relays stay
+    # conservative: absent/False means endpoint policy decides and arbitrary hosts strip signed
+    # thinking. A multi-protocol relay must use a separate identity for this native route.
+    anthropic_native: bool = field(default=False, kw_only=True)
     aliases: tuple = ()
 
     # ── Human-readable metadata ───────────────────────────────
@@ -322,6 +328,16 @@ class ProviderProfile:
             return True
         from hermes_cli.auth import read_credential_pool  # lazy: providers/ must not import hermes_cli at load
         return bool(read_credential_pool(self.name))
+
+    def create_anthropic_client(self, options: AnthropicClientOptions) -> AnthropicClient | None:
+        """Optional native Messages client; None retains Hermes' standard SDK builder.
+
+        Unlike the legacy OpenAI factory, exceptions are terminal. Implementations
+        own request-time restrictions and must preserve them on clones and every
+        create/stream call. Use options.build_default() to retain SDK setup without
+        re-entering this hook. Core owns client lifecycle and signed replay.
+        """
+        return None
 
     def create_client(self, **client_kwargs: Any) -> Any | None:
         """Return a provider-specific client, or ``None`` for the standard one.

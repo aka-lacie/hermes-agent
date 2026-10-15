@@ -248,7 +248,7 @@ def assemble_api_request(
             from agent.anthropic_thinking_policy import native_anthropic_preserves_prior_thinking
 
             if native_anthropic_preserves_prior_thinking(
-                getattr(agent, "base_url", ""), getattr(agent, "model", "")
+                getattr(agent, "base_url", ""), getattr(agent, "model", ""), getattr(agent, "provider", "")
             ):
                 approx_tokens = estimate_native_anthropic_messages_tokens_rough(api_messages)
             else:

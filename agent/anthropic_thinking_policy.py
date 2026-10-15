@@ -82,12 +82,30 @@ _ROUTE_RULES = (
 )
 
 
-def anthropic_thinking_route(base_url: Any, model: Any) -> str:
+def provider_declares_anthropic_native(provider: Any) -> bool:
+    """Whether the registered provider explicitly owns native Anthropic signed-thinking replay.
+
+    The declaration is provider identity, not hostname, model spelling, authentication style, or
+    an Anthropic-compatible-wire claim.  ``is True`` keeps malformed plugin values fail-closed.
+    """
+    if not isinstance(provider, str) or not provider.strip():
+        return False
+    from providers import _get_loaded_provider_profile
+
+    profile = _get_loaded_provider_profile(provider.strip().lower())
+    return profile is not None and getattr(profile, "anthropic_native", False) is True
+
+
+def anthropic_thinking_route(base_url: Any, model: Any, provider: Any = None) -> str:
     """Which thinking-replay contract an Anthropic Messages request follows: ``kimi`` (replay as-is),
     ``deepseek`` (unsigned only), ``native`` (Anthropic-signed blocks: the direct API, Nous Portal,
     Bedrock, Vertex AI, Azure AI Foundry), ``minimax`` (its own signed blocks, returned unchanged on
     every turn as its docs require) or ``third_party`` (an unknown relay that cannot verify Anthropic
-    signatures: strip all). The converter, accounting and signature-rejection state share this."""
+    signatures: strip all). A provider profile's explicit ``anthropic_native=True`` declaration is
+    authoritative for arbitrary endpoints. The converter, accounting and signature-rejection state
+    share this classification."""
+    if provider_declares_anthropic_native(provider):
+        return "native"
     return next((route for route, matches in _ROUTE_RULES if matches(base_url, model)), "third_party")
 
 
@@ -96,7 +114,7 @@ def route_replays_prior_thinking(route: str, model: Any) -> bool:
     return route == "minimax" or (route == "native" and model_preserves_prior_thinking(model))
 
 
-def native_anthropic_preserves_prior_thinking(base_url: Any, model: Any) -> bool:
+def native_anthropic_preserves_prior_thinking(base_url: Any, model: Any, provider: Any = None) -> bool:
     """True when the route replays (and the model keeps) signed thinking from earlier turns, so stale
     thinking reaches the wire and accounting must charge the signed carriers."""
-    return route_replays_prior_thinking(anthropic_thinking_route(base_url, model), model)
+    return route_replays_prior_thinking(anthropic_thinking_route(base_url, model, provider), model)

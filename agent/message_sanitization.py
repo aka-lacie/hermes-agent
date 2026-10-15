@@ -760,7 +760,7 @@ def stale_thinking_reaches_wire(api_mode: Any, provider: Any, model: Any, base_u
     """
     if (api_mode or "") == "anthropic_messages":
         from agent.anthropic_thinking_policy import native_anthropic_preserves_prior_thinking
-        if native_anthropic_preserves_prior_thinking(base_url, model):
+        if native_anthropic_preserves_prior_thinking(base_url, model, provider):
             return True
     if not api_mode:
         # No route facts (a bare compressor): only the must-echo tier is known to replay.

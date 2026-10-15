@@ -27,6 +27,7 @@ def _unprefix_oauth_tool_name(name: str) -> str:
 _BUILD_KWARG_DEFAULTS = {
     "max_tokens": 16384, "reasoning_config": None, "tool_choice": None, "is_oauth": False, "preserve_dots": False,
     "context_length": None, "base_url": None, "fast_mode": False, "drop_context_1m_beta": False,
+    "provider": None,
 }
 
 
@@ -43,9 +44,11 @@ class AnthropicTransport(ProviderTransport):
         return "anthropic_messages"
 
     def convert_messages(self, messages: list[dict[str, Any]], **kwargs) -> Any:
-        """Convert OpenAI messages to an Anthropic (system, messages) tuple; ``base_url`` and ``model`` pick the thinking-replay policy."""
+        """Convert OpenAI messages; provider identity, endpoint and model pick the thinking policy."""
         from agent.anthropic_message_convert import convert_messages_to_anthropic
-        return convert_messages_to_anthropic(messages, base_url=kwargs.get("base_url"), model=kwargs.get("model"))
+        return convert_messages_to_anthropic(
+            messages, base_url=kwargs.get("base_url"), model=kwargs.get("model"), provider=kwargs.get("provider"),
+        )
 
     def convert_tools(self, tools: list[dict[str, Any]]) -> Any:
         """Convert OpenAI tool schemas to Anthropic input_schema format."""

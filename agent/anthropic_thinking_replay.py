@@ -48,7 +48,7 @@ def tracks_rejected_thinking(agent: Any) -> bool:
     from agent.anthropic_thinking_policy import SIGNED_REPLAY_ROUTES, anthropic_thinking_route
 
     return getattr(agent, "api_mode", None) == "anthropic_messages" and anthropic_thinking_route(
-        getattr(agent, "base_url", None), getattr(agent, "model", None)
+        getattr(agent, "base_url", None), getattr(agent, "model", None), getattr(agent, "provider", None)
     ) in SIGNED_REPLAY_ROUTES
 
 

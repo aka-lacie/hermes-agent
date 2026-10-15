@@ -1158,6 +1158,7 @@ def _build_anthropic_client_from_runtime(agent, rt: dict[str, Any]) -> None:
     agent._anthropic_client = build_anthropic_client(
         rt["anthropic_api_key"], rt["anthropic_base_url"],
         timeout=get_provider_request_timeout(agent.provider, agent.model),
+        provider=agent.provider,
     )
     agent._is_anthropic_oauth = rt["is_anthropic_oauth"]
     agent.client = None
@@ -1221,6 +1222,8 @@ def try_recover_primary_transport(
         time.sleep(wait_time)
         return True
     except Exception as e:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(e)
         logger.warning("Primary transport recovery failed: %s", e)
         return False
 
@@ -1488,6 +1491,8 @@ def restore_primary_runtime(agent) -> bool:
                 )
         return True
     except Exception as e:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(e)
         logger.warning("Failed to restore primary runtime: %s", e)
         return False
 
@@ -1612,9 +1617,17 @@ def _direct_native_anthropic_tool_cache_capability(
     api_mode: Optional[str] = None, model: Optional[str] = None,
 ) -> bool:
     """Return whether this resolved destination accepts native tool markers."""
+    eff_provider = provider if provider is not None else (agent.provider or "")
     eff_base_url = base_url if base_url is not None else (agent.base_url or "")
     eff_api_mode = api_mode if api_mode is not None else (agent.api_mode or "")
-    return eff_api_mode == "anthropic_messages" and base_url_hostname(eff_base_url) == "api.anthropic.com"
+    if eff_api_mode != "anthropic_messages":
+        return False
+    from agent.anthropic_thinking_policy import provider_declares_anthropic_native
+
+    return (
+        provider_declares_anthropic_native(eff_provider)
+        or base_url_hostname(eff_base_url) == "api.anthropic.com"
+    )
 
 
 # The cache_ttl tiers accepted by config; mirrored by agent_init's live-agent snapshot.
@@ -1842,6 +1855,11 @@ def anthropic_prompt_cache_policy(
                 return custom_prompt_caching, custom_prompt_caching and is_anthropic_wire
         except Exception as _cap_exc:
             logger.debug("custom-provider prompt_caching capability lookup failed: %s", _cap_exc)
+    # An explicit provider-wide native contract outranks URL/model-family heuristics, but not
+    # operator or per-model cache disables above. Reuse the existing native planner unchanged.
+    from agent.anthropic_thinking_policy import provider_declares_anthropic_native
+    if is_anthropic_wire and provider_declares_anthropic_native(eff_provider):
+        return True, True
     # MiniMax-M3 uses server-side automatic prefix caching; explicit markers are dead weight.
     # Checked BEFORE the native-Anthropic return since provider="anthropic" may point at a MiniMax
     # proxy.
@@ -1914,7 +1932,9 @@ def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
         return None
     try:
         return profile.create_client(**client_kwargs)
-    except Exception:
+    except Exception as exc:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(exc)
         _ra().logger.warning(
             "Provider profile %r failed to create a client; falling back to the standard client path",
             getattr(profile, "name", provider_name) or "?", exc_info=True,
@@ -2231,6 +2251,7 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         agent._anthropic_client = build_anthropic_client(
             effective_key, agent._anthropic_base_url,
             timeout=get_provider_request_timeout(agent.provider, agent.model),
+            provider=new_provider,
         )
         agent._is_anthropic_oauth = anthropic_route_is_oauth(agent._anthropic_base_url, effective_key, provider=new_provider)
         agent.client = None

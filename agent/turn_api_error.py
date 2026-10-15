@@ -79,6 +79,16 @@ def handle_api_error(
     if agent.thinking_callback:
         agent.thinking_callback("")
 
+    from providers.anthropic import ProviderContractError, raise_if_provider_contract_error
+    try:
+        raise_if_provider_contract_error(api_error)
+    except ProviderContractError as rejection:
+        return _verdict("return", {
+            "final_response": str(rejection), "messages": messages, "api_calls": api_call_count,
+            "completed": False, "failed": True, "error": str(rejection),
+            "failure_reason": "provider_contract", "failure_retryable": False,
+        })
+
     _recovered, active_system_prompt = recover_before_classification(
         agent, api_error, messages=messages, api_messages=api_messages, api_kwargs=api_kwargs,
         active_system_prompt=active_system_prompt,

@@ -71,7 +71,7 @@ def _preflight_request_tokens(
         from agent.anthropic_thinking_policy import native_anthropic_preserves_prior_thinking
 
         if native_anthropic_preserves_prior_thinking(
-            getattr(agent, "base_url", ""), getattr(agent, "model", "")
+            getattr(agent, "base_url", ""), getattr(agent, "model", ""), getattr(agent, "provider", "")
         ):
             from agent.anthropic_thinking_replay import apply_rejected_thinking_suppression
 

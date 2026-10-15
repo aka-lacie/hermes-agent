@@ -1698,10 +1698,14 @@ def _translate_anthropic_response_format(anthropic_kwargs: dict[str, Any], respo
 class _AnthropicCompletionsAdapter:
     """OpenAI-client-compatible adapter for Anthropic Messages API."""
 
-    def __init__(self, real_client: Any, model: str, is_oauth: bool = False, base_url: str | None = None):
+    def __init__(
+        self, real_client: Any, model: str, is_oauth: bool = False,
+        base_url: str | None = None, provider: str | None = None,
+    ):
         self._client = real_client
         self._model = model
         self._is_oauth = is_oauth
+        self._provider = provider
         # Caller URL first; fall back to the SDK client's host only for Nous Portal — a blanket
         # fallback would flip MiniMax/Zhipu aux adapters to third-party handling (strips thinking sigs).
         self._base_url = base_url or None
@@ -1749,6 +1753,7 @@ class _AnthropicCompletionsAdapter:
             # Portal routes on ``anthropic/<slug>`` ids and replays signed thinking
             # keyed off base_url; omitting it breaks Portal model resolution.
             base_url=self._base_url,
+            provider=self._provider,
         )
         # Opus 4.7+ rejects non-default temperature/top_p/top_k; build_anthropic_kwargs
         # also strips these as a safety net — keep both layers.
@@ -1813,9 +1818,14 @@ class _AnthropicCompletionsAdapter:
 class AnthropicAuxiliaryClient:
     """OpenAI-client-compatible wrapper over a native Anthropic client."""
 
-    def __init__(self, real_client: Any, model: str, api_key: str, base_url: str, is_oauth: bool = False):
+    def __init__(
+        self, real_client: Any, model: str, api_key: str, base_url: str,
+        is_oauth: bool = False, provider: str | None = None,
+    ):
         self._real_client = real_client
-        self.chat = _ChatShim(_AnthropicCompletionsAdapter(real_client, model, is_oauth=is_oauth, base_url=base_url))
+        self.chat = _ChatShim(_AnthropicCompletionsAdapter(
+            real_client, model, is_oauth=is_oauth, base_url=base_url, provider=provider,
+        ))
         self.api_key = api_key
         self.base_url = base_url
 
@@ -1904,7 +1914,8 @@ def _endpoint_speaks_anthropic_messages(base_url: str) -> bool:
 
 
 def _maybe_wrap_anthropic(
-    client_obj: Any, model: str, api_key: str, base_url: str, api_mode: Optional[str] = None
+    client_obj: Any, model: str, api_key: str, base_url: str,
+    api_mode: Optional[str] = None, provider: Optional[str] = None,
 ) -> Any:
     """Rewrap a plain OpenAI client in ``AnthropicAuxiliaryClient`` when the endpoint speaks Anthropic Messages.
 
@@ -1934,8 +1945,10 @@ def _maybe_wrap_anthropic(
         )
         return client_obj
     try:
-        real_client = build_anthropic_client(api_key, base_url)
+        real_client = build_anthropic_client(api_key, base_url, provider=provider)
     except Exception as exc:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(exc)
         logger.warning(
             "Failed to build Anthropic client for %s (%s) — falling back to "
             "OpenAI-wire client.", base_url, exc,
@@ -1946,7 +1959,9 @@ def _maybe_wrap_anthropic(
         "(model=%s, base_url=%s, api_mode=%s)",
         model, base_url[:60] if base_url else "", api_mode or "auto-detected",
     )
-    return AnthropicAuxiliaryClient(real_client, model, api_key, base_url, is_oauth=False)
+    return AnthropicAuxiliaryClient(
+        real_client, model, api_key, base_url, is_oauth=False, provider=provider,
+    )
 
 
 def _read_nous_auth() -> Optional[dict]:
@@ -2217,7 +2232,10 @@ def _resolve_api_key_provider() -> tuple[Optional[OpenAI], Optional[str]]:
         if merged:
             extra["default_headers"] = merged
         client = _create_openai_client(api_key=api_key, base_url=base_url, **extra)
-        return _maybe_wrap_anthropic(client, model, api_key, raw_base_url), model
+        return _maybe_wrap_anthropic(
+            client, model, api_key, raw_base_url,
+            api_mode=_profile_declared_messages_wire(provider_id), provider=provider_id,
+        ), model
     return None, None
 
 
@@ -2892,6 +2910,34 @@ def _validate_base_url(base_url: str) -> None:
         ) from exc
 
 
+def _same_normalized_base_url(left: str | None, right: str | None) -> bool:
+    """Whether two resolved base URLs identify the exact same endpoint.
+
+    Scheme/host/default-port normalization and one trailing slash are benign; path, query,
+    fragment, and embedded-userinfo differences are not. Borrowing the main provider's identity
+    for an anonymous custom route requires this match; malformed or hostless URLs never match.
+    """
+    def normalized(value: str | None) -> tuple[Any, ...] | None:
+        text = str(value or "").strip()
+        try:
+            parsed = urlparse(text)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+                return None
+            origin = base_url_origin(text)
+            if not origin[1]:
+                return None
+            return (
+                *origin,
+                parsed.username or "", parsed.password or "",
+                parsed.path.removesuffix("/"), parsed.params, parsed.query, parsed.fragment,
+            )
+        except ValueError:
+            return None
+
+    normalized_left = normalized(left)
+    return normalized_left is not None and normalized_left == normalized(right)
+
+
 def _try_custom_endpoint() -> tuple[Optional[Any], Optional[str]]:
     runtime = _resolve_custom_runtime()
     custom_base, custom_key, custom_mode = (*runtime, None) if len(runtime) == 2 else runtime
@@ -2899,6 +2945,14 @@ def _try_custom_endpoint() -> tuple[Optional[Any], Optional[str]]:
         return None, None
     if custom_base.lower().startswith(_CODEX_AUX_BASE_URL.lower()):
         return None, None
+    live_runtime = _normalize_main_runtime(None)
+    # A native declaration belongs to one provider identity at its own resolved endpoint. A bare
+    # auxiliary custom route may point elsewhere; never lend it the main provider's authority.
+    provider = (
+        str(live_runtime.get("provider") or "custom")
+        if _same_normalized_base_url(live_runtime.get("base_url"), custom_base)
+        else None
+    )
     model = _read_main_model_for_aux() or "gpt-4o-mini"
     logger.debug("Auxiliary client: custom endpoint (%s, api_mode=%s)", model, custom_mode or "chat_completions")
     _clean_base, _dq = _extract_url_query_params(custom_base)
@@ -2916,18 +2970,22 @@ def _try_custom_endpoint() -> tuple[Optional[Any], Optional[str]]:
         try:
             from agent.anthropic_adapter import build_anthropic_client
             from agent.anthropic_credentials import anthropic_route_is_oauth
-            real_client = build_anthropic_client(custom_key, custom_base)
+            real_client = build_anthropic_client(custom_key, custom_base, provider=provider)
         except ImportError:
             logger.warning(
                 "Custom endpoint declares api_mode=anthropic_messages but the "
                 "anthropic SDK is not installed — falling back to OpenAI-wire."
             )
             return _create_openai_client(api_key=custom_key, base_url=_clean_base, **_extra), model
-        return AnthropicAuxiliaryClient(real_client, model, custom_key, custom_base,
-                                        is_oauth=anthropic_route_is_oauth(custom_base, custom_key)), model
+        return AnthropicAuxiliaryClient(
+            real_client, model, custom_key, custom_base,
+            is_oauth=anthropic_route_is_oauth(custom_base, custom_key), provider=provider,
+        ), model
     # URL-based anthropic detection for custom endpoints without explicit api_mode.
     _fallback_client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **_extra)
-    return _maybe_wrap_anthropic(_fallback_client, model, custom_key, custom_base, custom_mode), model
+    return _maybe_wrap_anthropic(
+        _fallback_client, model, custom_key, custom_base, custom_mode, provider,
+    ), model
 
 
 def _build_xai_oauth_aux_client(model: str) -> tuple[Optional[Any], Optional[str]]:
@@ -3034,7 +3092,9 @@ def _try_azure_foundry(
         return CodexAuxiliaryClient(client, final_model), final_model
     if runtime_api_mode == "anthropic_messages":
         # api_key forwarded verbatim (string or Entra callable; build_anthropic_client installs the bearer hook).
-        return _maybe_wrap_anthropic(client, final_model, api_key, base_url, runtime_api_mode), final_model
+        return _maybe_wrap_anthropic(
+            client, final_model, api_key, base_url, runtime_api_mode, "azure-foundry",
+        ), final_model
     return client, final_model
 
 
@@ -3090,10 +3150,12 @@ def _try_anthropic(explicit_api_key: Optional[str | Callable[[], str]] = None,
         return _AuxProbeClientStub(api_key="", base_url=base_url), model
     logger.debug("Auxiliary client: Anthropic native (%s) at %s (oauth=%s)", model, base_url, is_oauth)
     try:
-        real_client = build_anthropic_client(token, base_url)
+        real_client = build_anthropic_client(token, base_url, provider="anthropic")
     except ImportError:
         return None, None  # Adapter imports fine but the anthropic SDK itself is missing.
-    return AnthropicAuxiliaryClient(real_client, model, token, base_url, is_oauth=is_oauth), model
+    return AnthropicAuxiliaryClient(
+        real_client, model, token, base_url, is_oauth=is_oauth, provider="anthropic",
+    ), model
 
 
 _MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "auth_mode")
@@ -3337,6 +3399,8 @@ def _is_transient_transport_error(exc: Exception) -> bool:
 
     Deliberately narrow: payment/auth/rate-limit errors switch provider, refresh creds, or rotate the pool.
     """
+    from providers.anthropic import raise_if_provider_contract_error
+    raise_if_provider_contract_error(exc)
     if _is_connection_error(exc):
         return True
     status = _exc_http_status(exc)
@@ -4163,6 +4227,8 @@ def _call_fallback_candidate_sync(
     try:
         return _send_recovering(fb_client, fb_kwargs, destination)
     except Exception as fb_err:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(fb_err)
         if not _is_auth_error(fb_err):
             capacity = fallback_candidate_unavailable_reason(fb_err)
             if capacity is None:
@@ -4179,6 +4245,8 @@ def _call_fallback_candidate_sync(
             try:
                 return _send_recovering(*retry)
             except Exception as retry_err:
+                from providers.anthropic import raise_if_provider_contract_error
+                raise_if_provider_contract_error(retry_err)
                 if not _is_auth_error(retry_err) and fallback_candidate_unavailable_reason(retry_err) is None:
                     raise
         _quarantine_fallback_candidate(
@@ -4213,6 +4281,8 @@ async def _call_fallback_candidate_async(
     try:
         return await _send_recovering(fb_client, fb_kwargs, destination)
     except Exception as fb_err:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(fb_err)
         if not _is_auth_error(fb_err):
             capacity = fallback_candidate_unavailable_reason(fb_err)
             if capacity is None:
@@ -4229,6 +4299,8 @@ async def _call_fallback_candidate_async(
             try:
                 return await _send_recovering(*retry)
             except Exception as retry_err:
+                from providers.anthropic import raise_if_provider_contract_error
+                raise_if_provider_contract_error(retry_err)
                 if not _is_auth_error(retry_err) and fallback_candidate_unavailable_reason(retry_err) is None:
                     raise
         _quarantine_fallback_candidate(
@@ -4331,7 +4403,9 @@ def _try_main_agent_model_fallback(
         return None, None, ""
     try:
         client, resolved_model = resolve_provider_client(provider=main_provider, model=main_model)
-    except Exception:
+    except Exception as exc:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(exc)
         client, resolved_model = None, None
     if client is None:
         return None, None, ""
@@ -4427,7 +4501,9 @@ def _try_configured_fallback_chain(
         label = f"fallback_chain[{i}]({fb_provider})"
         try:
             fb_client, resolved_model = _resolve_fallback_entry(entry)
-        except Exception:
+        except Exception as exc:
+            from providers.anthropic import raise_if_provider_contract_error
+            raise_if_provider_contract_error(exc)
             fb_client, resolved_model = None, None
         if fb_client is not None:
             too_small = _context_too_small(
@@ -4519,6 +4595,8 @@ def _try_main_fallback_chain(
         try:
             fb_client, resolved_model = _resolve_fallback_entry(entry)
         except Exception as exc:
+            from providers.anthropic import raise_if_provider_contract_error
+            raise_if_provider_contract_error(exc)
             logger.debug("Auxiliary %s: main fallback %s failed to resolve: %s", task or "call", label, exc)
             fb_client, resolved_model = None, None
         if fb_client is not None:
@@ -4654,7 +4732,10 @@ def _try_discovery_chain() -> tuple[Optional[OpenAI], Optional[str], str]:
             _log_skip_unhealthy(label, base_url=candidate_base_url)
             tried.append(f"{label} (unhealthy)")
             continue
+        from providers.anthropic import bind_client_provenance, provider_client_binding
+        binding = provider_client_binding(label)
         client, model = try_fn()
+        bind_client_provenance(client, binding)
         if client is not None:
             if tried:
                 logger.info("Auxiliary auto-detect: using %s (%s) — skipped: %s",
@@ -4842,7 +4923,9 @@ def _build_bedrock_client(provider: str, model: Optional[str], *, raw_codex: boo
         except ImportError as exc:
             logger.warning("resolve_provider_client: cannot create Bedrock client: %s", exc)
             return None, None
-        client = AnthropicAuxiliaryClient(real_client, final_model, api_key="aws-sdk", base_url=base_url)
+        client = AnthropicAuxiliaryClient(
+            real_client, final_model, api_key="aws-sdk", base_url=base_url, provider=provider,
+        )
         logger.debug("resolve_provider_client: bedrock anthropic (%s, %s)", final_model, region)
     else:
         client = BedrockAuxiliaryClient(region, final_model)
@@ -4964,7 +5047,9 @@ def _wrap_transport(req: _ResolveRequest, client_obj: Any, final_model_str: str,
     # A profile that declares the Messages wire (commandcode-anthropic) is on it whatever the URL
     # looks like; the same declaration gates ``_reasoning_config`` in _build_call_kwargs.
     api_mode = req.api_mode or _profile_declared_messages_wire(req.provider)
-    return _maybe_wrap_anthropic(client_obj, final_model_str, api_key_str, base_url_str, api_mode)
+    return _maybe_wrap_anthropic(
+        client_obj, final_model_str, api_key_str, base_url_str, api_mode, req.provider,
+    )
 
 
 def _profile_declared_messages_wire(provider: str) -> Optional[str]:
@@ -4977,7 +5062,10 @@ def _profile_declared_messages_wire(provider: str) -> Optional[str]:
 def _route_client(req: _ResolveRequest, client_obj: Any, final_model_str: Optional[str]) -> _ResolveResult:
     """Return (client, model), converting to the async wrapper when ``req.async_mode``."""
     if req.async_mode:
-        return _to_async_client(client_obj, final_model_str, is_vision=req.is_vision)
+        from providers.anthropic import bind_client_provenance, client_provenance
+        binding = client_provenance(client_obj)
+        client, model = _to_async_client(client_obj, final_model_str, is_vision=req.is_vision)
+        return bind_client_provenance(client, binding), model
     return client_obj, final_model_str
 
 
@@ -5037,7 +5125,7 @@ def _resolve_nous_branch(req: _ResolveRequest) -> _ResolveResult:
     from hermes_cli.providers import nous_api_mode
     client = _maybe_wrap_anthropic(
         client, final_model, str(getattr(client, "api_key", "") or ""),
-        str(getattr(client, "base_url", "") or ""), nous_api_mode(final_model),
+        str(getattr(client, "base_url", "") or ""), nous_api_mode(final_model), "nous",
     )
     return _route_client(req, client, final_model)
 
@@ -5112,6 +5200,12 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
         _main_key = _normalize_api_key(main_runtime.get("api_key"))
         if _main_base and _main_key:
             custom_base, custom_key = _main_base, _main_key
+            # This branch intentionally inherits the concrete main destination, not an unrelated
+            # custom URL. Keep its owning identity and wire together (including in the cache key).
+            req = req._replace(
+                provider=str(main_runtime.get("provider") or provider),
+                api_mode=req.api_mode or main_runtime.get("api_mode"),
+            )
     if custom_base and custom_key:
         if _is_actual_auxiliary_route(req, custom_base):
             from hermes_cli.auth import normalize_actual_base_url
@@ -5217,7 +5311,7 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
         try:
             from agent.anthropic_adapter import build_anthropic_client
             from agent.anthropic_credentials import anthropic_route_is_oauth
-            real_client = build_anthropic_client(custom_key, custom_base)
+            real_client = build_anthropic_client(custom_key, custom_base, provider=provider)
             if entry_headers:
                 # Same entry headers as the two OpenAI-wire arms; ``with_options`` merges onto the
                 # beta/credential-Omit headers the builder installed (#109595).
@@ -5227,8 +5321,10 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
                            "is not installed — falling back to OpenAI-wire.", provider)
             return _route_client(req, _named_custom_openai_wire_client(custom_base, custom_key, entry_headers), final_model)
         return _route_client(
-            req, AnthropicAuxiliaryClient(real_client, final_model, custom_key, custom_base,
-                                          is_oauth=anthropic_route_is_oauth(custom_base, custom_key)), final_model)
+            req, AnthropicAuxiliaryClient(
+                real_client, final_model, custom_key, custom_base,
+                is_oauth=anthropic_route_is_oauth(custom_base, custom_key), provider=req.provider,
+            ), final_model)
     client = _named_custom_openai_wire_client(custom_base, custom_key, entry_headers)
     # codex_responses, or auto-detect via _wrap_transport (which reads the task-level api_mode).
     if entry_api_mode == "codex_responses":
@@ -5265,7 +5361,9 @@ def _api_key_profile_supplied_client(provider: str, **client_kwargs: Any) -> Any
         return None
     try:
         return profile.create_client(**client_kwargs)
-    except Exception:
+    except Exception as exc:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(exc)
         logger.warning("resolve_provider_client: provider profile %r failed to create an "
                        "auxiliary client; falling back to the standard client path",
                        provider, exc_info=True)
@@ -5306,6 +5404,17 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
     if req.explicit_base_url and provider != "actual":
         base_url = _to_openai_base_url(req.explicit_base_url.strip().rstrip("/"))
     final_model = _normalize_resolved_model(req.model or _get_aux_model_for_provider(provider), provider)
+    from providers import get_provider_profile
+    from providers.base import ProviderProfile
+    native_profile = get_provider_profile(provider)
+    if (native_profile is not None
+            and type(native_profile).create_anthropic_client is not ProviderProfile.create_anthropic_client
+            and (req.api_mode or native_profile.api_mode) == "anthropic_messages"):
+        from agent.anthropic_adapter import build_anthropic_client
+        real_client = build_anthropic_client(api_key, raw_base_url, provider=provider)
+        return _route_client(req, AnthropicAuxiliaryClient(
+            real_client, final_model, api_key, raw_base_url, provider=provider,
+        ), final_model)
     # Consulted before the built-in gemini/OpenAI ladder so a registered native transport wins (#112384).
     profile_client = _api_key_profile_supplied_client(provider, api_key=api_key, base_url=base_url)
     if profile_client is not None:
@@ -5490,6 +5599,13 @@ def resolve_provider_client(
         explicit_base_url, explicit_api_key, api_mode, main_runtime, is_vision, task,
     )
     branch = _EXPLICIT_PROVIDER_BRANCHES.get(provider)
+    from providers.anthropic import bind_client_provenance, provider_client_binding
+    binding = provider_client_binding(provider) if provider != "auto" else None
+
+    def finish(result: _ResolveResult) -> _ResolveResult:
+        client, resolved_model = result
+        return bind_client_provenance(client, binding), resolved_model
+
     alias_identity = original_provider.removeprefix("custom:")
     # A configured provider whose name collides with a local-server alias is still a named
     # provider. Resolve it before the alias's generic ``custom`` branch, which otherwise loses
@@ -5500,12 +5616,12 @@ def resolve_provider_client(
         except ImportError:
             result = None
         if result is not None:
-            return result
+            return finish(result)
     if branch is not None:
-        return branch(req)
+        return finish(branch(req))
     if provider == "azure-foundry":
-        return _resolve_azure_foundry_branch(req)
-    return _resolve_registry_branch(req)
+        return finish(_resolve_azure_foundry_branch(req))
+    return finish(_resolve_registry_branch(req))
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
@@ -5804,8 +5920,13 @@ def _client_cache_key(
     api_key_key = _runtime_cache_discriminator("api_key", api_key or "")
     # Profile home leads the key: callers that omit api_key (pool / Nous auth.json paths) would
     # otherwise share one client across multiplex profiles holding different credentials.
+    # A discovery reload must not let an ordinary cached SDK satisfy a newly guarded
+    # declaration with the same route and credential. Auto/custom can borrow main identity.
+    from providers.anthropic import anthropic_factory_identity
+    factory_key = anthropic_factory_identity(_normalize_aux_provider(provider))
+    main_factory_key = anthropic_factory_identity(runtime.get("provider")) if provider in {"auto", "custom"} else None
     return (hermes_home_key(), provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key,
-            _borrowed_main_credential_key(provider, base_url, api_key, runtime))
+            _borrowed_main_credential_key(provider, base_url, api_key, runtime), factory_key, main_factory_key)
 
 
 def _borrowed_main_credential_key(provider: str, base_url: Optional[str], api_key: Any, runtime: dict[str, Any]) -> tuple:
@@ -5818,7 +5939,8 @@ def _borrowed_main_credential_key(provider: str, base_url: Optional[str], api_ke
         return ()
     if not base_url:
         # This shape takes the runtime's endpoint and key even when an explicit key was passed.
-        return (runtime.get("base_url", ""), _runtime_cache_discriminator("api_key", runtime.get("api_key", "")))
+        return (runtime.get("provider", ""), runtime.get("api_mode", ""), runtime.get("base_url", ""),
+                _runtime_cache_discriminator("api_key", runtime.get("api_key", "")))
     # Same normalization as the client build, which treats a blank explicit key as keyless.
     if _normalize_api_key(api_key):
         return ()
@@ -5835,14 +5957,39 @@ def _current_event_loop() -> Any:
         return None
 
 
+def _auto_client_binding(client: Any) -> tuple | None:
+    """Validate carried construction provenance; never certify an old client anew."""
+    from providers.anthropic import client_provenance, provider_client_binding
+    effective = _effective_provider_for_client(client, "")
+    binding = client_provenance(client)
+    if not effective or binding is None or binding != provider_client_binding(effective):
+        return None  # Unknown or obsolete construction cannot enter/re-enter the cache.
+    return (*binding, str(getattr(client, "base_url", "") or ""))
+
+
+def _cache_entry(client: Any, model: Optional[str], loop: Any, provider: str) -> tuple | None:
+    entry = (client, model, loop)
+    if provider != "auto":
+        return entry
+    binding = _auto_client_binding(client)
+    return (*entry, binding) if binding is not None else None
+
+
+def _cache_owner_matches(entry: tuple, provider: str) -> bool:
+    return provider != "auto" or (len(entry) == 4 and entry[3] == _auto_client_binding(entry[0]))
+
+
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
     if isinstance(client, _AuxProbeClientStub):
         return  # probe stubs must never be cached — the next hit would get a dud client
+    entry = _cache_entry(client, default_model, bound_loop, cache_key[1])
+    if entry is None:
+        return
     with _client_cache_lock:
         old_entry = _client_cache.get(cache_key)
         if old_entry is not None and old_entry[0] is not client:
             _close_cached_client(old_entry[0])
-        _client_cache[cache_key] = (client, default_model, bound_loop)
+        _client_cache[cache_key] = entry
 
 
 def _refresh_nous_auxiliary_client(
@@ -5869,12 +6016,18 @@ def _refresh_nous_auxiliary_client(
     if runtime is None:
         return None, model
     fresh_key, fresh_base_url = runtime
+    from providers.anthropic import bind_client_provenance, provider_client_binding
+    binding = provider_client_binding("nous")
     sync_client = _create_openai_client(api_key=fresh_key, base_url=fresh_base_url)
     current_loop = _current_event_loop() if async_mode else None
     if async_mode:
         client, final_model = _to_async_client(sync_client, model or "", is_vision=is_vision)
     else:
         client, final_model = sync_client, model
+    if cache_provider == "auto":
+        # Refresh bypasses _resolve_auto_branch, but still has a known owner.
+        client._hermes_aux_effective_provider = "nous"
+        bind_client_provenance(client, binding)
     cache_key = _client_cache_key(
         cache_provider, async_mode=async_mode, base_url=base_url, api_key=api_key,
         api_mode=api_mode, main_runtime=main_runtime, is_vision=is_vision, task=lookup_task,
@@ -6041,15 +6194,19 @@ def _get_cached_client(
     )
     with _client_cache_lock:
         if cache_key in _client_cache:
-            cached_client, cached_default, cached_loop = _client_cache[cache_key]
+            entry = _client_cache[cache_key]
+            cached_client, cached_default, cached_loop = entry[:3]
             loop_ok = not async_mode or (
                 cached_loop is not None and cached_loop is current_loop and not cached_loop.is_closed()
             )
-            if loop_ok:
+            if loop_ok and _cache_owner_matches(entry, provider):
                 return cached_client, _compat_model(cached_client, model, cached_default)
             # Stale async entry — evict. Only a closed owner loop may be awaited here; a live
             # foreign loop stays force-neutered.
-            _close_cached_client(cached_client, close_async=cached_loop is not None and cached_loop.is_closed())
+            if not loop_ok:
+                _close_cached_client(cached_client, close_async=cached_loop is not None and cached_loop.is_closed())
+            # A declaration change invalidates reuse, but another request may still
+            # own this live client. As with FIFO eviction, leave its cleanup to GC.
             del _client_cache[cache_key]
     # Build outside the lock. For pool-backed providers derive the key from the pool entry:
     # resolve_api_key_provider_credentials prefers env vars, which would bypass pool rotation
@@ -6070,17 +6227,21 @@ def _get_cached_client(
         # next probe dies in _compat_model() on stub attribute access, so check_fns flip to
         # False and vision tools vanish for the process lifetime (#87654).
         return client, model or default_model
-    if client is not None:
+    entry = _cache_entry(client, default_model, current_loop, provider) if client is not None else None
+    if entry is not None:
         with _client_cache_lock:
+            existing = _client_cache.get(cache_key)
+            if existing is not None and not _cache_owner_matches(existing, provider):
+                del _client_cache[cache_key]
             if cache_key not in _client_cache:
                 # FIFO safety-belt eviction. Do NOT close evicted clients: another caller may be
                 # mid-request on one; refcount/GC handles it.
                 while len(_client_cache) >= _CLIENT_CACHE_MAX_SIZE:
                     del _client_cache[next(iter(_client_cache))]
-                _client_cache[cache_key] = (client, default_model, current_loop)
+                _client_cache[cache_key] = entry
             else:
                 built_client = client
-                client, default_model, _ = _client_cache[cache_key]
+                client, default_model, _ = _client_cache[cache_key][:3]
                 # Race loser was never exposed to a caller — safe to close now.
                 _close_cached_client(built_client, close_async=async_mode)
     return client, _compat_model(client, model, default_model)
@@ -7106,6 +7267,8 @@ def _create_with_progress(
     try:
         return _create_with_progress_once(client, kwargs, task, force_stream=force_stream)
     except Exception as exc:
+        from providers.anthropic import raise_if_provider_contract_error
+        raise_if_provider_contract_error(exc)
         affordable = _affordable_max_tokens_from_error(exc)
         if affordable is None:
             raise
@@ -8006,6 +8169,8 @@ def _drive_ladder(ladder, perform: Callable[[_LadderStep], Any]) -> Any:
             try:
                 result = perform(step)
             except Exception as exc:
+                from providers.anthropic import raise_if_provider_contract_error
+                raise_if_provider_contract_error(exc)
                 step = ladder.throw(exc)
             else:
                 step = ladder.send(result)
@@ -8021,6 +8186,8 @@ async def _drive_ladder_async(ladder, perform: Callable[[_LadderStep], Any]) -> 
             try:
                 result = await perform(step)
             except Exception as exc:
+                from providers.anthropic import raise_if_provider_contract_error
+                raise_if_provider_contract_error(exc)
                 step = ladder.throw(exc)
             else:
                 step = ladder.send(result)
@@ -8166,6 +8333,8 @@ def _start_recovery_ladder(
     task: Optional[str], async_mode: bool, route_info: Optional[dict[str, str]],
 ):
     """Build the recovery-ladder generator for a failed primary request."""
+    from providers.anthropic import raise_if_provider_contract_error
+    raise_if_provider_contract_error(first_err)
     return _aux_recovery_ladder(
         first_err, client=req.client, kwargs=req.kwargs, task=task, async_mode=async_mode,
         base_info=req.base_info, resolved_provider=req.resolved_provider,
