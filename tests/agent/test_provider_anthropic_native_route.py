@@ -160,6 +160,56 @@ def test_declared_native_enables_native_tool_cache_layout_on_custom_endpoint():
     assert _direct_native_anthropic_tool_cache_capability(agent) is False
 
 
+@pytest.mark.parametrize("provider", [NATIVE_PROVIDER, f"{NATIVE_PROVIDER}-alias"])
+@pytest.mark.parametrize("cache_disabled", [False, True])
+def test_upstream_cache_ownership_prevents_markers_without_changing_signed_replay(
+    monkeypatch, provider, cache_disabled,
+):
+    from agent.agent_runtime_helpers import (
+        anthropic_prompt_cache_policy, plan_cache_sections_for_destination,
+    )
+    from agent.anthropic_adapter import build_anthropic_kwargs
+
+    monkeypatch.setattr(providers._REGISTRY[NATIVE_PROVIDER],
+                        "anthropic_prompt_cache_upstream_owned", True, raising=False)
+    agent = SimpleNamespace(provider=provider, base_url=LOCAL_MESSAGES_URL,
+                            api_mode="anthropic_messages", model=MODEL,
+                            _cache_disabled=cache_disabled, _custom_providers=[])
+    assert anthropic_prompt_cache_policy(agent) == (False, False)
+    messages = [{"role": "system", "content": "Stable system prefix"},
+                {"role": "user", "content": "question"}, _signed_assistant()]
+    tools = [{"type": "function", "function": {
+        "name": "lookup", "description": "Lookup", "parameters": {"type": "object"},
+    }}]
+    planned, planned_tools = plan_cache_sections_for_destination(
+        messages, tools, provider=provider, base_url=LOCAL_MESSAGES_URL,
+        api_mode="anthropic_messages", model=MODEL,
+        cache_disabled=cache_disabled, cache_ttl="1h",
+    )
+    wire = build_anthropic_kwargs(
+        MODEL, planned, planned_tools, 128, None,
+        base_url=LOCAL_MESSAGES_URL, provider=provider,
+    )
+    assert '"cache_control"' not in json.dumps(wire)
+    assert _assistant_block_types(wire["messages"]) == ["thinking", "redacted_thinking", "text"]
+    assert wire["messages"][-1]["content"] == messages[-1]["anthropic_content_blocks"]
+    assert planned == messages and planned_tools == tools
+
+
+@pytest.mark.parametrize("value", [False, None, "true", 1])
+def test_only_explicit_upstream_cache_ownership_changes_native_defaults(monkeypatch, value):
+    from agent.agent_runtime_helpers import anthropic_prompt_cache_policy
+
+    assert ProviderProfile(name="ordinary").anthropic_prompt_cache_upstream_owned is False
+    monkeypatch.setattr(providers._REGISTRY[NATIVE_PROVIDER],
+                        "anthropic_prompt_cache_upstream_owned", value, raising=False)
+    agent = SimpleNamespace(provider=NATIVE_PROVIDER, base_url=LOCAL_MESSAGES_URL,
+                            api_mode="anthropic_messages", model=MODEL, _custom_providers=[])
+    assert anthropic_prompt_cache_policy(agent) == (True, True)
+    agent._cache_disabled = True
+    assert anthropic_prompt_cache_policy(agent) == (False, False)
+
+
 def test_declared_route_participates_in_rejection_healing_without_mutating_history():
     canonical = _signed_assistant("bad")
     request_copy = [{**canonical, "anthropic_content_blocks": list(canonical["anthropic_content_blocks"])}]

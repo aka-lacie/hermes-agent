@@ -1830,6 +1830,14 @@ def anthropic_prompt_cache_policy(
     # Nous Portal proxies to OpenRouter; treat as OpenRouter-equivalent for cache layout.
     is_nous_portal = base_url_host_matches(eff_base_url, "nousresearch.com")
     is_anthropic_wire = eff_api_mode == "anthropic_messages"
+    if is_anthropic_wire:
+        from providers import _get_loaded_provider_profile
+
+        profile = _get_loaded_provider_profile(eff_provider.strip().lower())
+        # Breakpoint ownership is independent of native signed-thinking support. Consult only
+        # loaded profiles: send-time policy must not trigger discovery or network requests.
+        if getattr(profile, "anthropic_prompt_cache_upstream_owned", False) is True:
+            return False, False
     is_native_anthropic = is_anthropic_wire and (
         eff_provider == "anthropic" or base_url_hostname(eff_base_url) == "api.anthropic.com"
     )

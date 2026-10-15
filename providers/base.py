@@ -109,6 +109,12 @@ class ProviderProfile:
     # top-level fields rather than ignoring them.
     supports_prompt_cache_key: bool = False
 
+    # The upstream owns Anthropic Messages cache breakpoint placement. Hermes must not
+    # decorate requests with cache_control; this is independent of signed-thinking support.
+    # False preserves Hermes' existing cache policy. Operator disable still suppresses Hermes
+    # markers, but cannot disable automatic caching implemented by an upstream service.
+    anthropic_prompt_cache_upstream_owned: bool = field(default=False, kw_only=True)
+
     # Private replay carriers use a namespaced '<provider>.native_assistant' type
     # in reasoning_details. Only this profile may receive its matching carrier;
     # other providers (including an unregistered fallback) get ordinary details only.
