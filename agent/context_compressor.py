@@ -3932,6 +3932,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             self._record_summary_success(summary)
             return self._with_summary_prefix(summary)
         except Exception as e:  # health: allow BLE001 -- unchanged summary boundary: every failure goes to _on_summary_failure
+            from providers.anthropic import raise_if_provider_contract_error
+            raise_if_provider_contract_error(e)
             return self._on_summary_failure(e, turns_to_summarize, focus_topic, memory_context)
 
     def _record_summary_success(self, summary: str) -> None:
@@ -4953,7 +4955,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         from agent.anthropic_thinking_policy import native_anthropic_preserves_prior_thinking
 
         if (getattr(self, "api_mode", "") or "") != "anthropic_messages" or not native_anthropic_preserves_prior_thinking(
-            getattr(self, "base_url", ""), getattr(self, "model", "")
+            getattr(self, "base_url", ""), getattr(self, "model", ""), getattr(self, "provider", "")
         ):
             return None
         from agent.anthropic_thinking_replay import session_rejected_thinking, strip_rejected_thinking

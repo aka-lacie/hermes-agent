@@ -256,6 +256,19 @@ def get_provider_profile(name: str) -> ProviderProfile | None:
     return profile
 
 
+def _get_loaded_provider_profile(name: str) -> ProviderProfile | None:
+    """Look up an already-resolved provider without discovery, filesystem scans, or config reads.
+
+    Hot request/conversion paths use this after provider resolution has loaded the owning profile.
+    A miss deliberately stays a miss rather than turning a wire-safety check into plugin discovery.
+    """
+    if not isinstance(name, str) or not name:
+        return None
+    layer, _home, _key = _bound_home_layer()
+    canonical = layer.aliases.get(name) or _ALIASES.get(name, name)
+    return layer.registry.get(canonical) or _REGISTRY.get(canonical)
+
+
 def _miss_recheck_due(layer: _HomeLayer, name: str) -> bool:
     """Whether a miss for *name* may force a plugin-dir check now: once per name per stamp TTL.
 
