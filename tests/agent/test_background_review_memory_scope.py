@@ -157,7 +157,7 @@ class TestConsolidationProposalSurfaces:
 
     def test_near_limit_consolidation_end_to_end(self, tmp_path, monkeypatch):
         """add rejected by the budget -> fork follows the 'consolidate now' hint with a
-        replace -> the ordinary approval gate allows it -> the applied update surfaces."""
+        patch -> the ordinary approval gate allows it -> the applied update surfaces."""
         import json
 
         from tools.memory_tool import memory_tool
@@ -172,7 +172,7 @@ class TestConsolidationProposalSurfaces:
         try:
             add_raw = memory_tool(action="add", content="y" * 600, store=store)
             replace_raw = memory_tool(
-                action="replace", old_text="seed entry one", content="merged entry", store=store)
+                action="patch", old_text="seed entry one", content="merged entry", store=store)
         finally:
             reset_current_write_origin(token)
         assert json.loads(add_raw)["success"] is False  # the budget still rejects the add
@@ -187,7 +187,7 @@ class TestConsolidationProposalSurfaces:
                 {"id": "c1", "function": {"name": "memory", "arguments": json.dumps(
                     {"action": "add", "content": "y" * 600})}},
                 {"id": "c2", "function": {"name": "memory", "arguments": json.dumps(
-                    {"action": "replace", "old_text": "seed entry one", "content": "merged entry"})}},
+                    {"action": "patch", "old_text": "seed entry one", "content": "merged entry"})}},
             ]},
             {"role": "tool", "tool_call_id": "c1", "content": add_raw},
             {"role": "tool", "tool_call_id": "c2", "content": replace_raw},

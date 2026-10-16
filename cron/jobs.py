@@ -31,6 +31,7 @@ from pathlib import Path
 from hermes_constants import get_hermes_home
 from cron.constants import CLAIM_TTL_INACTIVITY_HEADROOM, FIRE_CLAIM_SKEW_SECONDS, FIRE_CLAIM_TTL_SECONDS
 from cron.env_settings import cron_env_setting
+from cron.jobs_invariants import _validate_job_mode_invariants
 from cron.scheduler_ownership import _claim_owner_is_dead
 from cron import store_health
 from typing import Optional, Dict, List, Any, Callable, Set, Tuple, Union, Collection
@@ -436,6 +437,11 @@ def _normalize_job_type(value: Any, *, no_agent: bool = False) -> str:
     return text
 
 
+def job_uses_agent(job: dict[str, Any]) -> bool:
+    """Whether execution needs inference and an owner admission (literal reminders do not)."""
+    return not job.get("no_agent") and _normalize_job_type(job.get("job_type")) == "agent"
+
+
 def _normalize_delivery_mode(value: Any) -> str:
     text = str(value or "direct").strip().lower() or "direct"
     if text not in _CRON_DELIVERY_MODES:
@@ -526,11 +532,6 @@ _PAYLOAD_FIELDS = frozenset({"prompt", "script", "skill", "skills", "no_agent"})
 EMPTY_PAYLOAD_ERROR = (
     "Cron job has nothing to run: the prompt is blank and no script or "
     "skill(s) are set. Provide a prompt, a script, or at least one skill."
-)
-
-NO_AGENT_WITHOUT_SCRIPT_ERROR = (
-    "no_agent=True requires a script — with no agent and no script "
-    "there is nothing for the job to run."
 )
 
 
@@ -1825,30 +1826,6 @@ _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
 }
 
 
-def _validate_job_mode_invariants(
-    monitor_script: Optional[str],
-    monitor_url: Optional[str],
-    no_agent: bool,
-    script: Optional[str],
-    job_type: Optional[str] = None,
-) -> None:
-    """Execution-mode invariants shared by create_job and update_job (no bypass via the update
-    door)."""
-    if monitor_script and monitor_url:
-        raise ValueError(
-            "monitor_script and monitor_url are mutually exclusive — a job "
-            "can only have one monitor source.")
-    if (monitor_script or monitor_url) and no_agent:
-        raise ValueError(
-            "monitor_script/monitor_url cannot be combined with no_agent=True — "
-            "the whole point of a monitor job is to suppress or wake the AGENT "
-            "based on source changes. Use a plain no_agent script job instead.")
-    if no_agent and not script:
-        raise ValueError(NO_AGENT_WITHOUT_SCRIPT_ERROR)
-    if (monitor_script or monitor_url) and _normalize_job_type(job_type, no_agent=no_agent) != "agent":
-        raise ValueError("monitor_script/monitor_url can only be combined with job_type='agent'.")
-
-
 def _validate_reminder_payload(job_type: str, prompt: str, script: Any, skills: Any) -> None:
     if job_type == "reminder":
         if not prompt.strip():
@@ -2558,6 +2535,7 @@ def mark_job_run(
     status: Optional[str] = None,
     *,
     expected_fire_owner: Optional[str] = None,
+    execution_id: Optional[str] = None,
     model_unreachable: bool = False,
     ladder_rung: bool = False,
     quota_hold_seconds: Optional[float] = None,
@@ -2585,6 +2563,8 @@ def mark_job_run(
     (cron/quota_hold.py, #89376).
     """
     def apply(jobs, _i, job):
+        if execution_id is not None and execution_id in job.get("canonical_completions", []):
+            return True
         if expected_fire_owner is not None:
             claim = job.get("fire_claim")
             if not isinstance(claim, dict) or claim.get("by") != expected_fire_owner:
@@ -2594,6 +2574,9 @@ def mark_job_run(
                 return False
         now = _hermes_now().isoformat()
         _record_run_outcome(job, success, error, delivery_error, status, now)
+        if execution_id is not None:  # retire ids recovery can no longer replay; latest stays last
+            from cron.scheduler_authority import replayable_completions as live
+            job["canonical_completions"] = [*live(job_id, job.get("canonical_completions")), execution_id]
         _advance_after_run(job, now, ladder_rung=ladder_rung)
         from cron import quota_hold
         from cron.unreachable_retry import clear_state, plan_retry

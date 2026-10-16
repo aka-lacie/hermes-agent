@@ -70,6 +70,8 @@ def _create_app(adapter: WebhookAdapter) -> web.Application:
     """Build the aiohttp Application from the adapter (without starting a full server)."""
     # Mirror connect(): client_max_size enforces the cap on chunked bodies.
     app = web.Application(client_max_size=adapter._max_body_bytes)
+    from tests.gateway.fixtures.webhook_route_authority import mount_authority
+    mount_authority(app, adapter)
     app.router.add_get("/health", adapter._handle_health)
     app.router.add_post("/webhooks/{route_name}", adapter._handle_webhook)
     return app
@@ -699,16 +701,21 @@ class TestSessionIsolation:
         assert len(ids) == 2, "Each delivery must have a unique session chat_id"
 
     @pytest.mark.asyncio
-    async def test_delivery_tuple_is_an_unambiguous_session_identity(self):
-        """Route, provider delivery ID, and profile form one collision-free identity."""
+    async def test_delivery_tuple_is_an_unambiguous_session_identity(self, monkeypatch):
+        """Route, provider delivery ID, and profile form one collision-free identity (captured at the
+        durable admission seam; the HTTP ack itself waits for that admission)."""
+        from gateway.platforms import webhook_ingress
         adapter = _make_adapter()
         captured_events = []
 
-        async def _capture(event):
+        async def _capture(_adapter, event):
             captured_events.append(event)
+            raise RuntimeError("captured before admission")
 
-        def _spawn(prompt, delivery_id, route, profile, deliver, chat_id, now):
-            return adapter._spawn_agent_run(
+        monkeypatch.setattr(webhook_ingress, "admit_producer", _capture)
+
+        def _admit(prompt, delivery_id, route, profile, deliver, chat_id, now):
+            return adapter._admit_agent_run(
                 {},
                 prompt,
                 delivery_id,
@@ -719,11 +726,10 @@ class TestSessionIsolation:
                 event_type="push",
             )
 
-        adapter.handle_message = _capture
         await asyncio.gather(
-            _spawn("high prompt", "external:d1", "build", "shared-profile", "telegram", "high-chat", 100.0),
-            _spawn("low prompt", "d1", "build:external", "shared-profile", "discord", "low-chat", 101.0),
-            _spawn("other prompt", "external:d1", "build", "other-profile", "slack", "other-chat", 102.0),
+            _admit("high prompt", "external:d1", "build", "shared-profile", "telegram", "high-chat", 100.0),
+            _admit("low prompt", "d1", "build:external", "shared-profile", "discord", "low-chat", 101.0),
+            _admit("other prompt", "external:d1", "build", "other-profile", "slack", "other-chat", 102.0),
         )
 
         events = {event.text: event for event in captured_events}
@@ -814,7 +820,7 @@ class TestInternalTurnDelivery:
         self, tmp_path, monkeypatch, delivery_mode, accepted
     ):
         route = {
-            "profile": "worker",
+            "profile": "default",
             "secret": "routing-test-secret",
             "prompt": "Inspect {subject}",
             "deliver": "discord",
@@ -822,34 +828,19 @@ class TestInternalTurnDelivery:
             "deliver_extra": {"chat_id": "{destination}"},
         }
         adapter = _make_adapter(routes={"inbox": route}, host="127.0.0.1")
-        TestMultiplexProfileWebhookAuthentication._configure_profiles(adapter, tmp_path, monkeypatch)
-        monkeypatch.setattr(
-            "hermes_cli.profiles.get_profile_dir",
-            lambda name: tmp_path / "profiles" / name,
-        )
         target = AsyncMock()
         target.send.return_value = SendResult(success=True)
-        from gateway.authz_mixin import GatewayAuthorizationMixin
-
-        class RoutingRunner(GatewayAuthorizationMixin):
-            pass
-
-        runner = RoutingRunner()
-        runner.config = adapter.gateway_runner.config
-        adapter.gateway_runner = runner
-        adapter.gateway_runner.adapters = {}
-        adapter.gateway_runner._profile_adapters = {"worker": {Platform.DISCORD: target}}
-        adapter.gateway_runner._primary_profile_name = "default"
         events = []
 
         async def capture(event):
             events.append(event)
 
         adapter.handle_message = capture
-        body = json.dumps({"subject": "test message", "destination": "dm-123"}).encode()
-        async with TestClient(TestServer(TestMultiplexProfileWebhookAuthentication._app(adapter))) as cli:
+        body = json.dumps({"subject": "test message", "destination": "dm-123",
+                           "delivery_mode": "direct" if delivery_mode == "internal_turn" else "internal_turn"}).encode()
+        async with TestClient(TestServer(_create_app(adapter))) as cli:
             response = await cli.post(
-                "/p/worker/webhooks/inbox",
+                "/webhooks/inbox",
                 data=body,
                 headers={
                     "Content-Type": "application/json",
@@ -858,39 +849,46 @@ class TestInternalTurnDelivery:
                 },
             )
             assert response.status == 202
-            await asyncio.gather(*list(adapter._background_tasks))
+            runner = adapter._message_handler.__self__
+            runner.adapters[Platform.DISCORD] = target
+            # Losing the TTL cache must not lose completion posture or destination.
+            adapter._delivery_info.clear()
+            adapter.gateway_runner = runner
 
-        assert len(events) == 1
-        assert events[0].source.profile == route["profile"]
-        with patch(
-            "gateway.internal_turns.InternalTurnService.enqueue", return_value=accepted
-        ) as enqueue:
+            from gateway.internal_turns import webhook_worker_instruction_role
+            assert webhook_worker_instruction_role(runner, events[0].source) == (
+                "subagent" if delivery_mode == "internal_turn" else None)
+            assert len(events) == 1
+            assert events[0].source.profile is None
+            with patch(
+                "gateway.internal_turns.InternalTurnService.enqueue", return_value=accepted
+            ) as enqueue:
+                if delivery_mode == "internal_turn":
+                    await adapter.send(events[0].source.chat_id, "worker progress")
+                    enqueue.assert_not_called()
+                    target.send.assert_not_awaited()
+                result = await adapter._send_with_retry(
+                    events[0].source.chat_id, "Verified worker result", max_retries=0
+                )
+
             if delivery_mode == "internal_turn":
-                await adapter.send(events[0].source.chat_id, "worker progress")
-                enqueue.assert_not_called()
+                assert result.success is accepted
                 target.send.assert_not_awaited()
-            result = await adapter._send_with_retry(
-                events[0].source.chat_id, "Verified worker result", max_retries=0
-            )
-
-        if delivery_mode == "internal_turn":
-            assert result.success is accepted
-            target.send.assert_not_awaited()
-            expected_context = {
-                "platform": route["deliver"], "chat_id": "dm-123",
-                "thread_id": None, "user_id": None, "chat_type": "dm",
-                "profile": route["profile"], "kind": "webhook_completion",
-                "source_label": "inbox", "event_id": "routing-event",
-                "metadata": {"webhook_route": "inbox", "webhook_delivery_id": "routing-event"},
-            }
-            assert enqueue.call_args_list[0].args == ("Verified worker result",)
-            assert all(call.kwargs == expected_context for call in enqueue.call_args_list)
-            if accepted:
-                enqueue.assert_called_once()
-        else:
-            assert result.success is True
-            enqueue.assert_not_called()
-            target.send.assert_awaited_once()
+                expected_context = {
+                    "platform": route["deliver"], "chat_id": "dm-123",
+                    "thread_id": None, "user_id": None, "chat_type": "dm",
+                    "profile": None, "kind": "webhook_completion",
+                    "source_label": "inbox", "event_id": "routing-event",
+                    "metadata": {"webhook_route": "inbox", "webhook_delivery_id": "routing-event"},
+                }
+                assert enqueue.call_args_list[0].args == ("Verified worker result",)
+                assert all(call.kwargs == expected_context for call in enqueue.call_args_list)
+                if accepted:
+                    enqueue.assert_called_once()
+            else:
+                assert result.success is True
+                enqueue.assert_not_called()
+                target.send.assert_awaited_once()
 
     def _adapter(self):
         adapter = _make_adapter()
@@ -984,7 +982,7 @@ class TestInternalTurnDelivery:
         )
 
         assert result.success is False
-        assert "live gateway conversation" in result.error
+        assert result.error == "Webhook destination unavailable or unauthorized"
 
 
 # ===================================================================
@@ -1298,6 +1296,7 @@ class TestMultiplexProfileWebhookAuthentication:
     def _configure_profiles(adapter, tmp_path, monkeypatch):
         runner = MagicMock()
         runner.config.multiplex_profiles = True
+        runner._profile_name_for_source.return_value = None
         adapter.gateway_runner = runner
         monkeypatch.setattr(
             "hermes_cli.profiles.profiles_to_serve",
@@ -1406,10 +1405,14 @@ class TestMultiplexProfileWebhookAuthentication:
         self._configure_profiles(adapter, tmp_path, monkeypatch)
         seen = []
 
-        async def _capture(event):
-            seen.append(event)
+        async def _capture(request, route_config, route_name, profile, payload, prompt,
+                           event_type, delivery_id, now):
+            seen.append((profile, prompt))
+            return web.Response(status=202)
 
-        adapter.handle_message = _capture
+        # Rendering-only boundary; the authority correctly refuses an unserved
+        # secondary home (covered independently by the native profile tests).
+        adapter._dispatch_agent_run = _capture
         body = b'{"action":"opened"}'
         headers = {
             "Content-Type": "application/json",
@@ -1423,8 +1426,8 @@ class TestMultiplexProfileWebhookAuthentication:
                 assert resp.status == 202
                 await asyncio.sleep(0.05)
         assert len(seen) == 1
-        assert seen[0].source.profile == "worker"
-        assert "Body of worker-only." in seen[0].text
+        assert seen[0][0] == "worker"
+        assert "Body of worker-only." in seen[0][1]
 
 
 def test_route_profile_validation_fails_closed():

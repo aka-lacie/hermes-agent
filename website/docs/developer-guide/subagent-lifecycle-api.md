@@ -10,6 +10,11 @@ Plugins can launch and supervise independent Hermes child sessions without impor
 The service resolves its parent from the current agent turn, so it works in
 CLI, gateway, non-interactive, and kanban-worker sessions. Launching outside an
 active agent turn fails closed with `No active Hermes parent session`.
+The facade also works when a plugin runs under `plugins.isolation: host`.
+
+Requests accept `goal`, `context`, `role`, `model`, `provider`, `allowed_toolsets`,
+`blocked_tools`, `working_directory`, `parent_session_id`, `correlation_id`,
+`metadata`, and `timeout_seconds`, subject to the restrictions below.
 
 `SubagentLaunchRequest.fork_context` defaults to `True`. Children inherit a private
 snapshot of user turns, final assistant answers, and textual compaction handoffs;
@@ -46,8 +51,14 @@ def launch_review(ctx):
 ```
 
 `SubagentHandle` is serializable and carries a versioned, opaque capability.
-Pass it back to `status`, `wait`, `cancel`, `result`, or `reconnect`; malformed
+Requests and handles may also arrive as mappings, including plugin-host wire records.
+Pass a handle back to `status`, `wait`, `cancel`, `steer`, `result`, or `reconnect`; malformed
 or forged handles return `UNKNOWN`/`UNKNOWN_HANDLE` and cannot access a child.
+
+`steer(handle, text)` queues text for the child's next iteration boundary and
+returns `True` while the child accepts steering. It returns `False` for empty
+text, unknown or forged handles, handles owned by another parent session, or a
+child that has finished or stopped accepting steering.
 
 The stable states are `PENDING`, `STARTING`, `RUNNING`, `SUCCEEDED`, `FAILED`,
 `INTERRUPTED`, `CANCEL_REQUESTED`, `CANCELLED`, and `UNKNOWN`.
@@ -70,8 +81,9 @@ starts a replacement child. Running Python threads also cannot survive process
 exit; callers must treat those handles as interrupted by process exit.
 
 Requests are fail-closed: goal/context/metadata sizes are capped, unknown or
-parent-broadening toolsets are rejected, and per-tool blocks, working-directory
-overrides, and per-launch timeouts are explicitly rejected until Hermes can
+parent-broadening toolsets are rejected (plugin-registered toolsets count as
+known), and per-tool blocks, working-directory overrides, and per-launch
+timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
 
@@ -131,3 +143,13 @@ This extension currently requires `plugins.isolation: in_process`; host-isolated
 registration fails explicitly because the synchronous activation-context callback
 contract has not been implemented across the process boundary. There are no private
 agent objects, runtime monkeypatches, or plugin-name checks in the host integration.
+## Routing
+
+Children follow the `delegation` config (`provider`, `model`, `base_url`,
+`api_key`, `api_mode`, `request_overrides`) exactly as `delegate_task` children do.
+The request's `model` overrides the configured model. Its optional `provider`
+names a configured provider for this launch, with precedence request >
+delegation config > parent; the selected provider supplies its own credential
+bundle. An unresolvable provider raises `SubagentLifecycleError` before launch.
+Core does not expose `provider` to the model: the plugin chooses it, for example
+from operator config.

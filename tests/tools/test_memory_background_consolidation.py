@@ -17,7 +17,7 @@ def _dispatch_background(store, args):
         reset_current_write_origin(token)
 
 
-def test_background_add_replace_batch_applies_with_default_approval_off(tmp_path, monkeypatch):
+def test_background_add_patch_batch_applies_with_default_approval_off(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text("memory:\n  write_approval: false\n", encoding="utf-8")
     store = load_on_disk_store()
@@ -29,7 +29,7 @@ def test_background_add_replace_batch_applies_with_default_approval_off(tmp_path
         "target": "memory",
         "operations": [
             {"action": "add", "content": "Uses dark mode"},
-            {"action": "replace", "old_text": seed, "content": "Prefers concise examples"},
+            {"action": "patch", "old_text": seed, "content": "Prefers concise examples"},
         ],
     })
 
@@ -42,7 +42,7 @@ def test_background_add_replace_batch_applies_with_default_approval_off(tmp_path
     assert list_pending(MEMORY) == []
 
 
-def test_background_replace_stages_when_write_approval_enabled(tmp_path, monkeypatch):
+def test_background_patch_stages_when_write_approval_enabled(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text("memory:\n  write_approval: true\n", encoding="utf-8")
     store = load_on_disk_store()
@@ -50,7 +50,7 @@ def test_background_replace_stages_when_write_approval_enabled(tmp_path, monkeyp
     assert store.add("memory", seed)["success"]
 
     result = _dispatch_background(store, {
-        "action": "replace",
+        "action": "patch",
         "target": "memory",
         "old_text": seed,
         "content": "Prefers concise examples",
@@ -62,4 +62,4 @@ def test_background_replace_stages_when_write_approval_enabled(tmp_path, monkeyp
     record = get_pending(MEMORY, result["pending_id"])
     assert record is not None
     assert record["origin"] == "background_review"
-    assert record["payload"]["action"] == "replace"
+    assert record["payload"]["action"] == "patch"

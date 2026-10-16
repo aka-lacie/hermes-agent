@@ -89,7 +89,7 @@ def test_profile_role_and_concurrent_cache_isolation(tmp_path, eager_all):
                 assert ("write_file" in child_names) is (selected and eager_all)
                 assert "missing_tool" not in child_names
                 assert not any(n.startswith("kanban_") for n in child_names)
-                assert (BRIDGE_TOOL_NAMES <= child_names) is not (selected and eager_all)
+                assert BRIDGE_TOOL_NAMES <= child_names  # granted connections remain discoverable with eager schemas
                 # An enabled connector route retains its bridge alongside eager local tools.
                 with delegated_child_context():
                     connected = assemble_tool_defs([
