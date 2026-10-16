@@ -139,7 +139,8 @@ class GatewayNotificationOwnershipMixin:
             if not isinstance(config, dict):
                 return "terminal", session_id, None
             if "_delegate_from" not in config:
-                return "deliver", session_id, row
+                verdict = "terminal" if row.get("source") == "subagent" else "deliver"
+                return verdict, session_id, row
             parent = config["_delegate_from"]
             if not isinstance(parent, str) or not parent.strip() or hops == _MAX_DELEGATE_PROVENANCE_HOPS:
                 return "terminal", session_id, None
