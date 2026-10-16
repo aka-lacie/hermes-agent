@@ -88,7 +88,35 @@ def automation_display_metadata(metadata):
 # proof at execution from the target the pre-claim check validated, and the turn's resolver reads it.
 _AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
     'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category',
-    'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids'})
+    'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'input_events'})
+
+
+def automation_task_metadata(event):
+    """Keep trusted task feedback across durable admission with a retry-stable origin."""
+    from gateway.input_policy import is_task_feedback
+    records = event.metadata.get('input_events')
+    if not is_task_feedback(event):
+        if records:
+            raise RuntimeStoreError('invalid_params')
+        return {}
+    if not isinstance(records, list) or len(records) != 1:
+        raise RuntimeStoreError('invalid_params')
+    record = records[0]
+    if not isinstance(record, dict) or record.get('kind') != 'task' or record.get('text') != event.text:
+        raise RuntimeStoreError('invalid_params')
+    origin = record.get('origin') or {}
+    if (not isinstance(origin, dict) or origin.get('type') not in ('async_delegation', 'completion', 'watch_match')
+            or not isinstance(origin.get('task_id'), str) or not origin['task_id']):
+        raise RuntimeStoreError('invalid_params')
+    return {'task_origin': {key: origin[key] for key in ('type', 'task_id')}}
+
+
+def restore_automation_task(event, descriptor):
+    origin = descriptor.get('task_origin')
+    if origin:
+        from gateway.input_policy import input_record
+        event.task_feedback = True
+        event.metadata['input_events'] = [input_record(event, origin=origin)]
 
 
 def admission_display(payload):
@@ -151,6 +179,7 @@ def snapshot_automation(authority, adapter, event, identity):
         'event': {'message_id': identity}, 'provenance': provenance,
         'automation': {'identity': identity, 'owner': owner}}
     envelope['automation'].update(notification)
+    envelope['automation'].update(automation_task_metadata(event))
     if getattr(event, '_heartbeat_session_id', None):
         envelope['automation']['heartbeat'] = event._heartbeat_session_id
     identities = event.metadata.get('automation_identities')
@@ -187,6 +216,7 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
                   'route': entry.session_key, 'target': entry.session_id}
     descriptor.update(automation_notification_metadata(event.metadata))
     descriptor.update(automation_display_metadata(event.metadata))
+    descriptor.update(automation_task_metadata(event))
     if event.metadata.get('turn_author') is not None:
         from agent.turn_author import parse_turn_author
         descriptor['turn_author'] = parse_turn_author(event.metadata['turn_author'])
@@ -225,6 +255,7 @@ def restore_local_automation(authority, ref, row):
             'gateway_session_id': entry.session_id})
     event.metadata.update(automation_notification_metadata(descriptor))
     event.metadata.update(automation_display_metadata(descriptor))
+    restore_automation_task(event, descriptor)
     if descriptor.get('turn_author') is not None:
         event.metadata['turn_author'] = deepcopy(descriptor['turn_author'])
     if descriptor.get('heartbeat'):

@@ -31,6 +31,9 @@ async def test_admitted_completion_survives_a_transient_owner_read_after_compres
     resolved = []
 
     async def turn(ev):
+        assert ev.internal and ev.task_feedback
+        assert ev.metadata["input_events"][0]["kind"] == "task"
+        assert ev.metadata["input_events"][0]["origin"]["task_id"] == "ci-exec"
         resolved.append(await runner._hmwa_resolve_session(ev, ev.source))
         return 'ok'
 

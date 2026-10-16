@@ -87,7 +87,6 @@ async def test_webhook_snapshot_to_real_prompt_and_main_receiver(tmp_path, monke
 
                     async def admitted(_adapter, event):
                         await consume(event)
-                        return None
                     monkeypatch.setattr("gateway.platforms.webhook_ingress.admit_producer", admitted)
                     config = {"delivery_mode": mode, "deliver": "discord"}
                     with _profile_runtime_scope(homes[index], prepared_secret_scope={}):

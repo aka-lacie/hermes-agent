@@ -180,10 +180,6 @@ def _internal_turn_target_error(delivery_mode: Any, deliver: Any) -> Optional[st
 
 def webhook_command(args):
     """Entry point for 'hermes webhook' subcommand."""
-
-
-def webhook_command(args):
-    """Entry point for 'hermes webhook' subcommand."""
     sub = getattr(args, "webhook_action", None)
     if not sub:
         print("Usage: hermes webhook {subscribe|list|remove|test}")
