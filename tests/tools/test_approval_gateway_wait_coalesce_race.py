@@ -7,6 +7,8 @@ where the leader's prompt goes away without an answer and where two identical re
 
 import threading
 
+from tests.tools.test_approval_provenance import actor, origin
+
 from tools import approval as mod
 from tools import approval_gateway_wait as wait_mod
 
@@ -51,7 +53,8 @@ def _run_leader_then_follower(monkeypatch, notify_cb, *, leader_poll=_leader_nev
         notify_cb(data, follower_waiting)
 
     def run(name, cb):
-        results[name] = wait_mod._await_gateway_decision(SESSION_KEY, cb, dict(APPROVAL))
+        with origin(actor("same-actor")):
+            results[name] = wait_mod._await_gateway_decision(SESSION_KEY, cb, dict(APPROVAL))
 
     leader = threading.Thread(target=run, args=("leader", leader_notify), daemon=True)
     leader.start()
@@ -143,7 +146,8 @@ def test_identical_requests_racing_to_lead_send_one_prompt(monkeypatch):
     results: list[dict] = []
 
     def run():
-        results.append(wait_mod._await_gateway_decision(SESSION_KEY, notify, dict(APPROVAL)))
+        with origin(actor("same-actor")):
+            results.append(wait_mod._await_gateway_decision(SESSION_KEY, notify, dict(APPROVAL)))
 
     threads = [threading.Thread(target=run, daemon=True) for _ in range(2)]
     for thread in threads:
@@ -182,7 +186,8 @@ def test_followers_released_by_once_share_one_fresh_prompt(monkeypatch):
     results: list[dict] = []
 
     def run():
-        results.append(wait_mod._await_gateway_decision(SESSION_KEY, notified.append, dict(APPROVAL)))
+        with origin(actor("same-actor")):
+            results.append(wait_mod._await_gateway_decision(SESSION_KEY, notified.append, dict(APPROVAL)))
 
     threads = [threading.Thread(target=run, daemon=True) for _ in range(3)]
     threads[0].start()

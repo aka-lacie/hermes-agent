@@ -876,6 +876,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         Not transactional: a crash after acceptance can replay (at-least-once).
         """
         from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
+        if evt.get("type") in {"completion", "watch_match", "watch_timeout"} and evt.get("parent_session_id"):
+            verdict = await self._process_completion_target_verdict(evt)
+            if verdict != "deliver":
+                return False if verdict == "retry" else None
         source = await asyncio.to_thread(self._build_process_event_source, evt)
         if not source:
             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
@@ -1115,6 +1119,14 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 return False
         return True
 
+    async def _process_completion_target_verdict(self, evt: dict) -> str:
+        from gateway.completion_targets import classify_completion_target
+        session_key = str(evt.get("session_key") or "")
+        return await classify_completion_target(
+            getattr(self, "_session_db", None), str(evt.get("parent_session_id") or ""),
+            session_store=self.async_session_store if session_key else None, session_key=session_key,
+        )
+
     async def _preflight_completion_delivery(self, evt: dict) -> _CompletionClaim:
         """Claim the durable row (async delegations) and verify the target before adapter acceptance.
 
@@ -1153,8 +1165,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         # can still fail closed inside the message pipeline AFTER the adapter accepted, which would falsely
         # acknowledge the durable row as delivered. Verify the target here, before acceptance, and give
         # drops an honest durable disposition.
-        verdict, claim.owner_session_id, claim.proven_session_id = await self._classify_completion_owner(
-            parent_session_id, str(evt.get("session_key") or ""))
+        verdict = await self._process_completion_target_verdict(evt) if evt_type == "completion" else "deliver"
+        if verdict == "deliver":
+            verdict, claim.owner_session_id, claim.proven_session_id = await self._classify_completion_owner(
+                parent_session_id, str(evt.get("session_key") or ""))
         if verdict == "terminal":
             if evt_type == "async_delegation":
                 logger.warning(
