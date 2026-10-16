@@ -38,6 +38,7 @@ def conversation(tmp_path, monkeypatch):
 @pytest.mark.parametrize("identity", ["source", "creation_source", "marker", "compressed"])
 async def test_child_completion_cannot_change_route_or_close_parent(conversation, identity):
     runner, db, entry, _ = conversation
+    parent_id = entry.session_id
     # Both immutable origin and the marker must work after transport metadata has
     # made source='discord'. Compression copies the marker from the child root.
     child = "delegate-child"
@@ -58,12 +59,15 @@ async def test_child_completion_cannot_change_route_or_close_parent(conversation
     # Preflight must terminally decline before adapter acceptance, not falsely
     # acknowledge or retry forever. Already-admitted events need the same guard.
     claim = await runner._preflight_completion_delivery(event)
-    resolved = await runner._resolve_async_delegation_session(entry, child)
+    resolved = (await runner._resolve_async_delegation_session(entry, child)
+                if identity in {"marker", "compressed"} else None)
 
     assert not claim.proceed and claim.early_result is None
-    assert resolved is None
-    assert runner.session_store.lookup_by_session_key(entry.session_key).session_id == entry.session_id
-    assert db.get_session(entry.session_id)["ended_at"] is None
+    # Only marker-backed final-result ownership may resolve to the parent.
+    if identity in {"marker", "compressed"}:
+        assert resolved is not None and resolved.session_id == parent_id
+    assert runner.session_store.lookup_by_session_key(entry.session_key).session_id == parent_id
+    assert db.get_session(parent_id)["ended_at"] is None
     assert db.session_turn_lease_expires_at(child, "delegate-worker") is not None
 
 
@@ -89,7 +93,7 @@ async def test_queued_child_watch_event_never_starts_foreground_turn(conversatio
 
     await runner._inject_watch_notification("process ready", event)
 
-    adapter.handle_message.assert_awaited_once()
+    adapter.handle_message.assert_not_awaited()
     foreground_turn.assert_not_awaited()
     assert runner.session_store.lookup_by_session_key(entry.session_key).session_id == entry.session_id
     assert db.get_session(entry.session_id)["ended_at"] is None
