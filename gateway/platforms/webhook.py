@@ -210,6 +210,8 @@ class WebhookAdapter(BasePlatformAdapter):
         self._host: Optional[str] = extra.get("host", DEFAULT_HOST) or None
         self._port: int = int(extra.get("port", DEFAULT_PORT))
         self._global_secret: str = extra.get("secret", "")
+        from gateway.platforms.webhook_runtime import validate_overrides
+        validate_overrides(extra)
         self._static_routes: dict[str, dict] = extra.get("routes", {})
         self._dynamic_routes: dict[str, dict] = {}
         self._dynamic_routes_stat: Optional[tuple] = None
@@ -256,6 +258,8 @@ class WebhookAdapter(BasePlatformAdapter):
             raise ValueError(f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret but is bound to non-loopback "
                              f"host '{self._host}'. INSECURE_NO_AUTH is for local testing only. "
                              f"Refusing to start to prevent accidental exposure.")
+        from gateway.platforms.webhook_runtime import validate_overrides
+        validate_overrides(route)
         delivery_mode = str(route.get("delivery_mode", "direct")).strip().lower()
         if delivery_mode not in {"direct", "internal_turn"}:
             raise ValueError(f"[webhook] Route '{name}' has invalid delivery_mode '{delivery_mode}'")
@@ -527,7 +531,9 @@ class WebhookAdapter(BasePlatformAdapter):
                            "hosts. Current host: '%s'.", name, self._host)
             return False
         try:
-            # Hot-reloaded from the request handler: a malformed block must skip the route, not 500 the request.
+            # Hot-reloaded from the request handler: malformed configuration skips the route.
+            from gateway.platforms.webhook_runtime import validate_overrides
+            validate_overrides(route)
             validate_coalesce_config(name, route)
         except ValueError as e:
             logger.warning("[webhook] Dynamic route '%s' skipped: %s", name, e)
@@ -883,8 +889,10 @@ class WebhookAdapter(BasePlatformAdapter):
                                    user_id=f"webhook:{route_name}", user_name=route_name)
         if profile and isinstance(profile, str):
             source.profile = profile
+        from gateway.platforms.webhook_runtime import configured_override
         event = MessageEvent(text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload,
-                             message_id=delivery_id, timestamp=datetime.fromtimestamp(0, UTC))
+                             message_id=delivery_id, timestamp=datetime.fromtimestamp(0, UTC),
+                             webhook_runtime_override=configured_override(route_config, self.config.extra))
         from gateway.platforms.webhook_ingress import admit_producer
         try:
             receipt = await admit_producer(self, event)

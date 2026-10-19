@@ -105,6 +105,11 @@ def _event_clause(runner, event, provenance, fresh_roles):
         return 'internal'
     if _native_metadata(event) is None:
         return 'metadata'
+    if event.webhook_runtime_override is not None:
+        from gateway.platforms.webhook_runtime import WebhookRuntimeOverride
+        if (source.platform.value != 'webhook'
+                or not isinstance(event.webhook_runtime_override, WebhookRuntimeOverride)):
+            return 'webhook_runtime'
     if event.prompt_response:
         return 'prompt_response'
     if source.role_authorized and not fresh_roles:
@@ -167,7 +172,7 @@ def snapshot_native(runner, event):
     return _snapshot_native(runner, _adapter_event(event), provenance)
 
 
-async def prepare_native(runner, event):
+async def prepare_native(runner, event, *, snapshot_webhook_runtime=True):
     from gateway.session_ingress_context import capture_provenance, reauthorize_roles
     provenance = capture_provenance(runner, event)
     # Freeze caller-owned identity and content before the first network yield.
@@ -176,6 +181,9 @@ async def prepare_native(runner, event):
     frozen = _adapter_event(event, source=copy(event.source))
     fresh_roles = await reauthorize_roles(runner, frozen.source, provenance)
     encoded_source = _validate_native(runner, frozen, provenance, fresh_roles)
+    if not snapshot_webhook_runtime:
+        # Retry comparisons retain the already-admitted runtime, not today's defaults.
+        frozen.webhook_runtime_override = None
     # Copy + SHA-256 + fsyncs of up to max_inbound_media_bytes stay off the owner loop; the
     # copied context carries the admission's capture lease.
     media = await asyncio.to_thread(capture_native_media, frozen.media_urls) if frozen.media_urls else None
@@ -195,6 +203,10 @@ def _snapshot_native(runner, event, provenance, fresh_roles=False, encoded_sourc
         if provenance is None:
             raise RuntimeStoreError('permission_denied')
         delivery = snapshot_destination(adapter, adapter._delivery_info.get(event.source.chat_id))
+        from gateway.platforms.webhook_runtime import snapshot_runtime
+        selection = snapshot_runtime(event.webhook_runtime_override)
+        if selection is not None:
+            envelope['webhook_runtime'] = selection
         envelope['webhook_delivery'] = delivery
         envelope['webhook_route'] = route_digest(adapter, event.source.chat_id)
     if event.source.role_authorized:
@@ -260,6 +272,11 @@ def restore_native(payload, runner=None):
                         message_type=MessageType(envelope.get('message_type', 'text')),
                         media_urls=restore_native_media(envelope.get('media', [])),
                         **deepcopy(envelope['event']))
+    if 'webhook_runtime' in envelope:
+        from gateway.platforms.webhook_runtime import WebhookRuntimeOverride, validate_selection
+        if source.platform.value != 'webhook' or 'automation' in envelope:
+            raise RuntimeStoreError('invalid_params', field='webhook_runtime')
+        event.webhook_runtime_override = WebhookRuntimeOverride(**validate_selection(envelope['webhook_runtime']))
     if 'automation' in envelope:
         event.internal = True
         if envelope['automation'].get('heartbeat'):

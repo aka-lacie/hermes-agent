@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, SecretStr, StrictBool, StrictInt, field_validator
+from pydantic import BaseModel, Field, SecretStr, StrictBool, StrictInt, StrictStr, field_validator
 
 
 class ConfigUpdate(BaseModel):
@@ -382,6 +382,9 @@ class PairingRevoke(BaseModel):
 
 class WebhookCreate(BaseModel):
     name: str
+    # Omitted fields preserve existing pins; explicit null/empty clears them.
+    model: Optional[StrictStr] = None
+    provider: Optional[StrictStr] = None
     description: Optional[str] = None
     events: list[str] = []
     prompt: Optional[str] = None

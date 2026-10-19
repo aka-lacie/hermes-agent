@@ -145,6 +145,8 @@ def _webhook_route_summary(name: str, route: dict[str, Any], base_url: str) -> d
         "deliver": route.get("deliver", "log"),
         "deliver_only": bool(route.get("deliver_only")),
         "delivery_mode": route.get("delivery_mode", "direct"),
+        "model": route.get("model"),
+        "provider": route.get("provider"),
         "prompt": route.get("prompt", ""),
         "script": route.get("script", ""),
         "skills": list(route.get("skills") or []),
@@ -227,6 +229,16 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
         return subscriptions.get(name, wh._MISSING_SUBSCRIPTION)
 
     expected = await config_scoped_to_thread(profile, _snapshot)
+    existing = expected if isinstance(expected, dict) else {}
+    try:
+        overrides = wh._subscription_runtime_overrides(
+            existing,
+            {key: getattr(body, key) for key in ("model", "provider")
+             if key in body.model_fields_set},
+            deliver_only=body.deliver_only, cron_job=existing.get("cron_job"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     secret = body.secret or secrets.token_urlsafe(32)
     route: dict[str, Any] = {
@@ -241,6 +253,7 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
     }
     if body.script and body.script.strip():
         route["script"] = body.script.strip()
+    route.update(overrides)
     if body.deliver_only:
         route["deliver_only"] = True
     if body.deliver_chat_id:

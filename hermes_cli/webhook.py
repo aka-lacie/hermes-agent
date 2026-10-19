@@ -178,6 +178,20 @@ def _internal_turn_target_error(delivery_mode: Any, deliver: Any) -> Optional[st
     return None
 
 
+def _subscription_runtime_overrides(existing: dict, updates: dict, *,
+                                    deliver_only=False, cron_job=None) -> dict:
+    """Merge only supplied fields, then validate the resulting worker selection.
+
+    Omitting a field preserves its old value; null/empty explicitly clears it.
+    Keep the gateway's validation shared by CLI and dashboard write paths.
+    """
+    from gateway.platforms.webhook_runtime import validate_overrides
+
+    candidate = {key: updates.get(key, existing.get(key)) for key in ("model", "provider")}
+    candidate.update(deliver_only=deliver_only, cron_job=cron_job)
+    return {key: value for key, value in validate_overrides(candidate).items() if value is not None}
+
+
 def webhook_command(args):
     """Entry point for 'hermes webhook' subcommand."""
     sub = getattr(args, "webhook_action", None)
@@ -191,6 +205,19 @@ def webhook_command(args):
     handler = _ACTIONS.get(sub)
     if handler is not None:
         handler(args)
+
+
+def _cli_runtime_overrides(args, existing):
+    return _subscription_runtime_overrides(
+        existing, {key: getattr(args, key) for key in ('model', 'provider')
+                   if getattr(args, key, None) is not None},
+        deliver_only=getattr(args, 'deliver_only', False), cron_job=getattr(args, 'cron_job', None))
+
+
+def _print_runtime_overrides(route, indent):
+    for key in ('model', 'provider'):
+        if route.get(key):
+            print(f"{indent}Worker {key}: {route[key]}")
 
 
 def _cmd_subscribe(args):
@@ -237,6 +264,12 @@ def _cmd_subscribe(args):
         "delivery_mode": getattr(args, "delivery_mode", "direct") or "direct",
         "profile": profile,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+    try:
+        route.update(_cli_runtime_overrides(args, existing))
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
 
     if getattr(args, "deliver_only", False):
         if getattr(args, "cron_job", ""):
@@ -292,12 +325,17 @@ def _cmd_subscribe(args):
         print(f"Error: {exc}")
         return
 
+    _print_subscription(name, route, is_update)
+
+
+def _print_subscription(name, route, is_update):
     print(f"\n  {'Updated' if is_update else 'Created'} webhook subscription: {name}")
     print(f"  URL:    {_route_url(name, route)}")
-    print(f"  Profile: {profile}")
-    print(f"  Secret: {secret}")
-    print(f"  Events: {', '.join(events) or '(all)'}")
+    print(f"  Profile: {route['profile']}")
+    print(f"  Secret: {route['secret']}")
+    print(f"  Events: {', '.join(route['events']) or '(all)'}")
     print(f"  Deliver: {route['deliver']}")
+    _print_runtime_overrides(route, '  ')
     if route.get("delivery_mode") == "internal_turn":
         print("  Completion: wake agent (second agent turn)")
     if route.get("deliver_only"):
@@ -342,6 +380,7 @@ def _cmd_list(args):
         print(f"    Profile: {profile}")
         print(f"    Events:  {events}")
         print(f"    Deliver: {deliver}")
+        _print_runtime_overrides(route, '    ')
         if route.get("script"):
             print(f"    Script:  {route['script']}")
         print()

@@ -613,7 +613,9 @@ class GatewaySessionCommandsMixin:
         _checkpoint_required = _is_truthy(
             ((_load_cfg() or {}).get("compression") or {}).get("checkpoint_required"),
             default=False)
-        tmp_agent = AIAgent(**runtime_kwargs, model=model, max_iterations=4, quiet_mode=True,
+        # Preserve the caller's route metadata, but do not spread it into AIAgent.
+        agent_runtime = {key: value for key, value in runtime_kwargs.items() if key != '_webhook_runtime_pinned'}
+        tmp_agent = AIAgent(**agent_runtime, model=model, max_iterations=4, quiet_mode=True,
                             skip_memory=not _checkpoint_required, enabled_toolsets=["memory"],
                             session_id=session_id,
                             session_db=getattr(self._session_db, "_db", self._session_db))

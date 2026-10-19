@@ -88,6 +88,18 @@ def _recover_or_remember_model(runner, skey, model):
     return model
 
 
+def _provider_default_model(model, runtime_kwargs):
+    """Use the provider catalog when auth was configured without a model selection."""
+    if not model and runtime_kwargs.get('provider'):
+        with suppress(Exception):
+            from hermes_cli.models import get_default_model_for_provider
+            model = get_default_model_for_provider(runtime_kwargs['provider'])
+            if model:
+                logger.info('No model configured — defaulting to %s for provider %s',
+                            model, runtime_kwargs['provider'])
+    return model
+
+
 class GatewayTurnPrepareMixin:
     def _resolve_session_agent_runtime(
         self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
@@ -108,6 +120,13 @@ class GatewayTurnPrepareMixin:
         policy = policy_for_source(self, source) if source is not None else None
         if policy is not None:
             return _resolve_policy_agent_runtime(self, policy)
+        from gateway.platforms.webhook_runtime import retained_runtime
+        webhook_runtime = retained_runtime(self, source)
+        if webhook_runtime is not None:
+            runtime = _resolve_runtime_agent_kwargs_for_provider(
+                webhook_runtime['provider'], target_model=webhook_runtime['model'])
+            runtime['_webhook_runtime_pinned'] = True
+            return webhook_runtime['model'], runtime
         skey = self._resolve_session_key_or_none(source, session_key)
         model = _resolve_gateway_model(user_config)
         if skey:
@@ -194,17 +213,7 @@ class GatewayTurnPrepareMixin:
         if override and skey:
             model, runtime_kwargs = self._apply_session_model_override(skey, model, runtime_kwargs)
 
-        # Provider resolved but no model.default (`hermes auth add` without `hermes model`): use the
-        # provider's first catalog model.
-        if not model and runtime_kwargs.get("provider"):
-            with suppress(Exception):
-                from hermes_cli.models import get_default_model_for_provider
-                model = get_default_model_for_provider(runtime_kwargs["provider"])
-                if model:
-                    logger.info(
-                        "No model configured — defaulting to %s for provider %s", model, runtime_kwargs["provider"],
-                    )
-
+        model = _provider_default_model(model, runtime_kwargs)
         return _recover_or_remember_model(self, skey, model), runtime_kwargs
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
@@ -225,6 +234,7 @@ class GatewayTurnPrepareMixin:
         base_request_overrides = dict(runtime_kwargs.get("request_overrides") or {})
         route = {
             "model": model,
+            "webhook_runtime_pinned": runtime_kwargs.get('_webhook_runtime_pinned') is True,
             "runtime": runtime,
             "signature": (
                 model, runtime["provider"], runtime["requested_provider"], runtime["base_url"],

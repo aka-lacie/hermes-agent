@@ -176,7 +176,8 @@ class GatewaySessionAgentMixin:
             session_db=getattr(runner._session_db, "_db", runner._session_db),
             # Reload from disk — do not reuse the startup snapshot.
             # See #60955.
-            fallback_model=None if api_runtime_locked() else self._runner._refresh_fallback_model(),
+            fallback_model=(None if api_runtime_locked() or turn_route.get('webhook_runtime_pinned')
+                            else self._runner._refresh_fallback_model()),
             skip_context_files=skip_context_files,
             # Keep the persona even with minimal context: soul identity is one small file.
             load_soul_identity=not bool(policy and policy.ignore_rules),
@@ -209,7 +210,7 @@ class GatewaySessionAgentMixin:
         # Lock released — refresh the reused agent's fallback chain from disk OUTSIDE the cache lock
         # (disk I/O under the lock stalls the idle-sweep watcher and Discord heartbeats). A chain
         # configured after caching must reach the next turn; per-session serialization keeps it safe.
-        locked = api_runtime_locked() is not None
+        locked = api_runtime_locked() is not None or turn_route.get('webhook_runtime_pinned') is True
         if found.reused and agent is not None and locked and getattr(agent, "_fallback_activated", False):
             # A cached agent already moved onto a fallback provider cannot serve a confirmed lock.
             found.evicted, found.reused, agent = agent, False, None

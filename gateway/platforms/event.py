@@ -41,6 +41,13 @@ class ProcessingOutcome(Enum):
     CANCELLED = "cancelled"
 
 
+@dataclass(frozen=True)
+class WebhookRuntimeOverride:
+    """Trusted operator selection, never deserialized from external webhook content."""
+    model: Optional[str] = None
+    provider: Optional[str] = None
+
+
 @dataclass
 class MessageEvent:
     """Incoming message from a platform — the normalized shape all adapters produce."""
@@ -103,6 +110,9 @@ class MessageEvent:
     # knows the message was meant for someone else); None means unknown and keeps the visible
     # fallback, like True.
     reply_expected: Optional[bool] = None
+
+    # Trusted adapter configuration, not a field copied from webhook POST content.
+    webhook_runtime_override: "WebhookRuntimeOverride | None" = field(default=None, repr=False)
 
     # Process-local admission receipt, never routing metadata or execution acknowledgement.
     _gateway_accepted: bool = field(default=False, init=False, repr=False, compare=False)

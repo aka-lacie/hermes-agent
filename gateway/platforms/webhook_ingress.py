@@ -64,12 +64,13 @@ async def admit_producer(adapter, event):
         return await authority.admit_native(event)
 
 
-async def _committed(authority, event):
+async def _committed(authority, event, *, snapshot_webhook_runtime=True):
     """``(validated payload, rows)`` of this delivery's identity in the FIFO. Preparing the payload
     runs the same authorization as admission, so a refused sender raises here."""
     import json
     from gateway.session_envelope import prepare_native, restore_native
-    payload = await prepare_native(authority.runner, event)
+    payload = await prepare_native(authority.runner, event,
+                                   snapshot_webhook_runtime=snapshot_webhook_runtime)
     source = restore_native(payload).source
     identity = json.dumps([source.profile, source.platform.value, source.chat_id,
                            source.thread_id, source.user_id], separators=(',', ':'))
@@ -82,7 +83,9 @@ async def _webhook_retry(authority, event):
     # One-shot finalization ends the route. Resolve an existing provider receipt
     # before SessionStore would rotate it into a new physical session.
     from hermes_state_runtime import get_session_admission
-    payload, rows = await _committed(authority, event)
+    # Authorize/compare the input without consulting today's model defaults. For a
+    # new delivery admit_native captures them; a retry already owns a frozen pair.
+    payload, rows = await _committed(authority, event, snapshot_webhook_runtime=False)
     if not rows:
         return None
     row = get_session_admission(authority.db, admission_id=rows[0]['admission_id'])
@@ -94,6 +97,13 @@ async def _webhook_retry(authority, event):
         payload['native_text_v1'].pop('webhook_route')
         if 'provenance' not in retained:
             payload['native_text_v1'].pop('provenance', None)
+    # Defaults may change between deliveries. A retry observes the admitted selection;
+    # all other fields (including the configured route digest) still have to match.
+    from gateway.platforms.webhook_runtime import validate_selection
+    if 'webhook_runtime' in retained:
+        payload['native_text_v1']['webhook_runtime'] = validate_selection(retained['webhook_runtime'])
+    else:
+        payload['native_text_v1'].pop('webhook_runtime', None)
     if len(rows) != 1 or row['payload'] != payload:
         raise RuntimeStoreError('admission_conflict')
     event._webhook_duplicate = True

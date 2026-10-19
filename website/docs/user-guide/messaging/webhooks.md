@@ -85,6 +85,8 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `filters` | No | Declarative payload filters evaluated after auth/body/event filtering and before agent or direct delivery work. Non-matches return `{"status":"ignored","reason":"filter"}` with HTTP 200. |
 | `script` | No | Filter/transform script under `~/.hermes/scripts/`. The webhook payload is passed as JSON on stdin. JSON object stdout replaces the payload before templating; text stdout is exposed as `script_output`; empty stdout, `[SILENT]`, or a nonzero exit code ignores the webhook. |
 | `skills` | No | List of skill names to load for the agent run. |
+| `model` | No | Detached worker model override; independently inherits the webhook platform default, then the routed profile's global model. See [Worker model and provider overrides](#worker-model-and-provider-overrides). |
+| `provider` | No | Detached worker provider override; independently inherits the webhook platform default, then the routed profile's global provider. Invalid with `deliver_only` or `cron_job` when nonempty, like `model`. |
 | `toolsets` | No | List of toolset keys (e.g. `["terminal", "file", "web"]`) that **replaces** the platform-level webhook toolset for runs triggered by this route only. Manual config edit only — not settable via `hermes webhook subscribe`, so agent-created subscriptions cannot self-grant elevated tools. Names are validated the same way as `platform_toolsets` entries (unknown or platform-restricted names are dropped). See [Per-route toolsets](#per-route-toolsets). |
 | `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant` (plugin), `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
@@ -93,6 +95,82 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `cron_job` | No | Fire an existing cron job (by ID or name) on each event instead of starting a fresh webhook agent session. The rendered `prompt` becomes transient per-run context; the job's own prompt, skills, model, and delivery settings apply. Mutually exclusive with `deliver_only`. See [Event-Triggered Cron Jobs](#event-triggered-cron-jobs). |
 | `coalesce` | No | Debounce rapid distinct events on the same logical entity into one agent run. Block with a required `key` (payload field or template identifying the entity, e.g. `pull_request.number`), optional `window_seconds` (quiet window, default 30) and `max_wait_seconds` (dispatch cap, default 300). See [Event Coalescing](#event-coalescing). Mutually exclusive with `deliver_only` and `cron_job`. |
 | `mirror_to_session` | No | Default `false`. When `true`, after a successful delivery to a chat platform the delivered message is also written into that chat's session transcript (as a labelled user turn, the same way continuable cron briefs are), so when you reply in that chat the agent knows what it just sent you. See [Replying to a delivery](#replying-to-a-delivery). |
+
+### Worker model and provider overrides
+
+Set optional `model` and `provider` strings on a static route, a dynamic
+subscription in `webhook_subscriptions.json`, or the receiving
+`platforms.webhook` configuration. Each field inherits independently:
+
+1. Route/subscription override.
+2. Receiving webhook platform's default override.
+3. Routed execution profile's global `model.default` / `model.provider`.
+
+Missing, `null`, and blank values inherit. A model-only override keeps the inherited
+provider; a provider-only override keeps the inherited model. If `model.provider`
+is absent, provider inheritance also honors the normal profile-scoped
+`HERMES_INFERENCE_PROVIDER` fallback. If no model is configured, a provider-only
+pin uses that provider's default/catalog model (including a registered plugin's
+fallback catalog); a provider with no catalog still requires an explicit model.
+Hermes does not infer a provider from a model name. Provider names are preserved except for surrounding
+whitespace; use the exact configured/registered provider identifier.
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    model: claude-sonnet-4-5       # default for detached webhook workers
+    provider: anthropic
+    extra:
+      secret: "your-webhook-secret"
+      routes:
+        reviews:
+          model: claude-opus-4-1  # provider still inherited from webhook defaults
+          prompt: "Review this event: {__raw__}"
+          deliver: discord
+          delivery_mode: internal_turn
+```
+
+As with other adapter settings, `model` and `provider` can instead be nested under
+`platforms.webhook.extra`; nested values win if both forms appear. In a multiplexed
+gateway, these defaults belong to the **receiving adapter**, while global fallback
+and credentials belong to the **routed execution profile**.
+
+```bash
+hermes webhook subscribe reviews --prompt "Review: {__raw__}" \
+  --model claude-opus-4-1 --provider anthropic \
+  --deliver discord --delivery-mode internal_turn
+```
+
+On CLI updates, omitting `--model` or `--provider` preserves that subscription's
+previous value; pass `--model ""` or `--provider ""` to clear it and resume
+inheritance. Supply the route's other settings as usual when updating it. The
+`POST /api/webhooks` dashboard API accepts the same JSON properties: omitted
+properties preserve existing values, while explicit `null` or empty strings clear
+them. Non-string, non-null values are rejected.
+
+These settings apply **only to the detached webhook worker**. With
+`delivery_mode: internal_turn`, the destination conversation still uses its own
+normal model/provider for the follow-up turn. If neither the route nor platform
+sets either override, the existing gateway model-selection behavior is unchanged.
+
+An explicit selection is resolved with that provider's own credentials and
+transport **before constructing the worker client**. It disables the global
+cross-provider fallback chain, like a pinned cron job, but still permits
+provider-local credential rotation. The selected model/provider pair is frozen
+at durable admission for retries and recovery. An inherited or explicit `auto`
+provider is resolved to a concrete provider identity at admission (without
+refreshing OAuth credentials); failure to select one refuses admission rather
+than silently choosing another provider later. Credentials are not frozen or
+stored in the event envelope and can be refreshed at execution. Legacy events
+without a frozen selection retain legacy behavior. Existing route authorization
+and route-change checks still apply: a stored selection does not authorize
+execution after a route is revoked or changed.
+
+Nonempty route-level `model`/`provider` overrides are rejected on `deliver_only`
+and `cron_job` routes. Webhook platform defaults do not affect those paths:
+direct delivery has no worker, and a triggered cron job uses its own model and
+provider settings.
 
 ### Full example
 

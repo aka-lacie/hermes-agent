@@ -84,12 +84,18 @@ def snapshot_destination(adapter, delivery):
 
 
 def retained_destination(adapter, chat_id):
+    from gateway.session_authorities import all_authorities
+    runner = adapter.gateway_runner or getattr(adapter._message_handler, '__self__', None)
+    if not all_authorities(runner):
+        return validate_destination(adapter._delivery_info.get(chat_id))
+    return validate_destination(retained_envelope(adapter, chat_id).get('webhook_delivery'))
+
+
+def retained_envelope(adapter, chat_id):
     """Readback also checks today's connector and authorization; retained data is not a grant."""
     from gateway.session_envelope import restore_native, _validate_native
     runner = adapter.gateway_runner or getattr(adapter._message_handler, '__self__', None)
     from gateway.session_authorities import active_authority, all_authorities
-    if not all_authorities(runner):
-        return validate_destination(adapter._delivery_info.get(chat_id))
     # The reply leg runs in the routed profile's scope; that ledger holds the destination. A
     # delivery id is unique per route, so an unscoped caller may search every served ledger.
     scoped = active_authority(runner)
@@ -111,4 +117,4 @@ def retained_destination(adapter, chat_id):
         raise RuntimeStoreError('permission_denied')
     if envelope.get('webhook_route') != route_digest(adapter, chat_id):
         raise RuntimeStoreError('admission_conflict')
-    return validate_destination(envelope.get('webhook_delivery'))
+    return envelope
