@@ -137,6 +137,18 @@ The host owns retention storage, ownership, provider reconstruction, activation
 admission, live controls, transcript safety, and teardown even after plugin unload.
 Raw conversation-service records contain routing identity and ownership metadata;
 plugins own bounded presentation and should avoid exposing unnecessary fields to models.
+Observation preserves compact assistant `tool_calls` entries (`name`, optional
+`target` from `path`/`file_path`, and `command_preview`) and stored `tool_name`
+on tool results. It never returns full tool arguments or reasoning. Tool results
+are capped at 1,500 characters; assistant prose can use the remaining window.
+The default 12,000-character budget counts content and serialized preview metadata
+(excluding the session record and message envelope). Call metadata is capped at
+1,000 characters per message, with names capped at 80 and targets/commands at 200.
+Long previews preserve head and tail with an omitted-character marker; very small
+remaining budgets use an ellipsis. `truncated` reports shortened previews or omitted
+messages. Preview text is not guaranteed to remain valid JSON. Observation does
+not modify transcripts, renew activity, or activate the child.
+
 Existing rows need no migration when policy moves into a plugin.
 
 This extension currently requires `plugins.isolation: in_process`; host-isolated
