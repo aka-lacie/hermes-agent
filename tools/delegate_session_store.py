@@ -18,6 +18,7 @@ from hermes_state_common import (
 )
 from hermes_state_compression import _CHAIN_CAP
 from hermes_state_pidns import pid_namespace_id
+from tools.delegate_observation import message_metadata, preview_text
 
 
 class DelegateSessionError(ValueError):
@@ -292,11 +293,16 @@ class DelegateSessionStore:
         truncated = len(messages) > limit
         for message in reversed(messages[-limit:]):
             content = _text_content(message.get("content"))
-            if len(content) > budget:
-                content = content[-budget:]
-                truncated = True
+            metadata, metadata_truncated = message_metadata(message)
+            metadata_size = len(json.dumps(metadata, ensure_ascii=False)) if metadata else 0
+            if metadata_size > budget:
+                metadata, metadata_size, metadata_truncated = {}, 0, True
+            budget -= metadata_size
+            cap = min(budget, 1500) if message["role"] == "tool" else budget
+            truncated = truncated or metadata_truncated or len(content) > cap
+            content = preview_text(content, cap)
             selected.append({"role": message["role"], "content": content,
-                             "timestamp": message.get("timestamp")})
+                             "timestamp": message.get("timestamp"), **metadata})
             budget -= len(content)
             if budget <= 0:
                 truncated = truncated or len(selected) < len(messages)
