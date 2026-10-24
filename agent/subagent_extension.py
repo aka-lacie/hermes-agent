@@ -26,6 +26,15 @@ class SubagentExtension:
         """Return a tool result, or None to use native dispatch. Spawn stays host-owned."""
         return None
 
+    def format_fork_history(self, messages: list[dict], *, task: dict) -> list[dict]:
+        """Format a detached source snapshot for one new child; opt-in, no default policy.
+
+        Includes completed tool history and the current unfinished tool round.
+        Return a complete transcript (no unmatched tool calls/results). The host
+        removes persistence bookkeeping and seeds the child's own session.
+        """
+        raise ValueError("fork_context requires the subagent extension to implement format_fork_history.")
+
     def format_assignment(self, message, *, session_id: str, timestamp: str):
         return message
 

@@ -292,7 +292,7 @@ class SubagentLifecycleService(SubagentSessionMethods):
             if request.correlation_id and correlation_key in _REGISTRY.correlations:
                 raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
         from agent.subagent_context import attach_fork_history, fork_history
-        history = fork_history(parent) if request.fork_context else []
+        history = fork_history(parent, task=dataclasses.asdict(request)) if request.fork_context else []
         # Lazy: delegate construction stays internal, plugins never import private delegation helpers.
         from tools.delegate_tool import (
             _build_child_preserving_parent_tools, _credential_overrides, _load_config, _resolve_delegation_credentials,

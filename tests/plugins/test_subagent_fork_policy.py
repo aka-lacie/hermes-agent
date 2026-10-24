@@ -41,6 +41,7 @@ def test_registration_and_retention_preserve_fresh_default(tmp_path, monkeypatch
             "class Policy(SubagentExtension):\n"
             f"    def enabled(self): return {mode != 'disabled'!r}\n"
             f"    def child_options(self, task): return {options!r}\n"
+            "    def format_fork_history(self, messages, *, task): return messages\n"
             "def register(ctx): ctx.register_subagent_extension(Policy())\n")
     discover_plugins(force=True)
     if mode == "unloaded":
@@ -73,10 +74,9 @@ def test_registration_and_retention_preserve_fresh_default(tmp_path, monkeypatch
             result = json.loads(registry.get_entry("delegate_task").handler({"tasks": [
                 {"goal": "Default context"},
                 {"goal": "Explicit fresh context", "fork_context": False},
-                {"goal": "Explicit inherited context", "fork_context": True},
             ]}, parent_agent=parent))
             assert all(row["status"] == "completed" for row in result["results"]), result
-            assert ["PRIVATE_PARENT_CONTEXT" in messages for messages in observed.values()].count(True) == 1 + expected
+            assert ["PRIVATE_PARENT_CONTEXT" in messages for messages in observed.values()].count(True) == expected
             for messages in observed.values():
                 if "Default context" in messages:
                     assert ("PRIVATE_PARENT_CONTEXT" in messages) is expected
@@ -84,6 +84,12 @@ def test_registration_and_retention_preserve_fresh_default(tmp_path, monkeypatch
                     assert "PRIVATE_PARENT_CONTEXT" not in messages
                 else:
                     assert "PRIVATE_PARENT_CONTEXT" in messages
+            explicit = json.loads(registry.get_entry("delegate_task").handler(
+                {"tasks": [{"goal": "Explicit inherited context", "fork_context": True}]}, parent_agent=parent))
+            if mode == "active":
+                assert explicit["results"][0]["status"] == "completed", explicit
+            else:
+                assert "fork" in explicit.get("error", ""), explicit
             # The retained API must likewise defer to explicit policy, not infer
             # a fork from the fact that the conversation will be persisted.
             retained = SubagentLifecycleService(lambda: parent).launch_session(goal="Retained default context")
