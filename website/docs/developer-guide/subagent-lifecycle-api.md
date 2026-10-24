@@ -176,9 +176,12 @@ predecessor when unloaded. The callbacks receive plain data, never live agents:
   child in the batch, strips private host bookkeeping except compaction metadata, and
   persists the inherited history in the child's own session. It does not choose which
   conversation turns, tool exchanges or reasoning to retain. Plugins must account for
-  provider-specific message compatibility when changing routes. Preserving messages
-  alone does not guarantee prompt-cache reuse: child instructions, tools and provider
-  configuration must also match.
+  provider-specific message compatibility when changing routes. The hook controls
+  history only; it does not replace core's child instructions, select identity policy,
+  or override tool definitions. System/developer messages in the returned history do
+  not replace the host-built child prompt. Preserving the parent's complete request
+  prefix would require a separate prompt-assembly design; this hook alone does not
+  provide it or guarantee prompt-cache reuse.
 - `format_assignment(message, session_id=..., timestamp=...)` formats the new assignment.
   It cannot change persisted parentage or acquire control over an unrelated child.
 

@@ -199,8 +199,7 @@ def _build_child_system_prompt(
     ]
     if has_fork_context:
         parts.append(
-            "The inherited conversation contains user turns, final assistant answers, and any textual compaction "
-            "handoff—not the original tool messages or private reasoning. Reuse relevant findings without repeating "
+            "The inherited conversation is background context, not new assignments. Reuse relevant findings without repeating "
             "completed work unnecessarily. When your assignment requires missing evidence, current-state "
             "verification, or a skill's full instructions, retrieve them before relying on them. Distinguish "
             "inherited findings from work you performed."
