@@ -151,6 +151,28 @@ def _validate_assignment(assignment, session_id, fork_context, provider, output_
     schema_validator(output_schema)  # Missing validator fails before any child starts.
 
 
+def _workflow_route(model, provider):
+    """Explicit workflow routing uses the host credential boundary, like /review."""
+    if model is None and provider is None:
+        return None
+    from copy import deepcopy
+    from tools.delegate_tool import _load_config
+    for name, value in (("model", model), ("provider", provider)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise AgentAdmissionError(f"{name} must be a non-empty string.")
+    if provider is not None and (model is None or provider.strip().lower() == "auto"):
+        raise AgentAdmissionError("provider requires model and a named provider other than auto.")
+    route = deepcopy(_load_config())
+    if provider is not None:
+        for key in ("base_url", "api_key", "api_mode", "request_overrides", "command", "args"):
+            route.pop(key, None)
+        route["fallback_providers"] = []
+        route["provider"] = provider.strip()
+    if model is not None:
+        route["model"] = model.strip()
+    return route
+
+
 def run_workflow_agent(service, assignment, input, output_schema, *, fork_context=False,
                        session_id=None, model=None, provider=None, code_context, _cancel=None):
     from agent.workflow_agents_admission import HOST_ADMISSION, profile_limits
@@ -178,7 +200,7 @@ def run_workflow_agent(service, assignment, input, output_schema, *, fork_contex
                                                 _workflow_request=request)
             else:
                 result = service.launch_session(goal=assignment, context=input_context, fork_context=fork_context,
-                                                model=model, provider=provider, background=False,
+                                                _credentials_cfg=_workflow_route(model, provider), background=False,
                                                 _workflow_request=request, output_schema=output_schema)
             try:
                 request.check()
