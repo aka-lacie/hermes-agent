@@ -43,7 +43,13 @@ def workflow(tmp_path, monkeypatch):
         "api_key": "fixture", "api_mode": "chat_completions"})
     monkeypatch.setattr("agent.delegated_review.finish_delegated_review", lambda child: None)
     monkeypatch.setattr("tools.delegate_sessions._cancel_review", lambda *a: None)
-    monkeypatch.setattr("agent.subagent_extension.get_subagent_extension", lambda: None)
+    from agent.subagent_extension import SubagentExtension
+    class ForkPolicy(SubagentExtension):
+        def format_fork_history(self, messages, *, task):
+            assert task["goal"]  # formatting sees the child's actual assignment
+            assert all(row.get("content") != "already formatted" for row in messages)
+            return [*messages, {"role": "assistant", "content": "already formatted"}]
+    monkeypatch.setattr("agent.subagent_extension.get_subagent_extension", lambda: ForkPolicy())
     pool = WorkflowAdmission(active_limit=2, resident_limit=4, queue_limit=256)
     monkeypatch.setattr(admission, "HOST_ADMISSION", pool)
     children = []
@@ -143,7 +149,10 @@ def test_retained_child_complete_output_fork_boundary_and_resume(workflow):
     w.parent._session_messages.append({"role": "user", "content": "too late"})
     first = run(w, fork_context=True)
     assert first["output"]["answer"] == "x" * 40_000  # Captured before the 100-char model budget.
-    assert w.children[0].calls[0][1]["conversation_history"] == [{"role": "user", "content": "acceptance boundary"}]
+    assert w.children[0].calls[0][1]["conversation_history"] == [
+        {"role": "user", "content": "acceptance boundary"},
+        {"role": "assistant", "content": "already formatted"},
+    ]
     next_result = run(w, session_id=first["session_id"])
     assert next_result["session_id"] == first["session_id"]
     assert "conversation_history" not in w.children[1].calls[0][1]  # Empty persisted fixture history, never a parent re-fork.

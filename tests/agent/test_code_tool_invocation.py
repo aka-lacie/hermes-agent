@@ -11,12 +11,17 @@ PLUGIN = '''
 import json
 import threading
 import time
+from agent.subagent_extension import SubagentExtension
+class ForkPolicy(SubagentExtension):
+    def format_fork_history(self, messages, *, task):
+        return [row for row in messages if row.get("role") == "user"]
 EVENTS = []
 ENTERED = threading.Event()
 RELEASE = threading.Event()
 def record(kind, **kw):
     EVENTS.append((kind, kw))
 def register(ctx):
+    ctx.register_subagent_extension(ForkPolicy())
     ctx.register_tool(name="code_fixture", toolset="code-fixture", schema={
         "name": "code_fixture", "description": "Test echo", "parameters": {
         "type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}},
@@ -54,7 +59,7 @@ def host(tmp_path, monkeypatch):
     root.mkdir(parents=True)
     (root / "plugin.yaml").write_text("name: code-fixture\nversion: 0.1.0\n")
     (root / "__init__.py").write_text(PLUGIN)
-    config = {"compression": {"enabled": False}, "plugins": {"enabled": ["code-fixture"]},
+    config = {"compression": {"enabled": False}, "plugins": {"enabled": ["code-fixture"], "entries": {"code-fixture": {"allow_tool_override": True}}},
               "code_execution": {"mode": "project", "timeout": 10, "workflow_timeout": 10}}
     (tmp_path / "config.yaml").write_text(json.dumps(config))
     monkeypatch.setattr("hermes_cli.config.load_config", lambda *a, **kw: config)

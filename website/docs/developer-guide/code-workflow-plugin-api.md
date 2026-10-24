@@ -52,6 +52,10 @@ The context exposes:
   detection for saved code, including compatibility wrappers and supported threads.
 - `subagent_lifecycle.run_workflow_agent(...)` and `run_workflow_agents(...)`: the
   normal retained-delegation admission path, structured output and shared limits.
+  `fork_context=True` requires an enabled subagent fork formatter. The cell captures
+  a detached source boundary; each child is formatted once using its own task.
+  `CallContext.fork_history(task=...)` uses the same formatter for direct consumers.
+  Continuations use their saved history without formatting the parent again.
 
 `CallContext` and `invoke_tool` in `agent.tool_invocation` form the common policy
 seam for model and code calls. Nested hooks carry `origin="code"`, `parent_call_id`
