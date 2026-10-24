@@ -21,7 +21,7 @@ def resolve_skill_package(name):
 def _resolve_skill_package(name):
     """Already-discovered lookup, safe while holding the replacement coordinator."""
     from tools import skills_tool as skills
-    if error := skills._skill_lookup_path_error(name):
+    if error := skills.skill_lookup_path_error(name):
         _unavailable(error)
     category_name = None
     if ":" in name:
@@ -36,8 +36,8 @@ def _resolve_skill_package(name):
         if get_plugin_manager().list_plugin_skills(namespace) or get_plugin_manager().is_plugin_skill_namespace(namespace):
             _unavailable(f"Skill {name!r} is not registered by the active plugin")
         category_name = f"{namespace}/{bare}" if bare else None
-    roots, _ = skills._skill_search_dirs()
-    error, directory, skill_md = skills._locate_skill(name, category_name, roots)
+    roots, _ = skills.skill_search_dirs()
+    error, directory, skill_md = skills.locate_skill(name, category_name, roots)
     if error is not None or directory is None:
         _unavailable(f"{name!r} is not a visible unambiguous directory skill")
     # Metadata lookup must not consume the renderer's read/mark boundary: review

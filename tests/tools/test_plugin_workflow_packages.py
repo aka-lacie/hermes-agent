@@ -93,7 +93,7 @@ def test_qualified_plugin_does_not_fall_back_to_colliding_ordinary_package(regis
     local = skills / "fixture" / "package"
     local.mkdir(parents=True)
     (local / "SKILL.md").write_text("---\nname: package\ndescription: Ordinary collision.\n---\n")
-    monkeypatch.setattr(skills_tool, "_skill_search_dirs", lambda: ([("profile", skills)], skills))
+    monkeypatch.setattr(skills_tool, "skill_search_dirs", lambda: ([("profile", skills)], skills))
     assert resolve_skill_package("fixture:package")["path"] == root
     manager.remove_plugin_skill("fixture:package")
     with pytest.raises(ValueError, match="not registered"):
