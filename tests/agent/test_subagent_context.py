@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent.subagent_context import bind_fork_source, fork_history
+from agent.subagent_context import bind_fork_source
 
 
 def _history():
@@ -26,32 +26,36 @@ def _history():
     ]
 
 
-def test_parallel_snapshot_keeps_current_user_but_not_spawn_round():
+def test_parallel_snapshot_is_unformatted_detached_and_shared_boundary():
+    from agent.subagent_context import capture_fork_boundary
     history = _history()
     original = deepcopy(history)
     parent = SimpleNamespace(_session_messages=[{"role": "user", "content": "stale"}])
     with bind_fork_source(parent, history):
         contexts = [copy_context() for _ in range(3)]
         with ThreadPoolExecutor(max_workers=3) as pool:
-            children = list(pool.map(lambda ctx: ctx.run(fork_history, parent), contexts))
-        assert children[0] == children[1] == children[2]
-        assert [m["content"] for m in children[0]][:3] == [
-            "Earlier request", "Earlier answer", "Compaction handoff",
-        ]
-        assert children[0][-1]["content"][0]["text"] == "Current request"
-        assert all(m["role"] != "tool" and "tool_calls" not in m and "reasoning" not in m for m in children[0])
-        assert "_row_id" not in children[0][0] and "_db_persisted" not in children[0][0]
-        children[0][-1]["content"][0]["text"] = "Child A mutation"
-        assert children[1][-1]["content"][0]["text"] == "Current request"
-        assert fork_history(parent) == children[1]
-    assert history == original
-    # Saved worker Contexts do not pin or expose a stale tool-round snapshot.
-    assert contexts[0].run(fork_history, parent) == parent._session_messages
+            children = list(pool.map(lambda ctx: ctx.run(capture_fork_boundary, parent), contexts))
+        assert children[0] == children[1] == children[2] == original
+        children[0][3]["content"][0]["text"] = "Child A mutation"
+        assert children[1] == original
+        history.append({"role": "tool", "tool_call_id": "b", "content": "late sibling"})
+        assert capture_fork_boundary(parent) == original
+    assert history[:-1] == original
+    assert contexts[0].run(capture_fork_boundary, parent) == parent._session_messages
+
+
+@pytest.fixture
+def fork_formatter(monkeypatch):
+    from agent.subagent_extension import SubagentExtension
+    class UserHistory(SubagentExtension):
+        def format_fork_history(self, messages, *, task):
+            return [message for message in messages if message.get("role") == "user"]
+    monkeypatch.setattr("agent.subagent_extension.get_subagent_extension", lambda: UserHistory())
 
 
 @pytest.mark.parametrize("surface", ["tool", "plugin"])
 @pytest.mark.parametrize("inherit,has_history", [(True, True), (False, True), (True, False)])
-def test_real_child_prologue_receives_and_persists_fork(tmp_path, monkeypatch, surface, inherit, has_history):
+def test_real_child_prologue_receives_and_persists_fork(tmp_path, monkeypatch, surface, inherit, has_history, fork_formatter):
     from agent.subagent_lifecycle import SubagentLaunchRequest, SubagentLifecycleService
     from agent.turn_context import build_turn_context
     from hermes_state import SessionDB

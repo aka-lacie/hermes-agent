@@ -15,8 +15,8 @@ The facade also works when a plugin runs under `plugins.isolation: host`.
 Requests accept `goal`, `context`, `role`, `model`, `provider`, `allowed_toolsets`,
 `blocked_tools`, `working_directory`, `parent_session_id`, `correlation_id`,
 `metadata`, `timeout_seconds`, and `fork_context=False`, subject to the restrictions below.
-`fork_context=True` copies user turns, final answers, and compaction handoffs; tool
-results and private reasoning are excluded. Ordinary launches remain fresh by default.
+`fork_context=True` requires an enabled extension implementing `format_fork_history`.
+The extension chooses the inherited history. Ordinary launches remain fresh by default.
 
 ```python
 from agent.subagent_lifecycle import SubagentLaunchRequest
@@ -161,6 +161,24 @@ predecessor when unloaded. The callbacks receive plain data, never live agents:
   constructing any children. `fork_context` supplies a default only; an explicit task
   choice wins. Retention does not imply forking. A retained child uses its existing conversation on continuation. Review
   remains host-budgeted, skills-only, cancellable, and subject to normal eligibility.
+- `format_fork_history(messages, task=...)` chooses the initial history for a new child.
+  It receives a deep copy of the unformatted conversation boundary, including prior
+  tool exchanges, reasoning and the unfinished spawning round. Ephemeral recovery
+  scaffolding is excluded because it cannot become durable history. The host caches
+  the source boundary, not the formatted output: each task receives its own copy and
+  may use a different format. The task is the spawn task dictionary (or the run-handle
+  request fields for `launch`). This method has no default format; an explicit fork
+  without an enabled formatter fails before child construction. Fresh launches and
+  continuations do not invoke it.
+  Return a JSON-compatible list of message dictionaries with valid roles/content and
+  complete tool-call/result pairs. Incomplete spawning calls must be removed or
+  represented as ordinary context. Core validates the result before constructing any
+  child in the batch, strips private host bookkeeping except compaction metadata, and
+  persists the inherited history in the child's own session. It does not choose which
+  conversation turns, tool exchanges or reasoning to retain. Plugins must account for
+  provider-specific message compatibility when changing routes. Preserving messages
+  alone does not guarantee prompt-cache reuse: child instructions, tools and provider
+  configuration must also match.
 - `format_assignment(message, session_id=..., timestamp=...)` formats the new assignment.
   It cannot change persisted parentage or acquire control over an unrelated child.
 

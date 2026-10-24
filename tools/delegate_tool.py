@@ -476,10 +476,12 @@ def _build_children(
     extension = get_subagent_extension()
     try:
         options = [resolve_child_options(extension, task) for task in task_list]
+        histories = [fork_history(parent_agent, task=task, extension=extension)
+                     if option["fork_context"] and not resume and not route.error else []
+                     for task, option, route in zip(task_list, options, routes)]
     except Exception as exc:
         logger.warning("Subagent option preflight failed", exc_info=True)
         return [], str(exc)
-    history = fork_history(parent_agent) if any(option["fork_context"] for option in options) else []
     for i, t in enumerate(task_list):
         route = routes[i]
         if route.error:
@@ -499,7 +501,7 @@ def _build_children(
                 model=route.creds["model"], max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
                 has_fork_context=(resume["record"].get("forked_context", False) if resume
-                                  else bool(history) and options[i]["fork_context"]),
+                                  else bool(histories[i])),
                 **overrides,
             )
         except Exception as exc:
@@ -512,8 +514,7 @@ def _build_children(
                 return [], str(exc)
             raise
         pin_child_service_tier(child, route.creds)
-        if options[i]["fork_context"]:
-            attach_fork_history(child, history)
+        attach_fork_history(child, histories[i])
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
                 child._delegate_output_schema = _task_schema
