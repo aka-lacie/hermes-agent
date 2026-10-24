@@ -340,7 +340,8 @@ def test_expired_manifest_registers_offline_then_connects_on_dispatch(monkeypatc
         assert names
         connector.assert_not_awaited()
         tool = registry.get_entry(_mcp_schema.mcp_prefixed_tool_name(name, "read"))
-        assert tool.schema["parameters"] == cached["inputSchema"]
+        assert tool.schema["parameters"]["properties"] == cached["inputSchema"]["properties"]
+        assert not tool.schema["parameters"].get("required")
         response = json.loads(tool.handler({"path": "example"}))
         connector.assert_awaited_once()
         if online:
