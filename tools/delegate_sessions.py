@@ -18,13 +18,8 @@ def _store(parent):
     return DelegateSessionStore(db)
 
 
-def bind_child(parent, child, task, resume=None, *, routing_cfg=None, retain=False):
+def bind_child(parent, child, task, resume=None, *, extension, options, routing_cfg, retain=False):
     """Reserve a persisted conversation before dispatch, including queued children."""
-    from agent.subagent_extension import get_subagent_extension
-    extension = get_subagent_extension()
-    options = extension.child_options(dict(task)) if extension is not None else {}
-    if not isinstance(options, dict) or any(type(options[k]) is not bool for k in ("retain", "review_skills") if k in options):
-        raise ValueError("Subagent extension options must contain boolean retain/review_skills flags.")
     if not (resume is not None or retain or options.get("retain", False)):
         return
     if getattr(child, "_delegate_profile_home", None) is not None:
@@ -46,7 +41,7 @@ def bind_child(parent, child, task, resume=None, *, routing_cfg=None, retain=Fal
             assignment=task["goal"], context=task.get("context") or "", title=options.get("title", task.get("title")),
             role=child._delegate_role, depth=child._delegate_depth,
             workspace=child._delegate_workspace, forked_context=child._delegate_forked_context,
-            route_descriptor=capture_route(parent, child, task, routing_cfg=routing_cfg),
+            route_descriptor=capture_route(child, routing_cfg=routing_cfg),
         )
         record, token = store.acquire(parent.session_id, record["session_id"], task["goal"])
     else:
@@ -144,8 +139,7 @@ def _resume(parent, store, record, message, model, background):
         raise ValueError("action='resume' requires a non-empty message describing the next assignment.")
     if is_spawn_paused():
         raise ValueError("Delegation spawning is paused; resume starts another run and is paused too.")
-    task = {"goal": message, "context": record["context"], "fork_context": False,
-            "model": model if model is not None else record["model"]}
+    task = {"goal": message, "context": record["context"], "fork_context": False}
     # An invalid route must not replace the conversation's saved model.
     route = resume_route(parent, record, model)
     _resolve_delegation_credentials(route, parent)

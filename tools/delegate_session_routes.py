@@ -20,19 +20,17 @@ def _endpoint_fingerprint(base_url) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
-def capture_route(parent, child, task, *, routing_cfg=None) -> dict:
+def capture_route(child, *, routing_cfg) -> dict:
     """Capture the selector used at spawn, not an endpoint/credential bundle.
 
     Named providers are resolved anew by name. Anonymous endpoints additionally
     require the selected configuration (or inherited parent) to keep its identity.
     """
-    from tools.delegate_tool_config import _load_config, _task_route_configs, _NATIVE_SDK_PROVIDERS
-    route = routing_cfg if routing_cfg is not None else _task_route_configs([task], _load_config())[0]
+    from tools.delegate_tool_config import _NATIVE_SDK_PROVIDERS
+    route = routing_cfg
     provider = str(getattr(child, "requested_provider", None) or child.provider).strip().lower()
     if route.get("base_url") and str(route.get("provider") or "").lower() not in _NATIVE_SDK_PROVIDERS:
-        descriptor = {"kind": "difficulty" if task.get("difficulty") else "default"}
-        if task.get("difficulty"):
-            descriptor["difficulty"] = task["difficulty"]
+        descriptor = {"kind": "default"}
     elif provider not in {"", "auto", "custom"}:
         return {"kind": "named", "provider": provider}
     elif route.get("provider"):
@@ -54,13 +52,12 @@ def _require_endpoint(descriptor, base_url) -> None:
 
 
 def resume_route(parent, record, model=None) -> dict:
-    """Return fresh routing config. Callers pin only model on the resumed task.
+    """Reconstruct the saved route for host-owned activation, bypassing spawn policy.
 
-    Leaving provider in this config, rather than adding a task-level provider pin,
-    preserves the verified direct endpoint through normal delegation resolution.
+    Resolve credentials anew while preserving the named provider or verified endpoint.
     """
     from tools.delegate_tool_config import (
-        _inherit_parent_endpoint, _load_config, _resolve_delegation_credentials, _task_route_configs,
+        _inherit_parent_endpoint, _load_config, _resolve_delegation_credentials,
     )
     selected_model = record["model"] if model is None else model
     if not isinstance(selected_model, str) or not selected_model.strip():
@@ -86,12 +83,14 @@ def resume_route(parent, record, model=None) -> dict:
         # never fall through to an unrelated current delegation default.
         return {**task, **{k: cfg[k] for k in ("reasoning_effort",) if k in cfg}}
     if kind == "named":
+        # A saved named provider owns its credentials and transport; current defaults
+        # may now describe an unrelated endpoint. Preserve only non-identity tuning.
+        cfg = {k: cfg[k] for k in ("reasoning_effort",) if k in cfg}
         task["provider"] = provider
-    elif kind == "difficulty":
-        task["difficulty"] = descriptor.get("difficulty")
+        task["fallback_providers"] = []
     elif kind != "default":
         raise ValueError("The retained child has an unsupported route identity.")
-    route = _task_route_configs([task], cfg)[0]
+    route = {**cfg, **task}
     if kind != "named" or descriptor.get("endpoint_sha256"):
         credentials = _resolve_delegation_credentials(route, parent)
         _require_endpoint(descriptor, credentials.get("base_url"))

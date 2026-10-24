@@ -5,7 +5,7 @@ sidebar_label: Subagent lifecycle API
 
 # Public Subagent Lifecycle API
 
-Plugins can launch and supervise independent Hermes child sessions without importing
+Plugins can launch and supervise fresh Hermes child sessions without importing
 `tools.delegate_tool`, gateway internals, TUI state, or `AIAgent` fields.
 The service resolves its parent from the current agent turn, so it works in
 CLI, gateway, non-interactive, and kanban-worker sessions. Launching outside an
@@ -14,22 +14,9 @@ The facade also works when a plugin runs under `plugins.isolation: host`.
 
 Requests accept `goal`, `context`, `role`, `model`, `provider`, `allowed_toolsets`,
 `blocked_tools`, `working_directory`, `parent_session_id`, `correlation_id`,
-`metadata`, and `timeout_seconds`, subject to the restrictions below.
-
-`SubagentLaunchRequest.fork_context` defaults to `True`. Children inherit a private
-snapshot of user turns, final assistant answers, and textual compaction handoffs;
-parent tool calls/results, reasoning, and interim commentary are omitted. The goal
-is a separate assignment, not a continuation of the parent's pending tool call.
-Use `fork_context=False` for a fresh conversation. Plugin tools and `pre_llm_call`
-hooks snapshot the current turn; other callers use the parent's saved in-memory
-history. Child sessions persist their inherited prefix separately from the parent.
-
-Both lifecycle launches and `delegate_task` load the parent's active-profile SOUL.md and
-resolved workspace's project instructions. This is independent of `fork_context`.
-Optional profile files `instructions/main.md` and `instructions/subagent.md` separate
-main-agent operating guidance from child guidance; children never fall back to the main
-file. These are startup file reads, not a copy of the parent's cached system prompt, and
-cannot grant tools or override depth limits. See [shared identity and role instructions](../user-guide/features/delegation.md#shared-identity-separate-operating-instructions).
+`metadata`, `timeout_seconds`, and `fork_context=False`, subject to the restrictions below.
+`fork_context=True` copies user turns, final answers, and compaction handoffs; tool
+results and private reasoning are excluded. Ordinary launches remain fresh by default.
 
 ```python
 from agent.subagent_lifecycle import SubagentLaunchRequest
@@ -87,16 +74,58 @@ timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
 
+## Routing
+
+Children follow the `delegation` config (`provider`, `model`, `base_url`,
+`api_key`, `api_mode`, `request_overrides`) exactly as `delegate_task` children do.
+The request's `model` overrides the configured model. Its optional `provider`
+names a configured provider for this launch, with precedence request >
+delegation config > parent; the selected provider supplies its own credential
+bundle. An unresolvable provider raises `SubagentLifecycleError` before launch.
+The native tool schema does not expose `provider` to the model. Plugins can select
+it from operator config or expose per-task selectors through a delegation extension.
+
+The lifecycle API does not consult `delegation.backend`: the plugin that launches a child already chooses
+its route. To change how `delegate_task` routes the model's subagents, write a
+[delegation provider plugin](delegation-provider-plugin.md).
+
 ## Retained conversations (opt-in)
 
 The same host service also offers explicit retained-conversation operations:
-`launch_session(goal=..., context=None, title=None, fork_context=True,
-model=None, provider=None, background=False)`,
+`launch_session(goal=..., context=None, title=None, fork_context=None,
+task_parameters=None, background=False)`,
 `resume_session(session_id, message, model=None, background=False)`,
 `list_sessions(query=None, limit=20)`, `observe_session(session_id, limit=20)`,
 `close_session(session_id)`, `steer_session(session_id, message)`, and `stop_session(session_id)`. Optional arguments are keyword-only. These return
 normal delegation result dictionaries; refusals raise `SubagentLifecycleError`.
 Background execution still requires a host capable of delivering later results.
+
+Launch routing uses the session's active [delegation backend](delegation-provider-plugin.md).
+Pass its declared fields through `task_parameters`, for example
+`launch_session(goal="Review the design", task_parameters={"tier": "deep"})` for a
+backend declaring `tier`. Core-owned task fields cannot be supplied through that
+mapping. There is no separate retained-spawn model/provider override: selection
+policy and schema belong to the backend. Backend route errors refuse only the
+unroutable task, as in ordinary delegation.
+On resume, only the model may change within the saved provider. Changes to delegation
+defaults do not retarget an existing child; credentials refresh from its saved route.
+
+Core defaults to fresh context, including retained launches. Extension registration
+and retention alone do not enable forking. A plugin may return `fork_context=True`
+from `child_options` to opt in by default. An explicit per-task boolean takes
+precedence over that preference. `launch_session(fork_context=None)` omits the
+selection, using the plugin preference if present or otherwise fresh context.
+The separate run-handle `SubagentLaunchRequest` retains its fresh default.
+A fork seeds the child's own history once; resume does not copy subsequent parent turns.
+
+Retained operations currently require an in-process parent with a native SessionDB.
+Retained conversations currently support model/provider routes within that profile. A
+`delegation.backend` route selecting an explicit profile is refused for retention; ordinary
+nonretained profile delegation remains available.
+Managed compute workers using RuntimeSessionStore remain unsupported: upstream
+child-registration restrictions stay enforced. This is separate from the existing
+run-handle facade and requires owner-mediated storage operations before those
+workers can retain conversations.
 
 Conversation methods use stable session IDs stored in the parent's profile
 database. The existing immutable run handles and their reconnect/retention
@@ -127,8 +156,10 @@ predecessor when unloaded. The callbacks receive plain data, never live agents:
   dispatch. The active caller is bound to `ctx.subagent_lifecycle` for the callback.
   Spawn remains host-owned. Plugin-owned parameters travel through both native
   registry and inline model dispatch without adding fields to core.
-- `child_options(task)` returns optional `retain` and `review_skills` booleans and
-  `title`. A retained child uses its existing conversation on continuation. Review
+- `child_options(task)` returns optional `retain`, `review_skills`, and `fork_context`
+  booleans and `title`. The host evaluates and validates options once per task before
+  constructing any children. `fork_context` supplies a default only; an explicit task
+  choice wins. Retention does not imply forking. A retained child uses its existing conversation on continuation. Review
   remains host-budgeted, skills-only, cancellable, and subject to normal eligibility.
 - `format_assignment(message, session_id=..., timestamp=...)` formats the new assignment.
   It cannot change persisted parentage or acquire control over an unrelated child.
@@ -155,17 +186,3 @@ This extension currently requires `plugins.isolation: in_process`; host-isolated
 registration fails explicitly because the synchronous activation-context callback
 contract has not been implemented across the process boundary. There are no private
 agent objects, runtime monkeypatches, or plugin-name checks in the host integration.
-## Routing
-
-Children follow the `delegation` config (`provider`, `model`, `base_url`,
-`api_key`, `api_mode`, `request_overrides`) exactly as `delegate_task` children do.
-The request's `model` overrides the configured model. Its optional `provider`
-names a configured provider for this launch, with precedence request >
-delegation config > parent; the selected provider supplies its own credential
-bundle. An unresolvable provider raises `SubagentLifecycleError` before launch.
-Core does not expose `provider` to the model: the plugin chooses it, for example
-from operator config.
-
-The lifecycle API does not consult `delegation.backend`: the plugin that launches a child already chooses
-its route. To change how `delegate_task` routes the model's subagents, write a
-[delegation provider plugin](delegation-provider-plugin.md).

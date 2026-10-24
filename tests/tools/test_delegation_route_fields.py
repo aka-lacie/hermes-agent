@@ -54,7 +54,7 @@ def _construct(**kwargs):
     return child
 
 
-def _spawn(routes, *, cfg=None, parent=None, construct=_construct, provider=None, tasks=None):
+def _spawn(routes, *, cfg=None, parent=None, construct=_construct, provider=None):
     """``(tool result, [AIAgent kwargs], [built children])`` for one task per route."""
     batches = []
     with (
@@ -66,7 +66,7 @@ def _spawn(routes, *, cfg=None, parent=None, construct=_construct, provider=None
                   {"status": "built", **({"refused": batch.refused} if batch.refused else {})})),
     ):
         from tools.delegate_tool import delegate_task
-        result = json.loads(delegate_task(tasks=tasks or [{"goal": f"task number {i}"} for i in range(len(routes))],
+        result = json.loads(delegate_task(tasks=[{"goal": f"task number {i}"} for i in range(len(routes))],
                                           parent_agent=parent or _parent()))
     children = [c for _, _, c in batches[0].children] if batches else []
     return result, [call.kwargs for call in agent.call_args_list], children
@@ -194,14 +194,3 @@ def test_an_inherited_fast_tier_is_reported_as_what_ran():
     entry = _build_result_entry(child, {"final_response": "ok", "completed": True}, 0, 1.0,
                                 _SchemaOutcome(None, None, [], 0))
     assert entry["route"]["service_tier"] == "fast"
-
-
-def test_explicit_model_composes_with_backend_route_without_changing_sibling():
-    result, (pinned, sibling), _ = _spawn([LOCAL, LOCAL], tasks=[
-        {"goal": "Use the selected local endpoint with another model", "model": "local-review"},
-        {"goal": "Keep the backend default"},
-    ])
-    assert result == {"status": "built"}
-    assert (pinned["model"], pinned["base_url"], pinned["api_key"]) == (
-        "local-review", LOCAL["base_url"], LOCAL["api_key"])
-    assert sibling["model"] == LOCAL["model"]

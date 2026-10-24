@@ -342,81 +342,13 @@ delegation:
 
 Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then `delegation.provider` (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; `delegation.model` applies in all cases, and when it is empty children inherit the parent's model. Setting `delegation.provider` alongside `delegation.base_url` keeps the explicit endpoint but carries that provider's request overrides and max output tokens into the child. An explicit `delegation.request_overrides` dict is honored on every branch and merges over those runtime-derived values (see [Configuration](#configuration) below).
 
-The pin is the default for every child. Configure difficulty routes below to let each task select a different model and reasoning effort without changing that default.
-
-### Per-task model and provider overrides
-
-Each `tasks[]` item accepts optional `model` and `provider` strings. Explicit task
-values take precedence over difficulty routes, delegation defaults, and parent
-inheritance. A `model` alone keeps the selected route's provider and connection;
-Hermes does not guess a provider from the model name.
-
-```json
-{"tasks": [
-  {"goal": "Check the supplied calculations", "model": "your-fast-model"},
-  {"goal": "Review the proposed architecture", "model": "your-review-model", "provider": "your-configured-provider"}
-]}
-```
-
-An explicit `provider` requires an explicit `model` and selects that provider's
-credentials, endpoint, transport, and request settings from the current profile.
-It clears the selected route's connection settings and fallback chain; reasoning
-effort still follows the selected difficulty/defaults. Provider `auto`, empty values,
-and unresolvable providers return an error before any child is constructed. Model
-availability is checked by the provider when the child runs.
-
-Start a new session after upgrading so the new fields appear in the tool schema
-without changing an existing conversation's cached prefix.
-
-### Per-task difficulty routing
-
-Configure `delegation.difficulty_routes` to expose an optional `difficulty` field on each
-`delegate_task.tasks[]` item. The agent selects a category; the operator controls its model,
-provider, and reasoning effort. Only configured categories appear in the tool schema.
-
-```yaml
-delegation:
-  model: "your-default-model"
-  provider: "your-provider"
-  reasoning_effort: high
-  difficulty_routes:
-    easy:
-      model: "your-fast-model"
-      reasoning_effort: max
-    medium: {}                        # same as the default route
-    hard:
-      model: "your-strong-model"
-      reasoning_effort: high
-```
-
-```json
-{"tasks": [
-  {"goal": "Extract the requested facts from the supplied files", "difficulty": "easy"},
-  {"goal": "Investigate conflicting evidence and recommend a resolution", "difficulty": "hard"}
-]}
-```
-
-Choose by judgment required, not task length: **easy** for clear procedures with little ambiguity
-and readily verified results; **medium** for bounded investigation or implementation with
-interacting constraints; **hard** for substantial ambiguity, difficult synthesis, costly mistakes,
-computer use, visual work, or frontend tasks. Difficulty does not set delegation depth or capability.
-A child may discover more complexity and select a different route for its own subtasks.
-
-Omitting difficulty uses the ordinary delegation configuration, including for nested children.
-An explicit category must be configured; invalid categories refuse the whole call before spawning
-children. Each route overlays the default configuration. Supported overrides are `model`, `provider`,
-`base_url`, `api_key`, `api_mode`, `request_overrides`, `fallback_providers`, and
-`reasoning_effort`. Nested values replace the default value rather than being recursively merged;
-use `null` to clear an inherited setting, such as a direct `base_url` when switching providers.
-Transport `command` and `args` belong in the provider configuration; difficulty routes reject them.
-Reasoning `false` disables reasoning; omitted effort uses the default delegation effort.
-Routes are resolved independently without modifying shared configuration. Existing deployments
-without `difficulty_routes` retain their current routing and do not advertise the new argument.
-
-Background spawn receipts, child results, and live delegation manifests identify the requested
-category/model/provider. Results also report the actual model/provider and reasoning effort, so
-fallbacks are distinguishable from the originally selected route. A mixed batch has no single
-batch-wide model; inspect its individual child records.
+Per-task selection belongs to the active delegation backend. The resumable-delegation
+plugin's `resumable` backend declares `child_model` / `child_provider` and optionally
+`difficulty` when `delegation.backends.resumable.difficulty_routes` is configured.
+An explicit child selector overrides the chosen difficulty route. Omission uses the
+normal delegation default, including nested tasks. Invalid routes refuse their task
+while valid siblings run. See the companion plugin README for configuration and
+migration from the older core `model` / `provider` / `difficulty_routes` interface.
 
 Note that the pin is global: with the default strategy `delegate_task` has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave `delegation.model` unset for that session, use a delegation strategy plugin (below), or hand the task to the [kanban board](kanban.md#per-task-model-override), which does support a per-task model override.
 

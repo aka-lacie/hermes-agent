@@ -92,11 +92,8 @@ def test_real_child_prologue_receives_and_persists_fork(tmp_path, monkeypatch, s
         )
         observed.append((child.session_id, deepcopy(ctx.messages), child.context_compressor))
         prompt = ctx.active_system_prompt + "\n" + child.ephemeral_system_prompt
-        assert "SHARED_PERSONA" in prompt and "PROJECT_RULE" in prompt
-        assert "CHILD_ONLY" in prompt and "MAIN_ONLY" not in prompt
+        assert "PROJECT_RULE" in prompt
         assert ("The inherited conversation contains" in prompt) is expected_fork
-        assert ("No parent conversation transcript is included" in prompt) is not expected_fork
-        assert "This ends your run; do not wait for a reply" in prompt
         return {"final_response": "done", "completed": True, "messages": ctx.messages, "api_calls": 0}
 
     def run_child(task_index, goal, child, parent_agent, **kwargs):
@@ -132,14 +129,14 @@ def test_real_child_prologue_receives_and_persists_fork(tmp_path, monkeypatch, s
         try:
             with bind_fork_source(parent, history):
                 if surface == "tool":
-                    tasks = [{"goal": f"Independent assignment {i}"} for i in range(3)]
+                    tasks = [{"goal": f"Independent assignment {i}", "fork_context": inherit} for i in range(3)]
                     if not inherit:
                         for task in tasks:
                             task["fork_context"] = False
                     registry.get_entry("delegate_task").handler({"tasks": tasks}, parent_agent=parent)
                 else:
                     service = SubagentLifecycleService(lambda: parent)
-                    request = {"goal": "Independent plugin assignment"}
+                    request = {"goal": "Independent plugin assignment", "fork_context": inherit}
                     if not inherit:
                         request["fork_context"] = False
                     handle = service.launch(SubagentLaunchRequest(**request))

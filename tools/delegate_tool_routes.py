@@ -325,18 +325,6 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
     for i, task in enumerate(task_list):
         try:
             route = _route_one(provider, declared, i, task, config)
-            # Personal task pins/difficulty choices compose with the backend's route. A profile
-            # owns its entire runtime; never silently ignore a pin or borrow another profile's keys.
-            if any(name in task for name in ("model", "provider", "difficulty")):
-                if route.get("profile"):
-                    raise DelegationRouteError("Explicit model/provider/difficulty cannot override a profile route.")
-                from tools.delegate_tool_config import _task_route_configs
-                route = _task_route_configs([task], {
-                    **_with_inherited_fallback(route, config),
-                    "difficulty_routes": config.get("difficulty_routes", {}),
-                })[0]
-                if "provider" in task:
-                    route["fallback_providers"] = []  # a fresh provider cannot inherit another route's chain
             _check_backend_effort(i, route, config)
             routes.append(_route_to_task_route(route, parent_agent, cache, config, provider.name))
         except ValueError as exc:  # DelegationRouteError, the credential resolver's and the tier check's refusals

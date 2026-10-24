@@ -13,7 +13,10 @@ class SubagentExtension:
         return True
 
     def child_options(self, task: dict) -> dict:
-        """Optional retain/review_skills booleans and a display title for new children."""
+        """Optional retain/review_skills/fork_context booleans and a display title.
+
+        fork_context is a default for new children; an explicit task choice wins.
+        """
         return {}
 
     def extend_schema(self, schema: dict) -> dict:
@@ -31,6 +34,18 @@ def get_subagent_extension():
     from hermes_cli.plugins import get_plugin_manager
     extension = getattr(get_plugin_manager(), "_subagent_extensions", {}).get("default")
     return extension if extension is not None and extension.enabled() else None
+
+
+def resolve_child_options(extension, task):
+    """Resolve policy once before construction; registration alone changes no defaults."""
+    options = extension.child_options(deepcopy(task)) if extension is not None else {}
+    flags = ("retain", "review_skills", "fork_context")
+    if not isinstance(options, dict) or any(type(options[k]) is not bool for k in flags if k in options):
+        raise ValueError("Subagent extension options must contain boolean retain/review_skills/fork_context flags.")
+    fork = task.get("fork_context", options.get("fork_context", False))
+    if type(fork) is not bool:
+        raise ValueError("Task fork_context must be a boolean.")
+    return {**options, "fork_context": fork}
 
 
 def extend_delegation_schema(schema):

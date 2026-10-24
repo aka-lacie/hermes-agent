@@ -347,14 +347,12 @@ def test_plugin_toolsets_are_known_toolsets(lifecycle, monkeypatch):
         narrow.launch(SubagentLaunchRequest(goal="use the plugin", allowed_toolsets=("plugin-tools",)))
 
 
-def test_named_provider_routes_never_expose_connection_credentials():
-    """Plugins and tasks can choose configured routes; credentials stay host-owned."""
+def test_provider_is_plugin_facing_only():
+    """``provider`` lives on the plugin request; no model-facing delegate_task field can carry a route."""
     import dataclasses
     from tools.delegate_tool import DELEGATE_TASK_SCHEMA
 
     assert "provider" in {field.name for field in dataclasses.fields(SubagentLaunchRequest)}
     props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
     exposed = set(props) | set(props["tasks"]["items"]["properties"])
-    assert not exposed & {"base_url", "api_key", "command", "args"}
-    task_props = props["tasks"]["items"]["properties"]
-    assert {"provider", "model"} <= set(task_props)
+    assert not exposed & {"provider", "model", "base_url", "api_key"}

@@ -60,7 +60,7 @@ class SubagentLaunchRequest:
     correlation_id: Optional[str] = None
     metadata: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     timeout_seconds: Optional[float] = None
-    fork_context: bool = True
+    fork_context: bool = False
 
 
 @dataclasses.dataclass(frozen=True)

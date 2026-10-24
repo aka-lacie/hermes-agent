@@ -2,7 +2,7 @@
 """
 Delegate Tool -- Subagent Architecture
 
-Spawns child AIAgent instances with forked conversational context, their own task_id
+Spawns child AIAgent instances with a fresh conversation, their own task_id
 (terminal session, file-ops cache), the parent's toolsets minus child-blocked
 tools, and a focused system prompt built from goal + context. Single-task and
 batch (parallel) modes; top-level model calls run in the background while
@@ -223,16 +223,16 @@ def _build_child_agent(
     # callers such as /review pass auxiliary.review here so fallback policy is
     # not accidentally read from the general delegation block.
     routing_cfg: Optional[dict[str, Any]] = None,
-    override_reasoning_effort: Any = None,
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
+    # Per-task route from the delegation provider (tools/delegate_tool_routes.py): a reasoning
+    # effort that beats delegation.reasoning_effort, and the profile home the child runs as.
+    override_reasoning_effort: Any = None,
+    profile_home: Optional[Path] = None,
+    override_service_tier: Optional[str] = None,  # a route's checked speed tier (tools/delegate_tool_tuning.py)
     has_fork_context: bool = False,
     session_id: Optional[str] = None,
     workspace_path: Optional[str] = None,
-    # Per-task route from the delegation provider (tools/delegate_tool_routes.py): a reasoning
-    # effort that beats delegation.reasoning_effort, and the profile home the child runs as.
-    profile_home: Optional[Path] = None,
-    override_service_tier: Optional[str] = None,  # a route's checked speed tier (tools/delegate_tool_tuning.py)
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair. ``profile_home`` builds (and later runs,
@@ -252,11 +252,10 @@ def _build_child_agent(
     subagent_id = f"sa-{task_index}-{_uuid.uuid4().hex[:8]}"
     parent_subagent_id = getattr(parent_agent, "_subagent_id", None)
 
-    # Compression/capabilities stay global. Difficulty routes may override reasoning;
-    # other callers (e.g. auxiliary.review) retain the ordinary delegation effort.
+    # General delegation behavior (reasoning, compression, capabilities) stays
+    # global. Only fallback policy follows the owner of a per-call route such
+    # as auxiliary.review.
     delegation_cfg = _load_config()
-    if override_reasoning_effort is not None:
-        delegation_cfg = {**delegation_cfg, "reasoning_effort": override_reasoning_effort}
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
     workspace_path = workspace_path or _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
@@ -467,12 +466,19 @@ def _build_children(
     resume: Optional[dict] = None, retain_sessions: bool = False,
 ) -> tuple[list[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe), each on its task's route;
-    ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
+    ``(children, None)`` or ``([], error)`` on a construction or session-admission failure."""
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
     children = []
     from agent.subagent_context import attach_fork_history, fork_history
-    history = fork_history(parent_agent) if any(t.get("fork_context", True) for t in task_list) else []
+    from agent.subagent_extension import get_subagent_extension, resolve_child_options
+    extension = get_subagent_extension()
+    try:
+        options = [resolve_child_options(extension, task) for task in task_list]
+    except Exception as exc:
+        logger.warning("Subagent option preflight failed", exc_info=True)
+        return [], str(exc)
+    history = fork_history(parent_agent) if any(option["fork_context"] for option in options) else []
     for i, t in enumerate(task_list):
         route = routes[i]
         if route.error:
@@ -492,7 +498,7 @@ def _build_children(
                 model=route.creds["model"], max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
                 has_fork_context=(resume["record"].get("forked_context", False) if resume
-                                  else bool(history) and t.get("fork_context", True)),
+                                  else bool(history) and options[i]["fork_context"]),
                 **overrides,
             )
         except Exception as exc:
@@ -504,7 +510,7 @@ def _build_children(
             if isinstance(exc, ValueError):
                 return [], str(exc)
             raise
-        if t.get("fork_context", True):
+        if options[i]["fork_context"]:
             attach_fork_history(child, history)
         child._delegate_difficulty = t.get("difficulty") or "default"
         child._delegate_requested_model = getattr(child, "model", None)
@@ -533,7 +539,7 @@ def _build_children(
                 _ident_ref["delegation_id"] = live_deleg_id
         try:
             from tools.delegate_sessions import bind_child
-            bind_child(parent_agent, child, t, resume, routing_cfg=route.routing_cfg,
+            bind_child(parent_agent, child, t, resume, extension=extension, options=options[i], routing_cfg=route.routing_cfg,
                        retain=retain_sessions)
         except Exception as exc:
             logger.warning("Subagent session reservation failed", exc_info=True)
@@ -551,23 +557,13 @@ def _routes_for(task_list: list[dict[str, Any]], cfg: dict[str, Any], credential
     """Per-task routes: an internal caller's explicit ``credentials_cfg`` (e.g. /review → auxiliary.review) owns
     every task's route; otherwise the active delegation provider decides each one."""
     from tools.delegate_tool_routes import resolve_task_routes, route_for_config
-    from tools.delegate_tool_config import _task_route_configs
-    try:
-        configs = _task_route_configs(task_list, credentials_cfg if credentials_cfg is not None else cfg)
-    except ValueError as exc:
-        return [], str(exc)
     if credentials_cfg is None:
-        routes, error = resolve_task_routes(task_list, cfg, parent_agent)
-        # Explicit local pins retain their all-or-nothing preflight contract; backend-declared
-        # choices keep upstream's per-task refusal semantics.
-        pinned_errors = [route.error for task, route in zip(task_list, routes)
-                         if route.error and any(key in task for key in ("model", "provider", "difficulty"))]
-        return ([], " ".join(pinned_errors)) if pinned_errors else (routes, error)
+        return resolve_task_routes(task_list, cfg, parent_agent)
     try:
-        routes = [route_for_config(config, parent_agent) for config in configs]
+        route = route_for_config(credentials_cfg, parent_agent)
     except ValueError as exc:
         return [], str(exc)
-    return routes, None
+    return [route] * len(task_list), None
 
 
 def _settle_refused_transcripts(refused: list[dict[str, Any]], live_deleg_id: Optional[str], live_writers: list,
@@ -763,20 +759,20 @@ def _build_top_level_description(*, independent_completions=None) -> str:
         "each ungrouped task / `group` returns on its own"
         if independent_completions else "one message per call"
     )
-    description = _DESCRIPTION_HEAD.format(delivery=delivery) + restrictions_rule + _DESCRIPTION_TAIL
-    return description
+    return _DESCRIPTION_HEAD.format(delivery=delivery) + restrictions_rule + _DESCRIPTION_TAIL
 
 _DESCRIPTION_HEAD = (
-    "Spawn subagents with independent conversation state, terminal sessions, and tool permissions. Each starts "
-    "with a filtered conversation snapshot by default and returns its final result. Pass tasks in `tasks`; "
-    "several run in parallel (limit in tasks description).\n\n"
-    "Nested delegation from a subagent, and sessions without a later-result consumer (including one-shot CLI and "
-    "cron), return results in this tool call; use them immediately. Top-level background delegation returns a "
-    "dispatch handle and live transcript paths; results arrive BETWEEN your turns ({delivery}). After a pending "
-    "background dispatch, finish independent work, give a brief status, and END YOUR TURN. Never wait or poll for "
-    "completion. While children run, `action` (list/steer/stop) controls them live.\n\n"
-    "USE FOR: reasoning-heavy subtasks, work that would flood your context with intermediate data, or independent "
-    "parallel workstreams.\n"
+    "Spawn isolated subagents for parallel or context-heavy work. Each gets its own conversation, terminal "
+    "session, and toolset, and only its final summary returns to you. Pass every task in `tasks` — one entry spawns one subagent, several run in parallel "
+    "(limit in the tasks description).\n\n"
+    "Sessions without a later-result consumer (including one-shot CLI and cron) join parallel children "
+    "and return results in this tool call. "
+    "Otherwise runs in the background: dispatch returns live transcript paths and results re-enter "
+    "as a new message when subagents finish ({delivery}). Background results are delivered only "
+    "BETWEEN your turns: finish whatever does not depend on them, then give a one-line status and END YOUR TURN. Never "
+    "wait or poll on transcripts, artifact files, or CI for a child. "
+    "While children run, `action` (list/steer/stop) controls them live.\n\n"
+    "USE FOR: reasoning-heavy subtasks, work that would flood your context, or independent parallel workstreams.\n"
     "DO NOT USE FOR (use these instead):\n"
     "- Mechanical multi-step work with no reasoning needed -> execute_code\n"
     "- A single tool call -> call the tool directly\n"
@@ -784,8 +780,8 @@ _DESCRIPTION_HEAD = (
     "- Durable work that must survive this session -> cronjob or terminal(background=True, notify=True); /stop, /new, "
     "or process exit halts running subagents (whole tree); each returns an 'interrupted' completion with partial output.\n\n"
     "RULES:\n"
-    "- Children inherit user turns/final answers, not reasoning/tools. Pass findings and style "
-    "(e.g. \"respond in Chinese\") via 'context'; fork_context=false starts fresh.\n"
+    "- Children know nothing of this conversation: pass everything needed via 'context', including any required "
+    "output language, tone, or style (e.g. \"respond in Chinese\").\n"
     "- Child summaries are SELF-REPORTS, not verified facts: a child claiming \"uploaded successfully\" or "
     "\"file written\" may be wrong. For external side effects (uploads, remote writes, publishing), require a "
     "verifiable handle (URL, ID, absolute path) and verify it yourself before telling the user the operation "
@@ -794,7 +790,7 @@ _DESCRIPTION_HEAD = (
     "the parent applies the transition.\n"
 )
 _DESCRIPTION_TAIL = (
-    "- Explicit task model/provider overrides win over difficulty, delegation defaults, and parent inheritance."
+    "- Children inherit the parent model unless pinned via delegation.provider / delegation.model in config.yaml."
 )
 
 def _build_tasks_param_description() -> str:
@@ -806,7 +802,7 @@ def _build_tasks_param_description() -> str:
     return (
         f"The task(s), up to {max_children} in parallel for this user (set "
         "via delegation.max_concurrent_children). Each entry spawns one "
-        "subagent with independent conversation state and terminal session; a single task "
+        "subagent with isolated context and terminal session; a single task "
         "is a one-entry array. Required when spawning."
     )
 
@@ -820,22 +816,6 @@ def _build_dynamic_schema_overrides() -> dict:
     # Copy properties so the static schema dict is never mutated.
     overrides_params["properties"] = {k: dict(v) for k, v in DELEGATE_TASK_SCHEMA["parameters"]["properties"].items()}
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
-    tasks = overrides_params["properties"]["tasks"]
-    tasks["items"] = {**tasks["items"], "properties": dict(tasks["items"]["properties"])}
-    from tools.delegate_tool_config import DIFFICULTY_LEVELS
-    routes = _load_config().get("difficulty_routes")
-    choices = [level for level in DIFFICULTY_LEVELS if isinstance(routes, dict) and isinstance(routes.get(level), dict)]
-    if choices:
-        tasks["items"]["properties"]["difficulty"] = {
-            "type": "string", "enum": choices,
-            "description": (
-                "Choose by judgment needed, not length. Easy: clear procedure, little ambiguity, easily verified. "
-                "Medium: bounded investigation or implementation with interacting constraints. "
-                "Hard: substantial ambiguity, difficult synthesis, costly mistakes, computer use, visual work, "
-                "or frontend tasks. Omit for the configured default. This selects model/reasoning, "
-                "not delegation capability; children may reassess and route their own subtasks."
-            ),
-        }
 
     if not independent_completions:
         tasks = overrides_params["properties"]["tasks"]
@@ -866,7 +846,7 @@ DELEGATE_TASK_SCHEMA = {
     # _build_dynamic_schema_overrides() so the model sees the user's actual max_concurrent_children / max_spawn_depth.
     # Lazy (not at import) so cli.CLI_CONFIG isn't forced to load before the test conftest redirects HERMES_HOME.
     "description": (
-        "Spawn one or more subagents with independent conversation state. "
+        "Spawn one or more subagents in isolated contexts. "
         "Description is rebuilt at every get_definitions() call to reflect the user's current delegation limits."
     ),
     "parameters": {
@@ -882,29 +862,15 @@ DELEGATE_TASK_SCHEMA = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "model": _p(
-                            "string", "Optional model override, ahead of difficulty/defaults. Keeps the selected "
-                            "provider unless provider is also supplied; no provider inference.",
-                        ),
-                        "provider": _p(
-                            "string", "Optional configured provider override; requires model. Resolves its own "
-                            "credentials and transport from this profile. Omit to keep the selected provider.",
-                        ),
                         "goal": _p(
                             "string",
-                            "What this subagent should accomplish. Be specific; inherited conversation is "
-                            "background, not the child's assignment.",
+                            "What this subagent should accomplish. Be specific and self-contained — it knows "
+                            "nothing about your conversation history.",
                         ),
                         "context": _p(
                             "string",
-                            "Additional background THIS child needs: file paths, tool findings, error messages, "
-                            "constraints. Other children's assignments are not inherited.",
-                        ),
-                        "fork_context": _p(
-                            "boolean", "Include a filtered parent-conversation snapshot: user turns, final answers, "
-                            "and textual compaction handoffs (default true). False omits that history; shared "
-                            "identity, project rules, and normal child instructions still apply.",
-                            default=True,
+                            "Background THIS child needs: file paths, error messages, constraints. Each child "
+                            "sees only its own context — repeat shared background in every task that needs it.",
                         ),
                         "output_schema": _p(
                             "object",

@@ -18,16 +18,13 @@ def _record(descriptor, provider="custom"):
     return {"provider": provider, "model": "selected-model", "route_descriptor": descriptor}
 
 
-@pytest.mark.parametrize("difficulty", [None, "hard"])
-def test_direct_route_uses_current_credentials_and_refuses_changed_endpoint(monkeypatch, difficulty):
+def test_direct_route_uses_current_credentials_and_refuses_changed_endpoint(monkeypatch):
     selected = {"base_url": "https://private.example/v1", "api_key": "initial-key", "model": "selected-model"}
-    cfg = ({"difficulty_routes": {difficulty: selected}, "base_url": "https://other.example/v1"}
-           if difficulty else selected)
+    cfg = selected
     monkeypatch.setattr(config, "_load_config", lambda: cfg)
     parent = _agent("https://parent.example/v1", provider="openai")
     child = _agent()
-    task = {"goal": "Review the change", **({"difficulty": difficulty} if difficulty else {})}
-    descriptor = routes.capture_route(parent, child, task)
+    descriptor = routes.capture_route(child, routing_cfg=selected)
     encoded = json.dumps(descriptor)
     assert "initial-key" not in encoded and "private.example" not in encoded
     selected["api_key"] = "rotated-key"
@@ -45,7 +42,7 @@ def test_parent_route_does_not_adopt_new_delegation_default(monkeypatch):
     cfg = {}
     monkeypatch.setattr(config, "_load_config", lambda: cfg)
     parent = _agent()
-    descriptor = routes.capture_route(parent, _agent(), {"goal": "Review"})
+    descriptor = routes.capture_route(_agent(), routing_cfg=cfg)
     cfg.update(base_url="https://new-default.example/v1", api_key="wrong-key")
     parent.api_key = "rotated-parent-key"
     resumed = routes.resume_route(parent, _record(descriptor))
@@ -62,7 +59,7 @@ def test_parent_route_does_not_adopt_new_delegation_default(monkeypatch):
 def test_named_provider_keeps_its_identity_when_defaults_change(monkeypatch):
     cfg = {"provider": "chosen-profile", "model": "selected-model"}
     monkeypatch.setattr(config, "_load_config", lambda: cfg)
-    descriptor = routes.capture_route(_agent(), _agent(provider="chosen-profile"), {"goal": "Review"})
+    descriptor = routes.capture_route(_agent(provider="chosen-profile"), routing_cfg=cfg)
     cfg.update(provider="different-profile", base_url="https://wrong.example", api_key="wrong-key")
     resumed = routes.resume_route(_agent(), _record(descriptor, "chosen-profile"), "new-model")
     assert resumed["provider"] == "chosen-profile"
@@ -74,7 +71,7 @@ def test_external_route_captures_actual_endpoint_and_refuses_unrelated_default(m
     cfg = {"provider": "different-profile", "model": "some-model"}
     monkeypatch.setattr(config, "_load_config", lambda: cfg)
     actual = {"base_url": "https://private.example/v1", "api_key": "aux-key"}
-    descriptor = routes.capture_route(_agent(), _agent(), {"goal": "Review"}, routing_cfg=actual)
+    descriptor = routes.capture_route(_agent(), routing_cfg=actual)
     assert descriptor["kind"] == "default"
     cfg.clear()
     cfg.update(base_url="https://wrong.example/v1", api_key="wrong-key")
