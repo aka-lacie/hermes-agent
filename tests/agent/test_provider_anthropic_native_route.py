@@ -34,7 +34,7 @@ MODEL = "claude-opus-4-6"
 def _registered_profiles(monkeypatch):
     """Function-scoped provider state, including registration's auth/catalog mirrors."""
     from copy import deepcopy
-    from hermes_cli import auth, auth_plugin_providers, models_catalog_static
+    from hermes_cli import auth, auth_plugin_providers, models_catalog_static, runtime_provider
 
     # Complete ordinary discovery before installing test profiles; restore every mutated collection,
     # not just our names (registration can add aliases and populate previously unloaded mirrors).
@@ -48,6 +48,8 @@ def _registered_profiles(monkeypatch):
     ):
         for name in names:
             monkeypatch.setattr(module, name, deepcopy(getattr(module, name)))
+    # Runtime resolution holds a direct import of this same mutable auth registry.
+    monkeypatch.setattr(runtime_provider, "PROVIDER_REGISTRY", auth.PROVIDER_REGISTRY)
     monkeypatch.setattr(providers, "_PROVIDER_LIST_CACHE", None)
     providers.register_provider(ProviderProfile(
         name=NATIVE_PROVIDER,

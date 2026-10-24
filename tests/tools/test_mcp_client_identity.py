@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from hermes_cli import __version__
+from hermes_cli.version_info import get_version_info
 from tools.mcp_tool import MCPServerTask
 
 
@@ -22,4 +22,4 @@ async def test_sdk_initialize_receives_hermes_identity():
         await session.initialize()
     request = session.send_request.call_args.args[0]
     wire = request.model_dump(by_alias=True, exclude_none=True)
-    assert wire["params"]["clientInfo"] == {"name": "hermes-agent", "version": __version__}
+    assert wire["params"]["clientInfo"] == {"name": "hermes-agent", "version": get_version_info().base_version}

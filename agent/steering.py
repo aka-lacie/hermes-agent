@@ -35,11 +35,13 @@ def finish_input_turn(agent, result=None):
         if pending:
             result.setdefault("pending_input_events", []).extend(pending)
             agent._pending_input_events = []
-        legacy = getattr(agent, "_pending_steer", None)
+        from agent.interrupt_control import _steer_parts, _set_steer_parts
+        parts = _steer_parts(agent)
+        legacy = "\n".join(text for ticket, text in parts if ticket is None)
+        _set_steer_parts(agent, [part for part in parts if part[0] is not None])
         if legacy:
             existing = result.get("pending_steer")
             result["pending_steer"] = (existing + "\n" + legacy) if existing else legacy
-            agent._pending_steer = None
         if getattr(agent, "_received_user_steer", False) is True:
             result["received_user_input"] = True
 

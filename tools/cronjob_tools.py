@@ -1077,9 +1077,7 @@ def _cronjob_schema_overrides() -> dict:
 
 CRONJOB_SCHEMA = {
     "name": "cronjob_manage",
-    "description": """Manage scheduled cron jobs: action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
-
-Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless pinned.
+    "description": """Schedule recurring or one-off agent tasks (cron jobs): create, list, edit, run. action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
 
 Agent jobs run in a fresh session with no current-chat context, so prompts must be self-contained, and the agent's FINAL RESPONSE is what gets delivered. Script jobs skip the LLM and deliver non-empty stdout. Reminder jobs emit the prompt without a detached agent and default to internal-turn delivery. delivery_mode='direct' posts output as-is; 'internal_turn' wakes the destination agent with conversation context. Unpinned agent jobs use the main agent model at execution time. Cron runs are autonomous and cannot ask questions. Prefer updating an existing job over creating near-duplicates.""",
     "parameters": {

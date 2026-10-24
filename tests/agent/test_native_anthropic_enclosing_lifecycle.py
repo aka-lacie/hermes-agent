@@ -58,7 +58,9 @@ def test_compression_stall_chain_stops_only_for_policy(monkeypatch, policy):
     failure = wrapped(ProviderContractError("compression policy rejected")) if policy else RuntimeError("ordinary failure")
     runner = Mock(side_effect=failure)
     monkeypatch.setattr(cc, "run_compress_context_with_progress_timeout", runner)
+    import time
     kwargs = dict(worker=lambda fence: None, messages=[], system_prompt_fallback="",
+                  precommit_deadline_monotonic=time.monotonic() + 120,
                   idle_timeout_seconds=1, total_ceiling_seconds=2,
                   telemetry_agent=SimpleNamespace(), new_fence=cc.CompressionCommitFence,
                   escalate_deterministic=True)

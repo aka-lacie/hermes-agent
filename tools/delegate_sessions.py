@@ -27,6 +27,8 @@ def bind_child(parent, child, task, resume=None, *, routing_cfg=None, retain=Fal
         raise ValueError("Subagent extension options must contain boolean retain/review_skills flags.")
     if not (resume is not None or retain or options.get("retain", False)):
         return
+    if getattr(child, "_delegate_profile_home", None) is not None:
+        raise ValueError("Retained delegation cannot yet resume a profile route; choose a model/provider route.")
     child._delegate_review_skills = options.get("review_skills", False)
     child._delegate_assignment_formatter = extension.format_assignment if extension is not None else None
     from tools.delegate_session_store import DelegateSessionStore
