@@ -97,7 +97,7 @@ def test_real_child_prologue_receives_and_persists_fork(tmp_path, monkeypatch, s
         observed.append((child.session_id, deepcopy(ctx.messages), child.context_compressor))
         prompt = ctx.active_system_prompt + "\n" + child.ephemeral_system_prompt
         assert "PROJECT_RULE" in prompt
-        assert ("The inherited conversation contains" in prompt) is expected_fork
+        assert ("The inherited conversation" in prompt) is expected_fork
         return {"final_response": "done", "completed": True, "messages": ctx.messages, "api_calls": 0}
 
     def run_child(task_index, goal, child, parent_agent, **kwargs):
