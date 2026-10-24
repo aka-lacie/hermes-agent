@@ -103,9 +103,9 @@ def test_the_session_streams_are_the_first_two_yielded():
     passed: dict = {}
 
     class _CapturingSession(_DummySession):
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, client_info=None, **kwargs):
             passed["args"] = args
-            passed["client_info"] = kwargs["client_info"]
+            passed["client_info"] = client_info
             assert passed["client_info"].name == "hermes-agent"
             super().__init__(*args, **kwargs)
 

@@ -11,14 +11,14 @@ def _unit(configured_model):
     batch = _Batch(**{field.name: None for field in fields(_Batch)})
     task = {"goal": "probe"}
     batch.task_list, batch.live_writers, batch.top_role = [task], [], "leaf"
-    batch.children = [(0, task, SimpleNamespace(model="inherited/model"))]
+    batch.children = [(0, task, SimpleNamespace(model=configured_model or "inherited/model"))]
     batch.creds = {"model": configured_model}
     return batch
 
 
 def test_completion_model_falls_back_to_inherited_child_model(monkeypatch):
     seen = []
-    monkeypatch.setattr(async_delegation, "dispatch_async_delegation_batch", lambda **kw: seen.append(kw["model"]))
+    monkeypatch.setattr(async_delegation, "dispatch_async_delegation_batch", lambda **kw: (seen.append(kw["model"]) or {"status": "dispatched"}))
     _dispatch_unit(_unit(None), None, None, {})  # delegation.model blank: children inherit the parent's model
     _dispatch_unit(_unit("configured/model"), None, None, {})
     assert seen == ["inherited/model", "configured/model"]

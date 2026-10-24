@@ -1088,7 +1088,7 @@ class TestMCPServerTask:
 
         return (
             patch("tools.mcp_tool.stdio_client", return_value=mock_stdio_cm),
-            patch("tools.mcp_tool.ClientSession", return_value=mock_cs_cm),
+            patch("tools.mcp_tool.ClientSession", autospec=True, return_value=mock_cs_cm),
             mock_read, mock_write,
         )
 

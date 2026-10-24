@@ -417,6 +417,7 @@ def _npm_graph(source):
     '''))
     _put(source, "packages/value/index.js", "export const value = 'compiled local graph';\n")
     _put(source, "packages/value/index.d.ts", "export const value: string;\n")
+    shutil.copytree(ROOT / "ui-tui/scripts", source / "ui-tui/scripts")
     _put(source, "ui-tui/src/entry.tsx", "import { value } from 'fixture-value'; console.log(value);\n")
     _put(source, "web/src/main.ts", "import { value } from 'fixture-value'; document.body.textContent = value;\n")
     _put(source, "web/index.html", '<html><body><script type="module" src="/src/main.ts"></script></body></html>')
@@ -491,7 +492,7 @@ def test_real_compiler_failure_is_owed_build_and_completion_continues(completion
     assert child.returncode == 0, child.stdout + child.stderr
     assert "TypeScript build failed" in child.stdout + child.stderr
     assert (source / "npm-python.json").is_file()
-    assert (source / "ui-tui/dist/entry.js").is_file()
+    assert (source / "ui-tui/dist/entry.js").is_file(), child.stdout + child.stderr
     assert not (source / "hermes_cli/web_dist/index.html").exists()
     # Maintenance and the fleet restart were not skipped by the build failure.
     config = hermes_yaml.safe_load((home / "config.yaml").read_text())
