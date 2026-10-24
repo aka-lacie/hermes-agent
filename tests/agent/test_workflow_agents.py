@@ -320,3 +320,34 @@ def test_simultaneous_maps_share_the_host_queue_allowance():
     finally:
         first.close()
     assert pool.pending_items == 0
+
+
+def test_workflow_explicit_route_survives_backend_api_change(workflow, monkeypatch):
+    """Workflow SDK model/provider options retain ownership without plugin field names."""
+    from tools import delegate_tool as delegate
+    w = workflow
+    config = {"model": "default", "provider": "original", "base_url": "https://old.invalid",
+              "api_key": "old-secret", "api_mode": "chat_completions", "command": "old-command",
+              "args": ["old"], "request_overrides": {"old": True}, "fallback_providers": ["original"]}
+    monkeypatch.setattr(delegate, "_load_config", lambda: config)
+    seen = []
+    def credentials(cfg, parent):
+        seen.append(dict(cfg))
+        return {"model": cfg["model"], "provider": cfg["provider"],
+                "base_url": cfg.get("base_url", "https://new.invalid"),
+                "api_key": cfg.get("api_key", "new-secret"), "api_mode": "chat_completions"}
+    monkeypatch.setattr(delegate, "_resolve_delegation_credentials", credentials)
+    run(w, model="model-only")
+    assert w.children[-1].kwargs["model"] == "model-only"
+    assert seen[-1]["base_url"] == "https://old.invalid"
+    run(w, model="other-model", provider="other")
+    assert w.children[-1].kwargs["model"] == "other-model"
+    assert w.children[-1].kwargs["override_api_key"] == "new-secret"
+    assert seen[-1]["provider"] == "other"
+    assert seen[-1]["fallback_providers"] == []
+    assert not {"base_url", "api_key", "api_mode", "request_overrides", "command", "args"} & seen[-1].keys()
+    assert config["api_key"] == "old-secret"
+    with pytest.raises(AgentError, match="requires model"):
+        run(w, provider="other")
+    assert len(w.children) == 2
+    assert w.pool.active == w.pool.resident == 0
