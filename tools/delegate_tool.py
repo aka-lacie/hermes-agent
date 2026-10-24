@@ -467,12 +467,19 @@ def _build_children(
     resume: Optional[dict] = None, retain_sessions: bool = False,
 ) -> tuple[list[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe), each on its task's route;
-    ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
+    ``(children, None)`` or ``([], error)`` on a construction or session-admission failure."""
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
     children = []
     from agent.subagent_context import attach_fork_history, fork_history
-    history = fork_history(parent_agent) if any(t.get("fork_context", True) for t in task_list) else []
+    from agent.subagent_extension import get_subagent_extension, resolve_child_options
+    extension = get_subagent_extension()
+    try:
+        options = [resolve_child_options(extension, task) for task in task_list]
+    except Exception as exc:
+        logger.warning("Subagent option preflight failed", exc_info=True)
+        return [], str(exc)
+    history = fork_history(parent_agent) if any(option["fork_context"] for option in options) else []
     for i, t in enumerate(task_list):
         route = routes[i]
         if route.error:
@@ -492,7 +499,7 @@ def _build_children(
                 model=route.creds["model"], max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
                 has_fork_context=(resume["record"].get("forked_context", False) if resume
-                                  else bool(history) and t.get("fork_context", True)),
+                                  else bool(history) and options[i]["fork_context"]),
                 **overrides,
             )
         except Exception as exc:
@@ -505,7 +512,7 @@ def _build_children(
                 return [], str(exc)
             raise
         pin_child_service_tier(child, route.creds)
-        if t.get("fork_context", True):
+        if options[i]["fork_context"]:
             attach_fork_history(child, history)
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
@@ -530,7 +537,7 @@ def _build_children(
                 _ident_ref["delegation_id"] = live_deleg_id
         try:
             from tools.delegate_sessions import bind_child
-            bind_child(parent_agent, child, t, resume, routing_cfg=route.routing_cfg,
+            bind_child(parent_agent, child, t, resume, extension=extension, options=options[i], routing_cfg=route.routing_cfg,
                        retain=retain_sessions)
         except Exception as exc:
             logger.warning("Subagent session reservation failed", exc_info=True)

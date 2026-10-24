@@ -342,6 +342,13 @@ delegation:
 
 Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then `delegation.provider` (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; `delegation.model` applies in all cases, and when it is empty children inherit the parent's model. Setting `delegation.provider` alongside `delegation.base_url` keeps the explicit endpoint but carries that provider's request overrides and max output tokens into the child. An explicit `delegation.request_overrides` dict is honored on every branch and merges over those runtime-derived values (see [Configuration](#configuration) below).
 
+Per-task selection belongs to the active delegation backend. The resumable-delegation
+plugin's `resumable` backend declares `child_model` / `child_provider` and optionally
+`difficulty` when `delegation.backends.resumable.difficulty_routes` is configured.
+An explicit child selector overrides the chosen difficulty route. Omission uses the
+normal delegation default, including nested tasks. Invalid routes refuse their task
+while valid siblings run. See the companion plugin README for configuration.
+
 Note that the pin is global: with the default strategy `delegate_task` has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave `delegation.model` unset for that session, use a delegation strategy plugin (below), or hand the task to the [kanban board](kanban.md#per-task-model-override), which does support a per-task model override.
 
 ### Delegation strategies (`delegation.backend`)

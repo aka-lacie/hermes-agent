@@ -20,15 +20,14 @@ def _endpoint_fingerprint(base_url) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
-def capture_route(parent, child, task, *, routing_cfg=None) -> dict:
+def capture_route(child, *, routing_cfg) -> dict:
     """Capture the selector used at spawn, not an endpoint/credential bundle.
 
     Named providers are resolved anew by name. Anonymous endpoints additionally
     require the selected configuration (or inherited parent) to keep its identity.
     """
-    from tools.delegate_tool_config import _load_config, _NATIVE_SDK_PROVIDERS
-    # Upstream routes spawns through the delegation backend; the route a child was built on is its selector.
-    route = routing_cfg if routing_cfg is not None else _load_config()
+    from tools.delegate_tool_config import _NATIVE_SDK_PROVIDERS
+    route = routing_cfg
     provider = str(getattr(child, "requested_provider", None) or child.provider).strip().lower()
     if route.get("base_url") and str(route.get("provider") or "").lower() not in _NATIVE_SDK_PROVIDERS:
         descriptor = {"kind": "default"}
@@ -53,10 +52,9 @@ def _require_endpoint(descriptor, base_url) -> None:
 
 
 def resume_route(parent, record, model=None) -> dict:
-    """Return fresh routing config. Callers pin only model on the resumed task.
+    """Reconstruct the saved route for host-owned activation, bypassing spawn policy.
 
-    Leaving provider in this config, rather than adding a task-level provider pin,
-    preserves the verified direct endpoint through normal delegation resolution.
+    Resolve credentials anew while preserving the named provider or verified endpoint.
     """
     from tools.delegate_tool_config import (
         _inherit_parent_endpoint, _load_config, _resolve_delegation_credentials,

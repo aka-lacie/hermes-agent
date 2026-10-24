@@ -18,11 +18,17 @@ class SubagentSessionMethods:
             raise SubagentLifecycleError(str(result["error"]))
         return result
 
-    def launch_session(self, *, goal, context=None, title=None, fork_context=True, model=None, provider=None,
+    def launch_session(self, *, goal, context=None, title=None, fork_context=None, task_parameters=None,
                        background=False):
         """Start a retained child through the normal delegation routing and admission."""
-        task = {"goal": goal, "context": context, "title": title, "fork_context": fork_context}
-        task.update({key: value for key, value in {"model": model, "provider": provider}.items() if value is not None})
+        from agent.delegation_provider import RESERVED_TASK_PARAMETERS
+        from agent.subagent_lifecycle import SubagentLifecycleError
+        if task_parameters is not None and (not isinstance(task_parameters, dict)
+                                           or RESERVED_TASK_PARAMETERS.intersection(task_parameters)):
+            raise SubagentLifecycleError("task_parameters must be an object of backend-specific fields, not core task fields.")
+        task = {**(task_parameters or {}), "goal": goal, "context": context, "title": title}
+        if fork_context is not None:
+            task["fork_context"] = fork_context
         return self._session_action("spawn", tasks=[task], background=background)
 
     def resume_session(self, session_id, message, *, model=None, background=False):
