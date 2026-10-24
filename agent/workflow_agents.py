@@ -182,7 +182,7 @@ def run_workflow_agent(service, assignment, input, output_schema, *, fork_contex
     cancellation = Cancellation(context.cancelled, authority.cancel, _cancel)
     deadline = min(authority.deadline, context.deadline if context.deadline is not None else float("inf"))
     request = WorkflowRequest(code_context, output_schema, parent, cancellation, deadline,
-                              history=context.fork_history() if fork_context else [], session_id=session_id)
+                              history=context.capture_fork_boundary() if fork_context else [], session_id=session_id)
     request.check()
     from agent.workflow_agents_input import prepare_input
     input_context, request.artifact = prepare_input(input, parent=parent, authority=authority)

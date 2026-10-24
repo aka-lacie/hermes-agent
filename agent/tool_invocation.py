@@ -28,7 +28,6 @@ class CallContext:
     cancelled: threading.Event = field(default_factory=threading.Event)
     deadline: float | None = None
     fork_messages: list | None = None
-    fork_snapshot: list | None = None
     packages: dict = field(default_factory=dict)
     contracts: dict = field(default_factory=dict)
     evidence: list = field(default_factory=list)
@@ -56,17 +55,16 @@ class CallContext:
     def capture_fork_boundary(self):
         if self.fork_messages is None:
             # The turn lease holds conversation entries stable during this cell.
-            # Copy the boundary now; materialize filtered contents only on a fork.
+            # Copy the source boundary now; format separately for each child.
             from agent.subagent_context import capture_fork_boundary
             self.fork_messages = capture_fork_boundary(self.agent)
 
-    def fork_history(self):
-        from agent.subagent_context import conversation_snapshot
-        self.capture_fork_boundary()
-        if self.fork_snapshot is None:
-            self.fork_snapshot = conversation_snapshot(self.fork_messages)
         from copy import deepcopy
-        return deepcopy(self.fork_snapshot)
+        return deepcopy(self.fork_messages)
+
+    def fork_history(self, *, task=None):
+        from agent.subagent_context import format_fork_history
+        return format_fork_history(self.capture_fork_boundary(), task=task)
 
 
 def current_call_context():
