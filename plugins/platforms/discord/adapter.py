@@ -1285,6 +1285,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         self._semantic_thread_renames = SemanticThreadRenames()
         # Persistent typing loops per channel (DMs don't reliably show bot typing events).
         self._typing_tasks: dict[str, asyncio.Task] = {}
+        self._retiring_typing_tasks: set[asyncio.Task] = set()
         self._bot_task: Optional[asyncio.Task] = None
         # Background task that runs post-connect housekeeping (command-menu registration + DM-topic setup)
         # off the connect path so a slow Bot API call (e.g. a set_my_commands stall for certain tokens)
@@ -4337,8 +4338,9 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             return
 
         async def _typing_loop() -> None:
+            current = asyncio.current_task()
             try:
-                while True:
+                while self._typing_tasks.get(chat_id) is current:
                     try:
                         route = discord.http.Route(
                             "POST", "/channels/{channel_id}/typing", channel_id=chat_id,
@@ -4347,6 +4349,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                     except asyncio.CancelledError:
                         return
                     except Exception as e:
+                        if self._typing_tasks.get(chat_id) is not current:
+                            return
                         retry_after = self._extract_discord_retry_after(e)
                         if retry_after is not None:
                             logger.warning(
@@ -4358,22 +4362,31 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                             return
                         await asyncio.sleep(retry_after)
                         continue
+                    if self._typing_tasks.get(chat_id) is not current:
+                        return
                     await asyncio.sleep(12)
             except asyncio.CancelledError:
                 pass
             finally:
-                self._typing_tasks.pop(chat_id, None)
+                # stop_typing releases the slot before awaiting transport cleanup.
+                # A new turn may already own it when this task finally exits.
+                if self._typing_tasks.get(chat_id) is current:
+                    self._typing_tasks.pop(chat_id, None)
         self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
 
     async def stop_typing(self, chat_id: str) -> None:
-        """Stop the persistent typing indicator for a channel."""
+        """Retire typing without letting transport cleanup block turn settlement."""
         task = self._typing_tasks.pop(chat_id, None)
         if task:
+            self._retiring_typing_tasks.add(task)
+            task.add_done_callback(self._retiring_typing_tasks.discard)
+            task.add_done_callback(_consume_background_task_result)
             task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            # wait_for(task) can exceed its deadline while cancellation unwinds.
+            # wait also preserves cancellation of the caller (e.g. gateway stop).
+            done, _ = await asyncio.wait({task}, timeout=0.5)
+            if not done:
+                logger.warning("Discord typing cleanup still pending for %s; releasing turn", chat_id)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         """Get information about a Discord channel."""
