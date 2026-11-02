@@ -35,6 +35,19 @@ async def _pending_card(monkeypatch):
     return adapter, sent["view"], entry, message
 
 
+def _bound_click(view, message, choice="once"):
+    """A real Discord click carries the pressed button's custom_id and its card's message.
+
+    The shared discord mock builds no button children, so give the card the binding that real
+    discord.py buttons would have received (exact-request binding, c2d2d3f768)."""
+    from gateway.platforms.approval_cards import ApprovalCardBinding
+
+    if choice not in view._approval_binding.ids:
+        view._approval_binding = ApprovalCardBinding(
+            view.session_key, view.request_id, ["once", "session", "always", "deny"])
+    return {"message": message, "data": {"custom_id": view._approval_binding.ids[choice]}}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("edit_fails", [False, True])
 async def test_click_stops_view_even_if_interaction_edit_fails(monkeypatch, edit_fails):
@@ -42,7 +55,7 @@ async def test_click_stops_view_even_if_interaction_edit_fails(monkeypatch, edit
     monkeypatch.setattr(view, "_gate", AsyncMock(return_value=True))
     edit = AsyncMock(side_effect=RuntimeError("Discord unavailable") if edit_fails else None)
     interaction = SimpleNamespace(
-        message=message, user=SimpleNamespace(display_name="tester"),
+        **_bound_click(view, message), user=SimpleNamespace(display_name="tester"),
         response=SimpleNamespace(edit_message=edit),
     )
     if edit_fails:
@@ -84,7 +97,7 @@ async def test_observer_that_fires_before_a_failed_click_edit_still_sees_the_car
         raise RuntimeError("Discord unavailable")
 
     interaction = SimpleNamespace(
-        message=message, user=SimpleNamespace(display_name="tester"),
+        **_bound_click(view, message), user=SimpleNamespace(display_name="tester"),
         response=SimpleNamespace(edit_message=edit_message))
 
     with pytest.raises(RuntimeError, match="Discord unavailable"):
@@ -274,7 +287,7 @@ async def test_failed_click_keeps_a_pending_card_live(monkeypatch):
     real_resolve = approval.resolve_gateway_approval
     monkeypatch.setattr(approval, "resolve_gateway_approval", lambda *a, **k: 1 / 0)
     interaction = SimpleNamespace(
-        user=SimpleNamespace(display_name="tester"),
+        **_bound_click(view, message), user=SimpleNamespace(display_name="tester"),
         response=SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock()))
 
     await view._resolve(interaction, "once", 1, "gateway.exec_approval.action_once")

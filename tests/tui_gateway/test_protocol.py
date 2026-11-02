@@ -183,6 +183,8 @@ def test_live_session_payload_replays_pending_approval(server, monkeypatch):
     # request_id is injected by _ApprovalEntry so reconnecting clients can
     # correlate their approval.respond with the exact queued request.
     assert replayed.pop("request_id")
+    # provenance is the frozen origin _ApprovalEntry captures (None outside a tool call).
+    assert replayed.pop("provenance") is None
     assert replayed == first
 
 

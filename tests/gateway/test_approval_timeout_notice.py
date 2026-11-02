@@ -19,26 +19,58 @@ class _Runner:
 
 def _capture_settle(monkeypatch):
     hooks = {}
-    monkeypatch.setattr("tools.approval.register_gateway_settle", lambda sk, rid, fn: hooks.__setitem__(rid, fn))
+    monkeypatch.setattr("tools.approval.register_gateway_settle",
+                        lambda sk, rid, fn, **_kw: hooks.__setitem__(rid, fn))
     return hooks
 
 
-@pytest.mark.parametrize("current, expected", [(True, 1), (False, 0)])
-def test_timeout_notice_is_gated_on_the_run_still_being_current(monkeypatch, current, expected):
+class _Ctx(SimpleNamespace):
+    def __init__(self, **kw):
+        super().__init__(_status_chat_id="chat", _status_thread_metadata=None, **kw)
+
+
+class _RunningRunner(_Runner):
+    """Runs the scheduled settlement coroutine against a recording adapter."""
+
+    def __init__(self, *, current: bool):
+        super().__init__(current=current)
+        self.sent, self.edited = [], []
+        runner = self
+
+        class _Adapter:
+            async def send(self, chat_id, content, metadata=None):
+                runner.sent.append(content)
+
+            async def edit_message(self, chat_id, message_id, content, **kw):
+                runner.edited.append((message_id, content))
+                return SimpleNamespace(success=True)
+
+        self._ctx = _Ctx(session_key="telegram:1", _run_still_current=lambda: current,
+                         _status_adapter=_Adapter())
+
+    def _schedule(self, coro, label):
+        import asyncio
+        asyncio.run(coro)
+        self.scheduled.append(label)
+
+
+@pytest.mark.parametrize("current, card, expected", [(True, "42", 1), (False, None, 0), (False, "42", 1)])
+def test_timeout_notice_is_gated_on_the_run_still_being_current(monkeypatch, current, card, expected):
+    # A stale run may still settle its own card in place, but never posts into a new turn.
     hooks = _capture_settle(monkeypatch)
     runner = _Runner(current=current)
-    settle_mod.register_timeout_notice(runner, {"request_id": "r1"}, command="rm -rf x", card_message_id="42")
+    settle_mod.register_timeout_notice(runner, {"request_id": "r1"}, command="rm -rf x", card_message_id=card)
     hooks["r1"]("timeout")
     assert len(runner.scheduled) == expected
 
 
 def test_non_timeout_reasons_never_post(monkeypatch):
     hooks = _capture_settle(monkeypatch)
-    runner = _Runner(current=True)
+    runner = _RunningRunner(current=True)
     settle_mod.register_timeout_notice(runner, {"request_id": "r2"}, command="ls", card_message_id=None)
     for reason in ("answered", "interrupted", "notify_failed"):
         hooks["r2"](reason)
-    assert runner.scheduled == []
+    assert runner.sent == [] and runner.edited == []
 
 
 @pytest.mark.asyncio
@@ -114,7 +146,9 @@ async def test_card_body_failure_still_sends_the_notice():
 
     ctx = SimpleNamespace(_status_adapter=_Adapter(), _status_chat_id="c", _status_thread_metadata=None)
     await settle_mod._post_timeout_notice(ctx, "ls", "card-9", 300)
-    assert calls == [("send", settle_mod.format_approval_timed_out_notice(300))]
+    # dev2 contract (c2d2d3f768): the fallback notice still names the frozen origin, even when unknown.
+    from agent.approval_provenance import format_provenance
+    assert calls == [("send", settle_mod.format_approval_timed_out_notice(300) + "\n\n" + format_provenance(None))]
 
 
 @pytest.mark.asyncio

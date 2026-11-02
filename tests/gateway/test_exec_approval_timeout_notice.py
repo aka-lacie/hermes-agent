@@ -111,9 +111,10 @@ def test_timeout_edits_the_card_to_say_the_command_did_not_run(pending_entry, tm
     assert message_id == "card-1"
     assert "NOT run" in content and "5 minutes" in content
     assert adapter.sends == [], "an editable card needs no extra message"
-    # ``notify`` is A2A's turn-final marker; an approval card must not carry it (#132516).
-    assert adapter.card_metadata == [{"thread_id": "t1", "_hermes_approval": {
-        "request_id": pending_entry.data["request_id"], "provenance": None}}]
+    # ``notify`` is A2A's turn-final marker; an approval card must not carry it (#132516). The exact
+    # request id travels explicitly (upstream cfed2ca71f), never as private platform metadata.
+    assert adapter.card_metadata == [{"thread_id": "t1"}]
+    assert adapter.card_request_ids == [pending_entry.data["request_id"]]
     assert "notify" not in adapter.card_metadata[0]
 
 
