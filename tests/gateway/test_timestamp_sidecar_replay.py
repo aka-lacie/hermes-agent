@@ -9,6 +9,7 @@ import pytest
 
 from gateway.message_timestamps import render_user_content_with_timestamp
 from gateway.run import _build_gateway_agent_history, _select_cached_agent_history
+from gateway.run_inbound import discord_triggering_note
 
 
 STAMP = datetime(2026, 8, 20, 12, 0, tzinfo=ZoneInfo("UTC")).timestamp()
@@ -41,6 +42,35 @@ def test_recovery_cleanup_never_restores_a_sidecar(timestamps, embedded, real_te
         assert "System note:" not in replay[0]["content"]
         expected_timestamp = STAMP if embedded else STAMP + 100
         assert replay[0]["content"] == (_render(real_text, expected_timestamp) if timestamps else real_text)
+
+
+DISCORD_NOTE = discord_triggering_note("1567454718307868744")
+
+
+def test_discord_note_sidecar_survives_timestamped_rebuild():
+    # Live turn sent "[ts] <note>\n\n<text>\n\n<ctx>"; the durable row keeps only "<text>".
+    sent = _render(DISCORD_NOTE + "\n\nfirst question") + "\n\n" + POLICY
+    replay, _ = _build_gateway_agent_history(
+        [{"role": "user", "content": "first question", "api_content": sent, "timestamp": STAMP}],
+        inject_timestamps=True,
+    )
+    assert replay[0]["content"] == _render("first question")
+    assert replay[0]["api_content"] == sent
+
+
+@pytest.mark.parametrize("sidecar_body", [
+    "[ts-free] [Triggering message id: `1` — not the note]\n\nfirst question",  # unknown prefix shape
+    DISCORD_NOTE + "\n\nsome other question",  # note, but a different authored body
+    DISCORD_NOTE + "\n\nfirst questionnaire",  # body is only a string prefix of the sent text
+])
+def test_mismatched_discord_sidecar_is_still_dropped(sidecar_body):
+    head = _render("x")[: -len("x")]
+    replay, _ = _build_gateway_agent_history(
+        [{"role": "user", "content": "first question", "api_content": head + sidecar_body, "timestamp": STAMP}],
+        inject_timestamps=True,
+    )
+    assert "api_content" not in replay[0]
+    assert replay[0]["content"] == _render("first question")
 
 
 @pytest.fixture
@@ -95,7 +125,12 @@ def responses_agent(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("timestamps", [False, True])
 @pytest.mark.parametrize("resume", ["cached", "db"])
-def test_full_builder_to_responses_keeps_cross_turn_prefix(responses_agent, tmp_path, timestamps, resume):
+@pytest.mark.parametrize("discord", [False, True])
+def test_full_builder_to_responses_keeps_cross_turn_prefix(responses_agent, tmp_path, timestamps, resume, discord):
+    def sent(text, timestamp=STAMP):
+        # Mirrors _hmwa_apply_message_timestamp: the Discord note rides the live text only.
+        live = DISCORD_NOTE + "\n\n" + text if discord else text
+        return _render(live, timestamp) if timestamps else live
     make_agent, captured, responses, db, sid = responses_agent
     agent = make_agent()
     tool_file = tmp_path / "sanitized-tool.txt"
@@ -107,7 +142,7 @@ def test_full_builder_to_responses_keeps_cross_turn_prefix(responses_agent, tmp_
         ],
         [{"type": "message", "id": "msg_done", "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": "done", "annotations": []}]}],
     ])
-    current = _render("first question") if timestamps else "first question"
+    current = sent("first question")
     result = agent.run_conversation(current, conversation_history=[], task_id="first", persist_user_message="first question", persist_user_timestamp=STAMP)
     assert result["completed"]
     assert len(captured) == 2
@@ -131,7 +166,7 @@ def test_full_builder_to_responses_keeps_cross_turn_prefix(responses_agent, tmp_
         replay = _select_cached_agent_history(replay, agent._session_messages)
     else:
         agent = make_agent()
-    next_user = _render("second question", STAMP + 30) if timestamps else "second question"
+    next_user = sent("second question", STAMP + 30)
     result = agent.run_conversation(next_user, conversation_history=replay, task_id="second", persist_user_message="second question", persist_user_timestamp=STAMP + 30)
     assert result["completed"]
     assert len(captured) == 3

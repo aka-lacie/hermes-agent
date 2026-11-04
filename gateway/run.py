@@ -1244,6 +1244,44 @@ def _has_replayable_sidecar(role: Any, content: Any, msg: dict[str, Any]) -> boo
     )
 
 
+def _discord_note_pattern() -> "re.Pattern[str]":
+    """Regex for exactly the Discord triggering-message note ``discord_triggering_note`` produces."""
+    from gateway.run_inbound import discord_triggering_note
+
+    head, _, tail = discord_triggering_note("\x00").partition("\x00")
+    return re.compile(re.escape(head) + r"[^`\n]+" + re.escape(tail) + r"\n\n")
+
+
+def _sidecar_matches_rendered_user(sidecar: Any, rendered: str, content: str) -> bool:
+    """True when an ``api_content`` sidecar is the bytes sent for this rendered user row.
+
+    The sent message is ``rendered`` optionally followed by ``\\n\\n<context>``. On Discord the
+    live turn also carried the routing note between the timestamp and the authored text
+    (``[ts] [Triggering message id: …]\\n\\n<text>``) while the durable ``content`` keeps only
+    ``<text>`` — so a plain ``startswith(rendered)`` check rejected every Discord sidecar on
+    rebuild and broke the prompt-cache prefix at each user row. Accept exactly that one
+    known note shape, nothing else.
+    """
+    if not isinstance(sidecar, str) or not sidecar:
+        return False
+
+    def _is_sent(body: str) -> bool:
+        return sidecar == body or sidecar.startswith(body + "\n\n")
+
+    if _is_sent(rendered):
+        return True
+    if not content or not rendered.endswith(content):
+        return False
+    ts_head = rendered[: len(rendered) - len(content)]
+    if not sidecar.startswith(ts_head):
+        return False
+    note = _discord_note_pattern().match(sidecar, len(ts_head))
+    if note is None:
+        return False
+    rest = sidecar[note.end():]
+    return rest == content or rest.startswith(content + "\n\n")
+
+
 def _build_gateway_agent_history(
     history: list[dict[str, Any]], *, channel_prompt: Optional[str] = None,
     inject_timestamps: bool = False) -> tuple[list[dict[str, Any]], Optional[str]]:
@@ -1300,8 +1338,8 @@ def _build_gateway_agent_history(
                 # optionally followed by the normal context separator. Cleanup
                 # above already invalidated sidecars containing stripped content.
                 sidecar = entry.get("api_content")
-                if rendered != content and sidecar and not (
-                    sidecar == rendered or sidecar.startswith(rendered + "\n\n")
+                if rendered != content and sidecar and not _sidecar_matches_rendered_user(
+                    sidecar, rendered, content
                 ):
                     entry.pop("api_content", None)
                 entry["content"] = rendered
