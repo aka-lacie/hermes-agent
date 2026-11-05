@@ -167,9 +167,11 @@ def harness_notice_message(kind: str, text: str, *, notice: str, turn_outcome: O
 
 
 def is_harness_notice(msg: Any) -> bool:
-    """A harness notice row (:func:`harness_notice_message`), by its columns."""
+    """A harness notice row (:func:`harness_notice_message`, visible or hidden), by its columns and the
+    ``notice`` its system_event names (never by its text)."""
     return (isinstance(msg, Mapping) and msg.get("role") == "user" and msg.get("sender_kind") == "system"
-            and msg.get("display_kind") in HARNESS_NOTICE_DISPLAY_KINDS)
+            and has_parts(msg) and any(part.get("type") == SYSTEM_EVENT and "notice" in (part.get("meta") or {})
+                                       for part in msg[MESSAGE_PARTS]))
 
 
 def is_compaction_event(msg: Any) -> bool:

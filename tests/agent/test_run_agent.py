@@ -3869,16 +3869,13 @@ class TestRunConversation:
         assert len(requests) == 2
 
         replay = requests[1]["messages"]
-        assert [m["role"] for m in replay[-3:]] == [
-            "user",
-            "assistant",
-            "user",
-        ]
-        # Scaffold rides on the user correction (api_content → content), never
-        # as the assistant placeholder's own reply (#81841).
-        placeholder = replay[-2]["content"]
+        # Phase 2e (Rule 1): no assistant placeholder is synthesized; the correction follows the request
+        # and the API copy merges the two into one user turn.
+        assert replay[-1]["role"] == "user" and all(m["role"] != "assistant" for m in replay)
+        # Scaffold rides on the user correction (api_content → content), never in an assistant row (#81841).
         correction = replay[-1]["content"]
-        assert "interrupted by a user correction" not in (placeholder or "")
+        assert correction.startswith("Choose a database and implement it.")
+        assert '<system-reminder kind="interrupt" notice="user_correction">' in correction
         assert "interrupted by a user correction" in correction
         assert correction.endswith("No, use Postgres instead.")
         # Displayed chain-of-thought must NOT be replayed: an assistant turn
@@ -3889,7 +3886,8 @@ class TestRunConversation:
         assert agent._pending_redirect is None
         assert any(
             snapshot[-1].get("content") == "No, use Postgres instead."
-            and snapshot[-2].get("role") == "assistant"
+            and snapshot[-2].get("part_kind") == "interrupt"
+            and snapshot[-3].get("content") == "Choose a database and implement it."
             for snapshot in persisted
             if len(snapshot) >= 2
         )
@@ -3965,21 +3963,17 @@ class TestRunConversation:
         assert calls == 2
         assert results["result"]["completed"] is True
         assert results["result"]["final_response"] == "Corrected answer."
-        placeholder = results["result"]["messages"][-3]
-        correction = results["result"]["messages"][-2]
-        assert placeholder["role"] == "assistant"
-        assert "interrupted by a user correction" not in (
-            placeholder.get("content") or ""
-        )
-        assert "interrupted by a user correction" in (
-            correction.get("api_content") or ""
-        )
+        original, checkpoint, correction = results["result"]["messages"][-4:-1]
+        # No synthesized assistant placeholder between the request and its correction (Rule 1); the
+        # checkpoint is a hidden user-side interrupt notice.
+        assert (original["role"], original["content"]) == ("user", "Take the original approach.")
+        assert (checkpoint["role"], checkpoint["part_kind"], checkpoint["display_kind"]) == ("user", "interrupt", "hidden")
+        assert "interrupted by a user correction" in checkpoint["content"]
         # Displayed reasoning is display-only — replaying it as assistant
         # content trips Anthropic's output classifier (July 2026 brickings).
-        assert "Following the original approach." not in (
-            correction.get("api_content") or ""
-        )
-        assert correction["content"] == "Use the corrected approach."
+        assert "Following the original approach." not in checkpoint["content"]
+        assert correction == {"role": "user", "content": "Use the corrected approach.", **{
+            k: v for k, v in correction.items() if k.startswith("_") or k in ("timestamp", "message_uid")}}
 
     def test_legacy_interrupt_scaffold_ghost_dropped_from_api_replay(self, agent):
         """Pre-#81841 hidden assistant rows with the interrupt scaffold must
@@ -4589,7 +4583,8 @@ class TestRunConversation:
 
 
     def test_truncated_tool_json_after_tool_batch_closes_tool_tail(self, agent):
-        """finish_reason=tool_calls + truncated args after a real tool must close tool→user."""
+        """finish_reason=tool_calls + truncated args after a real tool must close the tool tail (with a
+        harness notice row: Rule 1)."""
         self._setup_agent(agent)
         agent.valid_tool_names.add("write_file")
         good_tc = _mock_tool_call(
@@ -4620,7 +4615,8 @@ class TestRunConversation:
 
         assert result.get("partial") is True
         msgs = result.get("messages") or []
-        assert msgs[-1].get("role") == "assistant"
+        assert msgs[-1].get("role") == "user" and msgs[-1].get("sender_kind") == "system"
+        assert msgs[-1].get("turn_outcome") == "partial"
         assert any(isinstance(m, dict) and m.get("role") == "tool" for m in msgs)
 
 

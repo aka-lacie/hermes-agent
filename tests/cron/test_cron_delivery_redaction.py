@@ -86,7 +86,8 @@ def test_every_outward_lane_masks_secret_in_payload_and_job_name(lane):
         sent, mirrored = _deliver_platform_and_mirror(job, content)
         out = sent if lane == "platform_send" else mirrored
         if lane == "session_mirror":
-            assert "[Cron delivery:" in out, "mirror prefix missing — assembly path not exercised"
+            # Typed (Rule 2): the cron kind/sender/job meta ride as structure, never a "[Cron delivery:" prefix.
+            assert "cron:report-job" in out and "[Cron delivery:" not in out, "mirror path not exercised"
     assert "3 tasks done" in out, "payload mangled or empty — secret assertion would be vacuous"
     assert FAKE_SECRET not in out, f"secret reached the {lane} lane"
 

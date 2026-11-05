@@ -18,24 +18,28 @@ def agent_with_admission():
     return agent
 
 
-async def complete(agent, admission_id, outcome, text):
+async def complete(agent, admission_id, outcome, text, **flags):
     await agent._project({'session_id': 's', 'type': 'message.complete',
                           'admission_id': admission_id,
-                          'payload': {'outcome': outcome, 'text': text}})
+                          'payload': {'outcome': outcome, 'text': text, **flags}})
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('text,visible', [
-    ('Operation interrupted: waiting for model response (0.3s elapsed).', ''),
-    ('Partial answer', 'Partial answer'),
+@pytest.mark.parametrize('text,flags,visible', [
+    # The owner flags the waiting-for-model notice structurally (Rule 2: never matched by its text).
+    ('Operation interrupted: waiting for model response (0.3s elapsed).', {'interrupt_notice': True}, ''),
+    ('Partial answer', {}, 'Partial answer'),
+    # Text alone proves nothing: an unflagged final that reads like the notice is shown.
+    ('Operation interrupted: waiting for model response (0.3s elapsed).', {},
+     'Operation interrupted: waiting for model response (0.3s elapsed).'),
 ])
-async def test_cancelled_admission_suppresses_only_interrupt_metadata(text, visible):
+async def test_cancelled_admission_suppresses_only_interrupt_metadata(text, flags, visible):
     agent = agent_with_admission()
     await complete(agent, 'other', 'completed', '')
     task = asyncio.create_task(agent.prompt([TextContentBlock(type='text', text='hello')], 's'))
     await asyncio.sleep(0)
     assert not task.done()
-    await complete(agent, 'current', 'cancelled', text)
+    await complete(agent, 'current', 'cancelled', text, **flags)
     response = await asyncio.wait_for(task, 2)
     assert response.stop_reason == 'cancelled'
     emitted = ''.join(call.kwargs['update'].content.text

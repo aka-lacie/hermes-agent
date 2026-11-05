@@ -329,33 +329,36 @@ def _moa_reference_metrics_for_hook(agent: Any) -> Any:
         return None
 
 
+REDIRECT_INTERRUPTED_TEXT = "The response was interrupted by a user correction."
+
+
 def _apply_active_turn_redirect(agent: Any, messages: list[dict[str, Any]], text: str) -> None:
-    """Append a provider-safe checkpoint and correction to the live turn so role alternation
-    holds and cached messages stay byte-identical. INVARIANTS: raw chain-of-thought never enters
-    replayable content (inlined CoT reads as a prefill jailbreak and bricks the session with
-    empty-response storms); the interruption scaffold is replay text carried only in the user
-    correction's ``api_content``; an on-screen-empty placeholder is ``display_kind=hidden``."""
+    """Append the interruption checkpoint and the correction to the live turn, cached messages
+    byte-identical. INVARIANTS: raw chain-of-thought never enters replayable content (inlined CoT
+    reads as a prefill jailbreak and bricks the session with empty-response storms); the checkpoint is
+    a hidden ``interrupt`` harness notice (a user-side system_event, Rule 1/2: never assistant text,
+    never a scaffold header in the person's row), and the correction row is the person's own words.
+    The API copy merges the notice and the correction into the user turn."""
     visible = agent._strip_think_blocks(getattr(agent, "_current_streamed_assistant_text", "") or "").strip()
 
-    checkpoint_parts = [_INTERRUPT_SCAFFOLD_MARKER]
+    checkpoint_parts = [REDIRECT_INTERRUPTED_TEXT]
     if is_runaway_repetition(visible):
         # Runaway shape only (a correct batch-style partial stays replayable): the looped bytes must
-        # reach neither the replayed correction nor the placeholder below (empty ``visible`` takes
-        # the hidden shape).
+        # reach neither the checkpoint nor an assistant row.
         checkpoint_parts.append(REPETITION_LOOP_INTERRUPTED)
         visible = ""
     elif visible:
         checkpoint_parts += ["Visible response before the interruption:", visible]
-    checkpoint = "\n\n".join(checkpoint_parts)
-    correction = f"[Context from the interrupted assistant response]\n{checkpoint}\n\n{text}"
 
     # The partial reply the model already streamed stays its own assistant row. With none, nothing is
-    # synthesized (Rule 1): the correction follows the user/tool tail and the wire renderer merges
-    # consecutive non-assistant rows. Scaffold bytes never land in an assistant row (#81841).
+    # synthesized (Rule 1). Scaffold bytes never land in an assistant row (#81841).
     if visible and not (messages and messages[-1].get("role") == "assistant"):
         append_message(messages, {"role": "assistant", "content": visible})
-    # Transcript shows the user's own words; the provider replays the scaffolded form.
-    append_message(messages, {"role": "user", "content": text, "api_content": correction})
+    from agent.message_parts import harness_notice_message
+
+    append_message(messages, harness_notice_message(
+        "interrupt", "\n\n".join(checkpoint_parts), notice="user_correction", display_kind="hidden"))
+    append_message(messages, {"role": "user", "content": text})
 
     # Stateful scrubber for <memory-context> spans split across stream deltas (#5719).  sanitize_context()
     # alone can't survive chunk boundaries because the block regex needs both tags in one string.
