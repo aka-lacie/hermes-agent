@@ -940,12 +940,18 @@ class _ChildRun:
         # Resolved after seed_workspace so a multimodal goal's text part carries the worktree note too.
         _images = list(getattr(child, "_delegate_images", None) or [])
         user_message: Any = _build_child_goal_message(self.goal, _images, child) if _images else self.goal
-        from tools.delegate_sessions import assignment_message
-        user_message = assignment_message(child, user_message)
+        # A queued delivery (a sub-child's completion) runs as its own typed event turn, never as the
+        # parent's assignment text (tools.delegate_sessions: the claim's system_event payload).
+        typed_event = vars(child).pop("_delegate_typed_input", None)
+        if typed_event is None:
+            from tools.delegate_sessions import assignment_message
+            user_message = assignment_message(child, user_message)
         history = vars(child).pop("_delegate_resume_history", None)
         if history is None:
             history = vars(child).pop("_delegate_fork_history", None)
         history_kwargs = {"conversation_history": history} if history else {}
+        if typed_event is not None:
+            history_kwargs["typed_input"] = typed_event
 
         def _run_with_thread_capture():
             worker_thread_holder["t"] = threading.current_thread()

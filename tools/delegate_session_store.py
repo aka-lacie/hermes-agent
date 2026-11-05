@@ -1,24 +1,27 @@
-"""Durable child-conversation ownership and admission in the profile SessionDB.
+"""Delegate children as ordinary ``sessions`` rows, driven through ``session_admissions`` (plan §4.1, §4.5).
 
-This is conversation metadata, not an execution checkpoint. A dead process leaves
-an idle, resumable conversation; it never causes an assignment to run again.
-Tool definitions, credentials and live agent objects are deliberately not stored.
+A child is a sessions row (``lineage_kind='delegate'``, ``parent_session_id``, ``root_session_id``,
+``depth``, a credential-free ``route``, ``role``, ``workspace``, ``fork_origin``, ``status`` and
+``delivery_target = {kind: session, session_id: parent, attach: true}``). Every assignment, resume and steer
+is an admission on the child's own FIFO (principal ``parent:<parent conversation>``); a run claims the head,
+settles it when the turn ends, and the drain claims the next. There is no second lock: a resume arriving while
+the child runs simply waits in the FIFO, and a resume and a webhook-style delivery to the same session
+serialize on it.
+
+This is conversation metadata, not an execution checkpoint. A dead process leaves its started admission to be
+settled ``interrupted`` (never replayed); the conversation is idle and resumable. The old ``delegate_sessions``
+table is no longer written or required (TODO(phase5): its rows are read only through the one-way shim in
+``agent.session_directory._legacy_delegate`` until the 2f migration has run everywhere).
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
-import time
 import uuid
+from typing import Any, Optional
 
-from hermes_state_common import (
-    _lock_holder_provably_dead, _non_continuation_child_sql, _proc_start_ticks, _sql_session_last_active,
-)
-from hermes_state_compression import _CHAIN_CAP
-from hermes_state_pidns import pid_namespace_id
-from tools.delegate_observation import message_metadata, preview_text
+from agent import session_directory as directory
 
 
 class DelegateSessionError(ValueError):
@@ -29,282 +32,317 @@ class DelegateSessionError(ValueError):
         super().__init__(message)
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS delegate_sessions (
-    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-    owner_session_id TEXT NOT NULL,
-    current_session_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    initial_goal TEXT NOT NULL,
-    assignment TEXT NOT NULL,
-    context TEXT NOT NULL,
-    workspace TEXT,
-    forked_context INTEGER NOT NULL DEFAULT 0,
-    route_descriptor TEXT,
-    model TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    role TEXT NOT NULL,
-    depth INTEGER NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('running', 'idle', 'closed')),
-    created_at REAL NOT NULL,
-    last_activity_at REAL NOT NULL,
-    run_token TEXT,
-    runner TEXT
-)
-"""
-
-# A compression continuation inherits _delegate_from from its original segment;
-# only a marker naming the immediate parent denotes a new delegated conversation.
-_NEXT_SEGMENT_SQL = (
-    "SELECT child.id FROM sessions parent JOIN sessions child ON child.parent_session_id = parent.id "
-    "WHERE parent.id = ? AND parent.end_reason = 'compression' "
-    + _non_continuation_child_sql("child.", "parent.id")
-    + " ORDER BY CASE WHEN child.end_reason = 'compression' THEN 0 "
-    "WHEN child.ended_at IS NULL THEN 1 ELSE 2 END, "
-    + _sql_session_last_active("child") + " DESC, child.started_at DESC, child.id DESC LIMIT 1"
-)
+PARENT_PRINCIPAL_PREFIX = "parent:"
+_RUNNER_PREFIX = "delegate.runner.v1."
 
 
-def _public(row):
-    result = {key: value for key, value in dict(row).items() if key not in {"run_token", "runner"}}
-    result["forked_context"] = bool(result["forked_context"])
-    result["route_descriptor"] = json.loads(result["route_descriptor"]) if result["route_descriptor"] else None
-    return result
+def runtime_epoch(db) -> int:
+    """The profile's current runtime epoch (the gateway's while one serves it). A store no gateway ever owned
+    gets epoch 1 without bumping anyone's: in-process children never claim the profile ownership lock."""
+    def write(conn):
+        conn.execute("INSERT INTO runtime_epoch(singleton,epoch,instance_id) VALUES(1,1,?) ON CONFLICT(singleton) "
+                     "DO NOTHING", (f"delegate-local:{os.getpid()}",))
+        return conn.execute("SELECT epoch FROM runtime_epoch WHERE singleton=1").fetchone()[0]
+    with db._read_ctx() as conn:
+        row = conn.execute("SELECT epoch FROM runtime_epoch WHERE singleton=1").fetchone()
+    return row[0] if row is not None else db._execute_write(write)
 
 
-def _route_json(descriptor):
-    """Persist routing identity, never an endpoint/credential connection bundle."""
-    if descriptor is None:
+def parent_principal(parent_key: str) -> str:
+    return PARENT_PRINCIPAL_PREFIX + parent_key
+
+
+def _runner_stamp() -> str:
+    from hermes_state_common import _proc_start_ticks
+    from hermes_state_pidns import pid_namespace_id
+    return json.dumps({"pid": os.getpid(), "pidns": pid_namespace_id(), "start_ticks": _proc_start_ticks(os.getpid())})
+
+
+def encode_token(claim: dict) -> str:
+    return f"{claim['admission_id']}:{claim['generation']}:{claim['owner_epoch']}"
+
+
+def decode_token(token: Any) -> Optional[tuple[str, int, int]]:
+    try:
+        admission_id, generation, epoch = str(token).split(":")
+        return admission_id, int(generation), int(epoch)
+    except (TypeError, ValueError):
         return None
-    allowed = {"kind", "difficulty", "endpoint_sha256", "provider"}
-    if not isinstance(descriptor, dict) or set(descriptor) - allowed:
-        raise DelegateSessionError("invalid_route", "Unsupported retained route fields.")
-    if descriptor.get("kind") not in {"named", "default", "difficulty", "parent"}:
-        raise DelegateSessionError("invalid_route", "Unknown retained route kind.")
-    digest = descriptor.get("endpoint_sha256")
-    if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
-        raise DelegateSessionError("invalid_route", "The retained endpoint identity must be a SHA-256 digest.")
-    return json.dumps(descriptor, sort_keys=True)
-
-
-def _text_content(content):
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(part.get("text", "") for part in content
-                         if isinstance(part, dict) and isinstance(part.get("text"), str))
-    return "" if content is None else str(content)
 
 
 class DelegateSessionStore:
-    """Small transactional registry sharing the parent's exact profile database.
-
-    Admission uses SessionDB's BEGIN IMMEDIATE writer, so independent processes
-    cannot both resume one child. Tokens fence late cleanup from a previous run.
-    The existing turn lease still guards the actual transcript writer.
-    """
+    """Child sessions of one profile database. Reads go through ``agent.session_directory`` (Freya's list
+    rule, rollups, ACL); writes are sessions-column stamps and admissions on the child's FIFO."""
 
     def __init__(self, db):
         self.db = db
 
-        def create(conn):
-            conn.execute(_SCHEMA)
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(delegate_sessions)")}
-            for name, declaration in (("workspace", "TEXT"), ("forked_context", "INTEGER NOT NULL DEFAULT 0"),
-                                      ("route_descriptor", "TEXT")):
-                if name not in columns:
-                    conn.execute(f"ALTER TABLE delegate_sessions ADD COLUMN {name} {declaration}")
-            conn.execute("CREATE INDEX IF NOT EXISTS delegate_sessions_owner_activity "
-                         "ON delegate_sessions(owner_session_id, last_activity_at DESC)")
+    # ── reads ────────────────────────────────────────────────────────────────
+    def _reconcile(self, session_id: str) -> None:
+        """Settle a started admission whose runner process is provably dead (or an ``unknown`` one a
+        restarted gateway left behind) as ``interrupted``: never replayed, the conversation goes idle."""
+        from hermes_state_common import _lock_holder_provably_dead
+        from hermes_state_runtime import (
+            RuntimeStoreError, list_session_admissions, resolve_unknown_session_input, settle_session_input,
+        )
+        for row in list_session_admissions(self.db, session_id=session_id):
+            if row["status"] not in ("started", "unknown") or not str(row["principal_id"]).startswith(PARENT_PRINCIPAL_PREFIX):
+                continue
+            if row["status"] == "started":
+                stamp = self.db._read_one("SELECT value FROM state_meta WHERE key = ?",
+                                          (_RUNNER_PREFIX + row["admission_id"],))
+                if stamp is not None and not _lock_holder_provably_dead(json.loads(stamp[0])):
+                    continue  # a live run (this process or another) still holds the FIFO
+            epoch = runtime_epoch(self.db)
+            try:
+                if row["status"] == "started" and row["owner_epoch"] == epoch:
+                    settle_session_input(self.db, epoch=epoch, admission_id=row["admission_id"],
+                                         generation=row["generation"], outcome="interrupted")
+                else:
+                    if row["status"] == "started":
+                        # Claimed under an older epoch by a runner that is gone: the same verdict a gateway
+                        # restart's recovery gives it, for this one row.
+                        self.db._write_rowcount("UPDATE session_admissions SET status = 'unknown' WHERE admission_id = ? "
+                                                "AND status = 'started' AND owner_epoch != ?", (row["admission_id"], epoch))
+                    resolve_unknown_session_input(self.db, epoch=epoch, admission_id=row["admission_id"],
+                                                  generation=row["generation"])
+            except RuntimeStoreError:
+                continue
+            self._clear_runner(row["admission_id"])
+            self._set_status(session_id, "idle", only_if="running")
 
-        db._execute_write(create)
-
-    def _owner(self, conn, session_id):
-        if not conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone():
-            raise DelegateSessionError("unavailable", "The parent conversation is unavailable.")
-        return self.db._session_turn_lease_key_on_conn(conn, session_id)
-
-    def _chain(self, conn, session_id):
-        chain = [session_id]
-        seen = {session_id}
-        for _ in range(_CHAIN_CAP):
-            row = conn.execute(_NEXT_SEGMENT_SQL, (chain[-1],)).fetchone()
-            if row is None or row["id"] in seen:
-                return chain
-            chain.append(row["id"])
-            seen.add(row["id"])
-        raise DelegateSessionError("unavailable", "The child compression lineage exceeds the safe limit.")
-
-    def _refresh(self, conn, row):
-        """Reconcile process death/compression; observation never renews activity."""
-        row = dict(row)
-        if not conn.execute("SELECT 1 FROM sessions WHERE id = ?", (row["session_id"],)).fetchone():
-            return None
-        if not conn.execute("SELECT 1 FROM sessions WHERE id = ?", (row["current_session_id"],)).fetchone():
-            return None
-        chain = self._chain(conn, row["session_id"])
-        row["current_session_id"] = chain[-1]
-        if row["status"] == "running" and row["runner"]:
-            if _lock_holder_provably_dead(json.loads(row["runner"])):
-                row.update(status="idle", run_token=None, runner=None)
-        # Transcript output (including direct user messages) counts as activity;
-        # listing and reading do not. MAX also tolerates regressing wall clocks.
-        for sid in chain:
-            stamp = conn.execute("SELECT MAX(timestamp) FROM messages WHERE session_id = ?", (sid,)).fetchone()[0]
-            if stamp is not None:
-                row["last_activity_at"] = max(row["last_activity_at"], float(stamp))
-        conn.execute("UPDATE delegate_sessions SET current_session_id = ?, status = ?, "
-                     "run_token = ?, runner = ?, last_activity_at = ? WHERE session_id = ?",
-                     (row["current_session_id"], row["status"], row["run_token"], row["runner"],
-                      row["last_activity_at"], row["session_id"]))
-        return row
-
-    def _owned(self, conn, parent_session_id, session_id):
-        owner = self._owner(conn, parent_session_id)
-        row = conn.execute("SELECT * FROM delegate_sessions WHERE session_id = ? AND owner_session_id = ?",
-                           (session_id, owner)).fetchone()
-        row = self._refresh(conn, row) if row else None
-        if row is None:
+    def _owned_row(self, conn, caller: str, session_id: str):
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if row is None or not directory.allowed(self.db, conn, caller, row):
             # Do not disclose whether this ID belongs to a different parent.
             raise DelegateSessionError("unavailable", "No retained child with that session_id belongs to this conversation.")
         return row
 
-    def register(self, parent_session_id, session_id, *, model, provider, assignment,
-                 context="", title=None, role="leaf", depth=1, workspace=None, forked_context=False,
-                 route_descriptor=None):
-        """Register a newly persisted child. Existing records are never overwritten."""
-        now = time.time()
-        title = str(title or " ".join(assignment.split())[:80]).strip() or "Delegated task"
-        route_json = _route_json(route_descriptor)
+    def _caller(self, caller: str) -> str:
+        if not self.db._read_one("SELECT 1 FROM sessions WHERE id = ?", (caller,)):
+            raise DelegateSessionError("unavailable", "The parent conversation is unavailable.")
+        return caller
 
-        def create(conn):
-            owner = self._owner(conn, parent_session_id)
+    def get(self, caller: str, session_id: str) -> dict:
+        self._caller(caller)
+        with self.db._read_ctx() as conn:
+            self._owned_row(conn, caller, session_id)
+        self._reconcile(session_id)
+        with self.db._read_ctx() as conn:
+            row = self._owned_row(conn, caller, session_id)
+            tip = conn.execute("SELECT end_reason FROM sessions WHERE id = ?",
+                               (directory.chain(conn, session_id)[-1],)).fetchone()
+            if tip is None or tip[0] == "compression":
+                # The compression tip is gone: never fall back to a stale segment's history.
+                raise DelegateSessionError("unavailable", "The child transcript is unavailable.")
+            return _public(directory.record(conn, row))
+
+    def list(self, caller: str, *, query=None, limit=20, scope="children") -> list[dict]:
+        self._caller(caller)
+        with self.db._read_ctx() as conn:
+            rows = directory.list_sessions(self.db, conn, caller, scope=scope, query=query, limit=limit)
+        for row in rows:
+            if row["status"] == "running":
+                self._reconcile(row["session_id"])
+        if any(row["status"] == "running" for row in rows):
+            with self.db._read_ctx() as conn:
+                rows = directory.list_sessions(self.db, conn, caller, scope=scope, query=query, limit=limit)
+        return [_public(row) for row in rows]
+
+    def observe(self, caller: str, session_id: str, *, limit=20, max_chars=12000) -> dict:
+        self.get(caller, session_id)
+        with self.db._read_ctx() as conn:
+            observed = directory.observe(self.db, conn, caller, session_id, limit=limit, max_chars=max_chars)
+        observed["session"] = _public(observed["session"])
+        return observed
+
+    # ── writes ───────────────────────────────────────────────────────────────
+    def register(self, parent_session_id: str, session_id: str, *, model, provider, assignment, context="",
+                 title=None, role="leaf", depth=1, workspace=None, forked_context=False, route=None,
+                 group_id=None, retain=True, fork_policy="fork_context", route_descriptor=None) -> dict:
+        """Stamp a persisted child row as a delegate session (never overwriting a different parent)."""
+        from agent.session_routes import RouteError, validate_route
+        from gateway.delivery_targets import delegate_target, encode_delivery_target
+        if route is None and route_descriptor is not None:
+            route = route_descriptor
+        if route is not None:
+            try:
+                route = validate_route(route)
+            except RouteError as exc:
+                raise DelegateSessionError("invalid_route", str(exc)) from exc
+        title = str(title or " ".join(str(assignment).split())[:80]).strip() or "Delegated task"
+        brief = {"title": title, "initial_goal": assignment, "context": context or "", "retain": bool(retain)}
+        fork = {"session_id": parent_session_id, "message_uid": None, "policy": fork_policy} if forked_context else None
+
+        def write(conn):
+            if not conn.execute("SELECT 1 FROM sessions WHERE id = ?", (parent_session_id,)).fetchone():
+                raise DelegateSessionError("unavailable", "The parent conversation is unavailable.")
             child = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
             if child is None:
                 raise DelegateSessionError("unavailable", "Persist the child session before registering it.")
-            if conn.execute("SELECT 1 FROM delegate_sessions WHERE session_id = ?", (session_id,)).fetchone():
+            if child["lineage_kind"] == "delegate":
                 raise DelegateSessionError("already_registered", "This child session is already registered.")
-            conn.execute("INSERT INTO delegate_sessions (session_id, owner_session_id, current_session_id, "
-                         "title, initial_goal, assignment, context, workspace, forked_context, route_descriptor, "
-                         "model, provider, role, depth, status, created_at, last_activity_at) "
-                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?)",
-                         (session_id, owner, session_id, title, assignment, assignment, context, workspace,
-                          int(bool(forked_context)), route_json, model, provider,
-                          role, depth, now, now))
-            return _public(conn.execute("SELECT * FROM delegate_sessions WHERE session_id = ?", (session_id,)).fetchone())
+            conn.execute(
+                "UPDATE sessions SET lineage_kind = 'delegate', parent_session_id = COALESCE(parent_session_id, ?), "
+                "role = ?, workspace = ?, fork_origin = ?, route = ?, status = 'idle', delivery_target = ?, "
+                "group_id = COALESCE(group_id, ?), "
+                "model_config = json_set(COALESCE(model_config, '{}'), '$._delegate_brief', json(?)) WHERE id = ?",
+                (parent_session_id, role, workspace, json.dumps(fork) if fork else None,
+                 json.dumps(route, sort_keys=True) if route else None,
+                 encode_delivery_target(delegate_target(parent_session_id)), group_id, json.dumps(brief), session_id))
+            if route is None:
+                # The bare model/provider a test double or an unrouted child ran on, still credential-free.
+                conn.execute("UPDATE sessions SET route = ? WHERE id = ?", (json.dumps(
+                    {"v": 1, "kind": "named", "provider": str(provider or "").strip().lower() or None,
+                     "model": model}, sort_keys=True), session_id))
+            return directory.record(conn, conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone())
 
-        return self.db._execute_write(create)
+        return _public(self.db._execute_write(write))
 
-    def get(self, parent_session_id, session_id):
-        return self.db._execute_write(lambda conn: _public(self._owned(conn, parent_session_id, session_id)))
+    def _set_status(self, session_id: str, status: str, *, only_if: Optional[str] = None) -> None:
+        sql = "UPDATE sessions SET status = ? WHERE id = ?" + (" AND status = ?" if only_if else "")
+        self.db._write_rowcount(sql, (status, session_id, *((only_if,) if only_if else ())))
 
-    def list(self, parent_session_id, *, query=None, limit=20):
-        """Recent running/idle children, or a search of all retained own children."""
-        limit = max(1, min(int(limit), 100))
-        needle = str(query or "").strip().casefold()
+    def _clear_runner(self, admission_id: str) -> None:
+        self.db._write_rowcount("DELETE FROM state_meta WHERE key = ?", (_RUNNER_PREFIX + admission_id,))
 
-        def collect(conn):
-            owner = self._owner(conn, parent_session_id)
-            records = []
-            rows = conn.execute("SELECT * FROM delegate_sessions WHERE owner_session_id = ?", (owner,)).fetchall()
-            for original in rows:
-                row = self._refresh(conn, original)
-                if row is None or (not needle and row["status"] == "closed"):
-                    continue
-                if needle and not self._matches(conn, row, needle):
-                    continue
-                records.append(_public(row))
-            records.sort(key=lambda row: (row["last_activity_at"], row["created_at"], row["session_id"]), reverse=True)
-            return records[:limit]
-
-        return self.db._execute_write(collect)
-
-    def _matches(self, conn, row, needle):
-        if any(needle in str(row[key]).casefold() for key in ("session_id", "title", "assignment")):
-            return True
-        # SQL scans only owned child transcripts. No FTS dependency or global
-        # session-search bypass, and no transcript bodies materialized in Python.
-        for sid in self._chain(conn, row["session_id"]):
-            if conn.execute("SELECT 1 FROM messages WHERE session_id = ? AND instr(lower(content), ?) > 0 LIMIT 1",
-                            (sid, needle)).fetchone():
-                return True
-        return False
-
-    def acquire(self, parent_session_id, session_id, message, *, model=None):
+    def admit(self, caller: str, session_id: str, message: Any, *, intent: str = "queue", request_id=None,
+              model=None, wake_policy=None, extra=None) -> dict:
+        """Queue one assignment on the child's FIFO. Returns the admission plus ``position`` (queued ahead of
+        it) and ``busy`` (a run holds the FIFO now)."""
+        from hermes_state_runtime import RuntimeStoreError, admit_session_input, list_session_admissions
         if not isinstance(message, str) or not message.strip():
             raise DelegateSessionError("invalid_message", "A nonempty assignment message is required.")
-        token = uuid.uuid4().hex
-        runner = json.dumps({"pid": os.getpid(), "pidns": pid_namespace_id(),
-                             "start_ticks": _proc_start_ticks(os.getpid())})
+        self._caller(caller)
+        with self.db._read_ctx() as conn:
+            row = self._owned_row(conn, caller, session_id)
+            info = directory.record(conn, row)
+            owner = directory.logical_root(self.db, conn, caller)
+        if info["status"] == "closed":
+            raise DelegateSessionError("closed", "This child is closed; start a new delegation.")
+        payload = {"text": message, "sender_kind": "parent", "sender_id": f"session:{caller}"}
+        if model:
+            payload["model"] = str(model)
+        if extra:
+            payload.update(extra)
+        try:
+            admission = admit_session_input(
+                self.db, epoch=runtime_epoch(self.db), principal_id=parent_principal(owner), session_id=session_id,
+                request_id=request_id or uuid.uuid4().hex, payload=payload, intent=intent, wake_policy=wake_policy)
+        except RuntimeStoreError as exc:
+            if exc.reason == "queue_full":
+                raise DelegateSessionError("queue_full", "This child already has the maximum queued assignments.") from exc
+            raise
+        pending = list_session_admissions(self.db, session_id=session_id)
+        busy = any(r["status"] in ("started", "unknown") for r in pending)
+        position = sum(1 for r in pending if r["status"] == "queued" and r["seq"] < admission["seq"])
+        return {**admission, "busy": busy, "position": position}
 
-        def claim(conn):
-            row = self._owned(conn, parent_session_id, session_id)
-            if row["status"] == "closed":
-                raise DelegateSessionError("closed", "This child is closed; start a new delegation.")
-            if row["status"] == "running":
-                raise DelegateSessionError("busy", "This child is already running; use steer or observe.")
-            row.update(status="running", assignment=message, model=model or row["model"],
-                       last_activity_at=max(time.time(), row["last_activity_at"]))
-            conn.execute("UPDATE delegate_sessions SET status = 'running', assignment = ?, model = ?, "
-                         "last_activity_at = ?, run_token = ?, runner = ? WHERE session_id = ?",
-                         (row["assignment"], row["model"], row["last_activity_at"], token, runner, session_id))
-            return _public(row), token
+    def claim(self, session_id: str, *, head=None) -> Optional[dict]:
+        """Claim the child FIFO head when no run holds it: the started admission (``token`` for release), or
+        None while busy/empty."""
+        from hermes_state_runtime import _ANY_HEAD, RuntimeStoreError, claim_session_input
+        self._reconcile(session_id)
+        try:
+            claimed = claim_session_input(self.db, epoch=runtime_epoch(self.db), session_id=session_id,
+                                          head=_ANY_HEAD if head is None else head)
+        except RuntimeStoreError as exc:
+            if exc.reason == "unknown_execution":
+                return None
+            raise
+        if not claimed:
+            return None
+        self.db._write_rowcount("INSERT OR REPLACE INTO state_meta(key, value) VALUES(?, ?)",
+                                (_RUNNER_PREFIX + claimed["admission_id"], _runner_stamp()))
+        self._set_status(session_id, "running")
+        claimed["token"] = encode_token(claimed)
+        return claimed
 
-        return self.db._execute_write(claim)
+    def acquire(self, caller: str, session_id: str, message: Any, *, model=None, request_id=None, extra=None):
+        """Admit and claim now, or refuse ``busy`` (the admission is withdrawn: callers that must run
+        immediately). Queueing callers use :meth:`admit` + :meth:`claim`."""
+        from hermes_state_runtime import cancel_session_input
+        admission = self.admit(caller, session_id, message, model=model, request_id=request_id, extra=extra)
+        claimed = self.claim(session_id, head=admission["admission_id"]) if not admission["busy"] else None
+        if not claimed or claimed["admission_id"] != admission["admission_id"]:
+            if claimed:
+                self.release(session_id, claimed["token"], outcome="interrupted")
+            cancel_session_input(self.db, epoch=runtime_epoch(self.db), admission_id=admission["admission_id"])
+            raise DelegateSessionError("busy", "This child is already running; use steer or observe.")
+        return self.get(caller, session_id), claimed["token"]
 
-    def touch(self, session_id, token):
-        return bool(self.db._write_rowcount("UPDATE delegate_sessions SET last_activity_at = MAX(last_activity_at, ?) "
-                    "WHERE session_id = ? AND run_token = ? AND status = 'running'", (time.time(), session_id, token)))
+    def touch(self, session_id: str, token: Any) -> bool:
+        """Activity is derived from the transcript; a live token is all a progress tick proves."""
+        decoded = decode_token(token)
+        if decoded is None:
+            return False
+        row = self.db._read_one("SELECT status FROM session_admissions WHERE admission_id = ?", (decoded[0],))
+        return row is not None and row["status"] == "started"
 
-    def release(self, session_id, token, *, current_session_id=None):
-        def settle(conn):
-            row = conn.execute("SELECT * FROM delegate_sessions WHERE session_id = ? AND run_token = ? "
-                               "AND status = 'running'", (session_id, token)).fetchone()
-            if row is None:
+    def release(self, session_id: str, token: Any, *, current_session_id=None, outcome: str = "completed",
+                transfers=None, final_status: Optional[str] = None) -> bool:
+        """Settle the run *token* names (exactly once; a stale or foreign token is refused). The conversation
+        goes idle (``final_status='closed'`` for a non-retained child)."""
+        from hermes_state_runtime import (
+            RuntimeStoreError, get_session_admission, resolve_unknown_session_input, settle_session_input,
+        )
+        decoded = decode_token(token)
+        if decoded is None:
+            return False
+        admission_id, generation, epoch = decoded
+        row = get_session_admission(self.db, admission_id=admission_id)
+        if row is None or row["target_session_id"] != session_id or row["generation"] != generation:
+            return False
+        if current_session_id is not None:
+            with self.db._read_ctx() as conn:
+                if current_session_id not in directory.chain(conn, session_id):
+                    raise DelegateSessionError("invalid_tip", "The supplied child tip is outside its compression lineage.")
+        if row["status"] == "terminal":
+            return False
+        try:
+            if row["status"] == "unknown":
+                resolve_unknown_session_input(self.db, epoch=runtime_epoch(self.db), admission_id=admission_id,
+                                              generation=generation)
+            else:
+                settle_session_input(self.db, epoch=epoch, admission_id=admission_id, generation=generation,
+                                     outcome=outcome if outcome in ("completed", "interrupted", "failed") else "failed",
+                                     _transfers=transfers)
+        except RuntimeStoreError as exc:
+            if exc.reason not in ("stale_epoch", "stale_generation"):
+                raise
+            again = get_session_admission(self.db, admission_id=admission_id)
+            if again is None or again["status"] != "unknown":
                 return False
-            chain = self._chain(conn, session_id)
-            if current_session_id is not None and current_session_id not in chain:
-                raise DelegateSessionError("invalid_tip", "The supplied child tip is outside its compression lineage.")
-            conn.execute("UPDATE delegate_sessions SET status = 'idle', current_session_id = ?, "
-                         "last_activity_at = MAX(last_activity_at, ?), run_token = NULL, runner = NULL "
-                         "WHERE session_id = ? AND run_token = ?", (chain[-1], time.time(), session_id, token))
-            return True
+            resolve_unknown_session_input(self.db, epoch=runtime_epoch(self.db), admission_id=admission_id,
+                                          generation=generation)
+        self._clear_runner(admission_id)
+        self._set_status(session_id, final_status or "idle")
+        return True
 
-        return self.db._execute_write(settle)
+    def close(self, caller: str, session_id: str) -> dict:
+        info = self.get(caller, session_id)
+        if info["status"] == "running":
+            raise DelegateSessionError("busy", "Stop the running child before closing it.")
+        from hermes_state_runtime import cancel_session_input, list_session_admissions
+        for row in list_session_admissions(self.db, session_id=session_id):
+            if row["status"] == "queued":
+                cancel_session_input(self.db, epoch=runtime_epoch(self.db), admission_id=row["admission_id"])
+        self._set_status(session_id, "closed")
+        return {**info, "status": "closed"}
 
-    def close(self, parent_session_id, session_id):
-        def retire(conn):
-            row = self._owned(conn, parent_session_id, session_id)
-            if row["status"] == "running":
-                raise DelegateSessionError("busy", "Stop the running child before closing it.")
-            conn.execute("UPDATE delegate_sessions SET status = 'closed' WHERE session_id = ?", (session_id,))
-            row["status"] = "closed"
-            return _public(row)
+    def set_route_model(self, session_id: str, model: str) -> None:
+        """A resume's model override becomes the stored route's model (same provider, same chain)."""
+        self.db._write_rowcount("UPDATE sessions SET route = json_set(COALESCE(route, '{}'), '$.model', ?) WHERE id = ?",
+                                (str(model), session_id))
 
-        return self.db._execute_write(retire)
+    def running_claim(self, session_id: str) -> Optional[dict]:
+        """The started admission holding the child's FIFO, if any."""
+        from hermes_state_runtime import list_session_admissions
+        return next((r for r in list_session_admissions(self.db, session_id=session_id) if r["status"] == "started"), None)
 
-    def observe(self, parent_session_id, session_id, *, limit=20, max_chars=12000):
-        row = self.get(parent_session_id, session_id)
-        limit = max(1, min(int(limit), 100))
-        budget = max(1, min(int(max_chars), 50000))
-        messages = self.db.get_messages(row["current_session_id"], include_ancestors=True,
-                                       limit=limit + 1, latest=True)
-        selected = []
-        truncated = len(messages) > limit
-        for message in reversed(messages[-limit:]):
-            content = _text_content(message.get("content"))
-            metadata, metadata_truncated = message_metadata(message)
-            metadata_size = len(json.dumps(metadata, ensure_ascii=False)) if metadata else 0
-            if metadata_size > budget:
-                metadata, metadata_size, metadata_truncated = {}, 0, True
-            budget -= metadata_size
-            cap = min(budget, 1500) if message["role"] == "tool" else budget
-            truncated = truncated or metadata_truncated or len(content) > cap
-            content = preview_text(content, cap)
-            selected.append({"role": message["role"], "content": content,
-                             "timestamp": message.get("timestamp"), **metadata})
-            budget -= len(content)
-            if budget <= 0:
-                truncated = truncated or len(selected) < len(messages)
-                break
-        return {"session": row, "messages": list(reversed(selected)), "truncated": truncated}
+
+def _public(record: dict) -> dict:
+    """The roster/compatibility view: legacy field names kept for the plugin's ``_roster_entry``."""
+    out = dict(record)
+    out["route_descriptor"] = record.get("route")
+    return out

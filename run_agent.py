@@ -1362,6 +1362,7 @@ class AIAgent(
             subagent_id=function_args.get("subagent_id"), message=function_args.get("message"), parent_agent=self,
             session_id=function_args.get("session_id"), model=function_args.get("model"),
             query=function_args.get("query"), limit=function_args.get("limit", 20), _extension_request=function_args,
+            scope=function_args.get("scope"),
         )
 
     _invoke_tool = _forward("agent.agent_runtime_helpers", "invoke_tool")

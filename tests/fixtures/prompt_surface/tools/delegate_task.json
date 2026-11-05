@@ -4,17 +4,33 @@
   "parameters": {
     "properties": {
       "action": {
-        "description": "Default 'spawn'. Live control of running children: 'list' = ids/goals/status/transcripts; 'steer' = queue course-correction text into one child (subagent_id + message) without stopping it; 'stop' = end one child early (subagent_id; partial result still returns). Control actions return immediately; goal/tasks are ignored unless spawning.",
+        "description": "Default 'spawn'. 'list' = your children (running/idle; closed ones only with query) with status, a sub-child rollup and, while running, a subagent_id; 'observe' = one child's status, transcript tail and sub-children (session_id); 'resume' = give an idle child its next assignment (session_id + message; queued if it is busy); 'steer' = course-correct a running child (subagent_id or session_id + message); 'stop' = end one child early; 'close' = retire an idle child. Control actions return immediately; goal/tasks are ignored unless spawning.",
         "enum": [
           "spawn",
           "list",
+          "observe",
+          "resume",
           "steer",
-          "stop"
+          "stop",
+          "close"
         ],
         "type": "string"
       },
       "message": {
         "description": "For action='steer': the course correction, appended to the child's next tool result mid-run. Be directive and specific.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "For action='list': 'children' (default), 'tree' (the whole subtree) or 'siblings'.",
+        "enum": [
+          "children",
+          "tree",
+          "siblings"
+        ],
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Child session id (from a spawn result or action='list') for observe/resume/steer/stop/close.",
         "type": "string"
       },
       "subagent_id": {

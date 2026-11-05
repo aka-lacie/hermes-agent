@@ -34,8 +34,9 @@ class SubagentSessionMethods:
     def resume_session(self, session_id, message, *, model=None, background=False):
         return self._session_action("resume", session_id=session_id, message=message, model=model, background=background)
 
-    def list_sessions(self, *, query=None, limit=20):
-        return self._session_action("list", query=query, limit=limit)
+    def list_sessions(self, *, query=None, limit=20, scope="children"):
+        """Freya's rule (agent/session_directory.py): own spawns + attached opt-ins, d=2 as rollups."""
+        return self._session_action("list", query=query, limit=limit, scope=scope)
 
     def observe_session(self, session_id, *, limit=20):
         return self._session_action("observe", session_id=session_id, limit=limit)

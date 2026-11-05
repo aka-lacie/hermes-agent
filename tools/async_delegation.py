@@ -1136,6 +1136,9 @@ def _push_completion_event(record: dict[str, Any], result: dict[str, Any], statu
         **({} if is_batch else {"exit_reason": result.get("exit_reason")}),
         **{k: record[k] for k in _ROUTING_KEYS if record.get(k)},
         **{k: result[k] for k in _STALL_META_KEYS if k in result}}
+    delivery = _delivery_provenance(record, result, is_batch)
+    if delivery:
+        evt["delivery"] = delivery
     try:
         _persist_completion(evt, result)
     except Exception as exc:
@@ -1146,6 +1149,38 @@ def _push_completion_event(record: dict[str, Any], result: dict[str, Any], statu
     except Exception as exc:  # pragma: no cover
         logger.error(f"Async delegation{label} %s: failed to enqueue completion event; "
                      "result lost: %s", record.get("delegation_id"), exc)
+
+
+def _delivery_provenance(record: dict[str, Any], payload: dict[str, Any], is_batch: bool) -> Optional[dict[str, Any]]:
+    """Where this unit's completion goes and who sent it, from the children's own ``delivery_target``
+    (gateway/delivery_targets.py), never from the dispatch origin: ``sender_kind="child"``, ``sender_id`` the
+    child session (``batch:<delegation_id>`` for a fan-out). None when no child is a persisted session."""
+    entries = payload.get("results") if isinstance(payload.get("results"), list) else [payload]
+    children = [str(e["session_id"]) for e in entries if isinstance(e, dict) and e.get("session_id")]
+    if not children:
+        return None
+    target = None
+    try:
+        from gateway.delivery_targets import parse_delivery_target
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT delivery_target FROM sessions WHERE id = ?", (children[0],)).fetchone()
+            target = parse_delivery_target(row[0] if row else None)
+            key = conn.execute("SELECT session_key FROM sessions WHERE id = ?",
+                               (target.get("session_id"),)).fetchone() if target.get("kind") == "session" else None
+        finally:
+            conn.close()
+        if key and key[0]:
+            target["session_key"] = key[0]
+    except Exception:
+        logger.debug("async delegation: child delivery_target unreadable", exc_info=True)
+    if not target or target.get("kind") != "session":
+        return None
+    sender = children[0] if len(children) == 1 and not is_batch else f"batch:{record.get('delegation_id')}"
+    return {"target_session_id": target["session_id"], "sender_kind": "child", "sender_id": sender,
+            **({"target_session_key": target["session_key"]} if target.get("session_key") else {}),
+            "kind": "subagent_complete", "meta": {"children": children, "delegation_id": record.get("delegation_id")},
+            **({"wake_policy": target["wake_policy"]} if target.get("wake_policy") else {})}
 
 
 def push_task_failure_notice(delegation_id: str, entry: dict[str, Any], *, n_tasks: int) -> None:

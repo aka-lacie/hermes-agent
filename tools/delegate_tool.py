@@ -59,6 +59,39 @@ from tools.delegate_tool_results import (
 )
 
 _ROLES = frozenset({"leaf", "orchestrator"})
+# Session-level actions over the unified sessions table (tools/delegate_sessions.py); list merges live runs in.
+_SESSION_ACTIONS = frozenset({"list", "observe", "resume", "close"})
+
+
+def _native_list(parent_agent, *, query=None, limit=20, scope=None) -> str:
+    """``action='list'`` under Freya's rule (agent/session_directory.py), with live runs overlaid: a running
+    child carries its live ``subagent_id`` for steer/stop. Without a persisted session store only the live
+    registry exists, as before."""
+    import json as _json
+    from tools.delegate_tool_registry import _list_payload
+    live = _list_payload(parent_agent)
+    db = getattr(parent_agent, "_session_db", None)
+    from tools.delegate_sessions import _real_store
+    if not _real_store(getattr(db, "_db", db)) or not getattr(parent_agent, "session_id", None):
+        return _json.dumps(live, ensure_ascii=False)
+    from tools.delegate_sessions import control
+    listed = _json.loads(control("list", parent_agent, query=query, limit=limit, scope=scope or "children"))
+    if listed.get("error"):
+        return _json.dumps(live, ensure_ascii=False)
+    by_session = {row["session_id"]: row for row in listed["subagents"]}
+    extra = []
+    for entry in live["subagents"]:
+        row = by_session.get(entry.get("session_id"))
+        if row is None:
+            extra.append(entry)
+            continue
+        row.update(status="running", subagent_id=entry.get("subagent_id"), accepting_steer=entry.get("accepting_steer"),
+                   live_transcript=entry.get("live_transcript"), running_seconds=entry.get("running_seconds"))
+    listed["subagents"] = extra + listed["subagents"]
+    listed["count"] = len(listed["subagents"])
+    if not listed["subagents"]:
+        listed["note"] = live.get("note")
+    return _json.dumps(listed, ensure_ascii=False)
 
 
 def _parent_live_home(parent_agent: Any) -> Optional[Path]:
@@ -413,6 +446,7 @@ def _run_single_child(
         run.seed_workspace()
         result, failure_entry, _child_close_deferred = run.await_child()
         if failure_entry is not None:
+            child._delegate_turn_entry = failure_entry  # its claim settles with this outcome (release_child)
             return failure_entry
 
         schema = _validate_child_output_schema(child, result, task_index, run.child_task_id, run.relay_text)
@@ -427,16 +461,19 @@ def _run_single_child(
         run.append_sibling_write_reminder(entry)
         run.account_background_processes(entry)
         run.emit_complete(result, entry, duration)
+        child._delegate_turn_entry = entry
         return run.attach_worktree(entry)
     except Exception as exc:
         # Close steer acceptance before any completion callback (see _merge_late_steer).
         _late_pending_steer = run.close_steering()
         logging.exception(f"[subagent-{task_index}] failed")
         # Entry status "error" (contract), progress event status "failed" (UI vocabulary).
-        return run.finish_failed(
+        failed = run.finish_failed(
             _fabricated_entry(task_index, "error", str(exc), child, run.elapsed()), _late_pending_steer,
             preview=str(exc), summary=str(exc), status="failed",
         )
+        child._delegate_turn_entry = failed
+        return failed
     finally:
         run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred)
 
@@ -538,10 +575,12 @@ def _build_children(
             _ident_ref = getattr(child, "_progress_identity_ref", None)
             if isinstance(_ident_ref, dict):
                 _ident_ref["delegation_id"] = live_deleg_id
+        if resume and resume.get("drain_owned"):
+            child._delegate_drain_owned = True  # the drain that claimed this turn runs the FIFO's next one itself
         try:
             from tools.delegate_sessions import bind_child
             bind_child(parent_agent, child, t, resume, extension=extension, options=options[i], routing_cfg=route.routing_cfg,
-                       retain=retain_sessions)
+                       retain=retain_sessions, task_index=i)
         except Exception as exc:
             logger.warning("Subagent session reservation failed", exc_info=True)
             from tools.delegate_tool_child_run import _close_child, _detach_child
@@ -605,8 +644,8 @@ def delegate_task(
     subagent_id: Optional[str] = None, message: Optional[str] = None, parent_agent=None,
     credentials_cfg: Optional[dict[str, Any]] = None,
     session_id: Optional[str] = None, model: Optional[str] = None, query: Optional[str] = None,
-    limit: int = 20, _resume: Optional[dict] = None,
-    _retain_sessions: bool = False, _extension_request: Optional[dict] = None,
+    limit: int = 20, _retain_sessions: bool = False, _extension_request: Optional[dict] = None,
+    scope: Optional[str] = None,
 ) -> str:
     """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control running ones. ``action``
     list/steer/stop run synchronously and bypass the pause gate, depth limit and async dispatch. ``role`` is legacy
@@ -627,10 +666,19 @@ def delegate_task(
     result = dispatch_extension(normalized_action, parent_agent, extension_request)
     if result is not None:
         return result
+    if normalized_action in _SESSION_ACTIONS or (normalized_action in {"steer", "stop"} and session_id
+                                                 and not subagent_id):
+        # The unified session surface: children are sessions rows driven through their own FIFO.
+        if normalized_action == "list":
+            return _native_list(parent_agent, query=query, limit=limit, scope=scope)
+        from tools.delegate_sessions import control
+        return control(normalized_action, parent_agent, session_id=session_id, message=message, model=model,
+                       query=query, limit=limit, background=extension_request["background"], scope=scope)
     if normalized_action in _CONTROL_ACTIONS:
         return _handle_control_action(normalized_action, subagent_id, message, parent_agent)
     if normalized_action and normalized_action != "spawn":
-        return tool_error(f"Unknown action '{action}'. Use spawn (default), list, steer, or stop.")
+        return tool_error(f"Unknown action '{action}'. Use spawn (default), list, observe, resume, steer, stop "
+                          "or close.")
 
     # Operator kill switch (TUI / delegation.pause RPC): blocks NEW spawns only.
     if is_spawn_paused():
@@ -676,6 +724,21 @@ def delegate_task(
         routes, err = _routes_for(task_list, cfg, credentials_cfg, parent_agent)
     if err:
         return tool_error(err)
+    return launch_children(
+        task_list, routes, parent_agent=parent_agent, background=background, context=context, top_role=top_role,
+        task_schemas=task_schemas, task_images=task_images, max_iterations=default_max_iter, max_children=max_children,
+        retain_sessions=_retain_sessions,
+    )
+
+
+def launch_children(
+    task_list: list[dict[str, Any]], routes: list[Any], *, parent_agent, background: bool, context: Optional[str],
+    top_role: str, task_schemas: list, task_images: Optional[list], max_iterations: int, max_children: int,
+    resume: Optional[dict] = None, retain_sessions: bool = False,
+) -> str:
+    """Build and run children on already-resolved routes (a spawn's, or a resumed session's stored route).
+    ``resume`` is the reservation of a claimed child admission (``tools.delegate_sessions``), never a
+    model-facing argument."""
     # Fail closed per task: a task its backend cannot route is refused alone (its entry carries the error); the call
     # is a tool error only when no task can run.
     runnable = [r for r in routes if not r.error]
@@ -685,7 +748,7 @@ def delegate_task(
     # Batch-level model/provider labels (transcript headers, completion block): blank when tasks took different
     # routes, so each child reports what it actually runs on.
     creds = runnable[0].creds if all(r.creds == runnable[0].creds for r in runnable) else dict.fromkeys(runnable[0].creds)
-    err = _oneshot_spawn_budget(parent_agent, len(runnable)) if _resume is None else None
+    err = _oneshot_spawn_budget(parent_agent, len(runnable)) if resume is None else None
     if err:
         return tool_error(err)
 
@@ -715,9 +778,9 @@ def delegate_task(
     origin = _capture_origin()
 
     children, err = _build_children(
-        task_list, task_schemas, routes, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
+        task_list, task_schemas, routes, top_role=top_role, max_iterations=max_iterations, parent_agent=parent_agent,
         live_deleg_id=live_deleg_id, live_writers=live_writers, task_images=task_images,
-        resume=_resume, retain_sessions=_retain_sessions,
+        resume=resume, retain_sessions=retain_sessions,
     )
     if err:
         return tool_error(err)
@@ -727,6 +790,39 @@ def delegate_task(
         live_home=_live_home, refused=refused,
     )
     return _run_batch(batch, background)
+
+
+def resumed_route(parent_agent, record: dict, model: Optional[str] = None):
+    """The run route of a retained child, re-resolved from its stored ``sessions.route``: same provider (or
+    verified endpoint), the stored fallback chain and reasoning level; ``model`` may change within it."""
+    from agent.session_routes import RouteError, resolve_route
+    from tools.delegate_tool_routes import TaskRoute
+    stored = record.get("route") or {}
+    if not stored:
+        provider = str(record.get("provider") or "").strip().lower()
+        if provider in {"", "auto", "custom"}:
+            raise ValueError("This older unnamed child has no saved route identity; start a new delegation with a named provider.")
+        stored = {"v": 1, "kind": "named", "provider": provider, "model": record.get("model")}
+    try:
+        block = resolve_route(stored, parent_agent, model=model)
+    except RouteError as exc:
+        raise ValueError(str(exc)) from exc
+    return TaskRoute(_resolve_delegation_credentials(block, parent_agent), block, block.get("reasoning_effort"))
+
+
+def launch_resumed(parent_agent, record: dict, claim: dict, reservation: dict, *, background: bool) -> str:
+    """Run one claimed admission of a retained child (resume, queued steer, delivered sub-child result) on its
+    stored route. The reservation transfers the claim to the built child, whose teardown settles it."""
+    payload = claim.get("payload") or {}
+    route = resumed_route(parent_agent, record, payload.get("model"))
+    task = {"goal": str(payload.get("text") or ""), "context": record.get("context") or "", "fork_context": False}
+    cfg = _load_config()
+    return launch_children(
+        [task], [route], parent_agent=parent_agent, background=background, context=task["context"],
+        top_role="leaf", task_schemas=[None], task_images=None,
+        max_iterations=cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS), max_children=_get_max_concurrent_children(),
+        resume=reservation,
+    )
 
 
 # ── OpenAI function-calling schema ──────────────────────────────────────────
@@ -903,15 +999,19 @@ DELEGATE_TASK_SCHEMA = {
             # delegations always run in the background. Unadvertised; do not re-add.
             "action": _p(
                 "string",
-                "Default 'spawn'. Live control of running children: "
-                "'list' = ids/goals/status/transcripts; 'steer' = queue "
-                "course-correction text into one child (subagent_id + "
-                "message) without stopping it; 'stop' = end one child "
-                "early (subagent_id; partial result still returns). "
+                "Default 'spawn'. 'list' = your children (running/idle; closed ones only with query) with status, "
+                "a sub-child rollup and, while running, a subagent_id; 'observe' = one child's status, transcript "
+                "tail and sub-children (session_id); 'resume' = give an idle child its next assignment (session_id "
+                "+ message; queued if it is busy); 'steer' = course-correct a running child (subagent_id or "
+                "session_id + message); 'stop' = end one child early; 'close' = retire an idle child. "
                 "Control actions return immediately; goal/tasks are ignored unless spawning.",
-                enum=["spawn", "list", "steer", "stop"],
+                enum=["spawn", "list", "observe", "resume", "steer", "stop", "close"],
             ),
             "subagent_id": _p("string", "Target for action='steer'/'stop' (ids from the spawn response or action='list')."),
+            "session_id": _p("string", "Child session id (from a spawn result or action='list') for observe/resume/"
+                             "steer/stop/close."),
+            "scope": _p("string", "For action='list': 'children' (default), 'tree' (the whole subtree) or 'siblings'.",
+                        enum=["children", "tree", "siblings"]),
             "message": _p(
                 "string",
                 "For action='steer': the course correction, appended to "
@@ -923,7 +1023,7 @@ DELEGATE_TASK_SCHEMA = {
 }
 
 
-_LIVE_CONTROL_PARAMS = frozenset({"action", "subagent_id", "message"})
+_LIVE_CONTROL_PARAMS = frozenset({"action", "subagent_id", "message", "session_id", "scope"})
 
 
 def oneshot_delegate_function(function: dict) -> dict:
@@ -993,6 +1093,7 @@ registry.register(
         images=args.get("images"), action=args.get("action"), subagent_id=args.get("subagent_id"), message=args.get("message"),
         parent_agent=kw.get("parent_agent"),
         session_id=args.get("session_id"), model=args.get("model"), query=args.get("query"), limit=args.get("limit", 20),
+        scope=args.get("scope"),
         _extension_request=args,
     ),
     check_fn=check_delegate_requirements,
