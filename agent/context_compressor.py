@@ -52,6 +52,7 @@ from agent.model_metadata import (
 from agent.context_default_record import last_defaulted_context_length
 from agent.redact import redact_sensitive_text
 from agent.turn_context import drop_stale_api_content
+from agent.message_parts import harness_legacy_origin
 from tools.todo_tool import TODO_INJECTION_HEADER
 
 logger = logging.getLogger(__name__)
@@ -5550,11 +5551,10 @@ Write only the summary body. Do not include any preamble or prefix."""
             self._summary_placement(compressed, tail_messages, compress_start)
         )
         if not merge_into_tail:
-            # End marker stops weak models treating the quoted summary as fresh input (#11475) or
-            # regurgitating it (#33256).
+            # End marker stops weak models treating the quoted summary as fresh input (#11475) or regurgitating it (#33256).
             compressed.append({
                 "role": summary_role, "content": summary + "\n\n" + _SUMMARY_END_MARKER,
-                COMPRESSED_SUMMARY_METADATA_KEY: True,
+                COMPRESSED_SUMMARY_METADATA_KEY: True, **harness_legacy_origin(summary_role),  # TODO(2e): user SystemEvent
                 COMPRESSED_SUMMARY_HAS_USER_TURN_KEY: bool(self._summary_has_user_turn),
             })
         # Default carrier is tail[0]: an exempt row absorbs the summary invisibly. The forced repair

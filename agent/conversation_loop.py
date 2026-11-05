@@ -19,6 +19,7 @@ from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholde
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message, without_persistence_fields
+from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
 from agent.message_sanitization import _repair_tool_call_arguments, _sanitize_surrogates
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, _estimate_tools_tokens_rough
 from agent.process_bootstrap import _install_safe_stdio
@@ -1945,6 +1946,7 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
         turn_messages = messages[start:] if isinstance(start, int) and 0 <= start < len(messages) else messages
         boundary = {
             "role": "assistant", "content": failed_turn_notice(turn_messages), "display_kind": FAILED_TURN_DISPLAY_KIND,
+            ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN,  # TODO(2e): turn_outcome on the user row instead
         }
         if failure := _failed_turn_display_metadata(agent, result):
             boundary["display_metadata"] = failure

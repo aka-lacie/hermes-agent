@@ -146,6 +146,7 @@ def close_discarded_turn(db, conn, row, notice=None, *, replace_after=None, disp
     ``display_metadata`` (``{error, error_surface}``) rides the boundary so a reopened chat redraws
     the turn's error card from history (``agent.conversation_loop._failed_turn_display_metadata``)."""
     import time
+    from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
     from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, PARTIAL_FAILED_TURN_NOTICE
     from hermes_state_local_lineage import local_physical_target
     from hermes_state_runtime import _canonical_chain
@@ -161,7 +162,8 @@ def close_discarded_turn(db, conn, row, notice=None, *, replace_after=None, disp
             tail[0] == 'user' or (tail[0] == 'assistant' and tail[1] not in (None, '', '[]')))):
         return False
     boundary = {'role': 'assistant', 'content': notice or PARTIAL_FAILED_TURN_NOTICE, 'timestamp': time.time(),
-                'display_kind': FAILED_TURN_DISPLAY_KIND}
+                'display_kind': FAILED_TURN_DISPLAY_KIND,
+                ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN}  # TODO(2e): turn_outcome on the user row instead
     if display_metadata:
         boundary['display_metadata'] = display_metadata
     db._append_messages_in_transaction(conn, target, [boundary])

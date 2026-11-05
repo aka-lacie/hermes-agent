@@ -1,8 +1,11 @@
 """Interrupt placeholder wording substituted into empty non-final wire rows.
 
-Split out of ``agent/agent_runtime_helpers.py`` (code-health size ratchet); a leaf module with no
-imports so every reader (runtime helpers, turn prep, the conversation loop) can import it directly.
+Split out of ``agent/agent_runtime_helpers.py`` (code-health size ratchet); a leaf module (it imports
+only the stdlib-only ``agent.message_parts``) so every reader (runtime helpers, turn prep, the
+conversation loop) can import it directly.
 """
+
+from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
 
 # Placeholder for an empty non-final message the provider would reject. This is the single source of
 # the wording: every healing path imports it from here, so healed transcripts read consistently.
@@ -23,4 +26,6 @@ _LEGACY_INTERRUPTED_PLACEHOLDER = "[response interrupted]"
 def hidden_interrupt_placeholder_row() -> dict:
     """A fresh assistant row that is invisible in transcripts but carries the placeholder as its
     non-empty ``api_content``, so the pre-call sanitizer does not re-heal it every call (#88955)."""
-    return {"role": "assistant", "content": "", "display_kind": "hidden", "api_content": _INTERRUPTED_PLACEHOLDER}
+    # TODO(2e): alternation placeholder; the renderer merges user turns instead.
+    return {"role": "assistant", "content": "", "display_kind": "hidden", "api_content": _INTERRUPTED_PLACEHOLDER,
+            ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN}

@@ -2,8 +2,10 @@
 from copy import deepcopy
 import json
 
+from agent.message_parts import MESSAGE_PARTS, validate_parts
 
-_METADATA = {"_compressed_summary", "_compressed_summary_has_user_turn"}
+# Underscore keys a fork keeps: summary flags and typed parts (key-preservation rule 1).
+_METADATA = {"_compressed_summary", "_compressed_summary_has_user_turn", MESSAGE_PARTS}
 
 
 def validate_fork_history(history):
@@ -19,6 +21,11 @@ def validate_fork_history(history):
         row = deepcopy({k: v for k, v in message.items() if not k.startswith("_") or k in _METADATA})
         if row.get("content") is not None and not isinstance(row["content"], (str, list)):
             raise ValueError("Fork message content must be text, content parts, or null.")
+        if MESSAGE_PARTS in row:
+            try:
+                validate_parts(row[MESSAGE_PARTS])
+            except ValueError as exc:
+                raise ValueError(f"Fork message parts are invalid: {exc}") from exc
         if row["role"] == "tool":
             call_id = row.get("tool_call_id")
             if not isinstance(call_id, str) or call_id not in pending:

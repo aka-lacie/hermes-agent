@@ -12,6 +12,7 @@ import queue
 import threading
 import time
 from agent.i18n import t
+from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN, MODEL_ORIGIN
 from agent.turn_failure_copy import (
     FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, OPEN_TURN_TAIL_ROLES, PARTIAL_FAILED_TURN_NOTICE,
 )
@@ -345,6 +346,7 @@ class GatewayTurnPersistenceMixin:
             return
         await self.async_session_store.append_to_transcript(session_id, {
             "role": "assistant", "content": notice, "timestamp": time.time(), "display_kind": FAILED_TURN_DISPLAY_KIND,
+            ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN,  # TODO(2e): turn_outcome on the user row instead
         })
 
     def _hmwa_classify_turn_failure(self, agent_result, history, session_entry):
@@ -563,7 +565,8 @@ class GatewayTurnPersistenceMixin:
                     await store.append_to_transcript(sid, _user_row, skip_db=agent_persisted)
                     if response:
                         await store.append_to_transcript(
-                            sid, {"role": "assistant", "content": response, "timestamp": ts},
+                            sid, {"role": "assistant", "content": response, "timestamp": ts,
+                                  ASSISTANT_ORIGIN: MODEL_ORIGIN},
                             skip_db=agent_persisted,
                         )
                 else:
@@ -574,6 +577,8 @@ class GatewayTurnPersistenceMixin:
                         if msg.get("role") == "system":
                             continue  # rebuilt each run
                         entry = {**msg, "timestamp": ts}
+                        if msg.get("role") == "assistant":  # the agent loop's own output (Rule 1)
+                            entry.setdefault(ASSISTANT_ORIGIN, MODEL_ORIGIN)
                         if (
                             not _user_msg_id_attached
                             and msg.get("role") == "user"

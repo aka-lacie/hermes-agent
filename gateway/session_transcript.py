@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 import time
+from agent.message_parts import ASSISTANT_ORIGIN, MESSAGE_PARTS, PROVENANCE_FIELDS, has_parts, validate_parts
 from agent.turn_context import extract_api_content_sidecar
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -66,9 +67,16 @@ def transcript_append_kwargs(session_id: str, message: dict[str, Any], *, fallba
     splatted: a spooled message is arbitrary JSON from disk, and an unexpected key would raise and
     abort the replay. *fallback_ts* applies only to a message with no timestamp at all, because a
     truthiness test would rewrite epoch 0. Values bound straight to a TEXT column are made bindable
-    (:func:`_bindable_text`), so one malformed field cannot make the row unwritable."""
+    (:func:`_bindable_text`), so one malformed field cannot make the row unwritable. Typed parts and
+    provenance ride along (key-preservation rule 1); malformed spooled parts are dropped, never fatal.
+    An assistant row's Rule 1 origin is its own ``_assistant_origin`` (the spool keeps it, so a replay
+    is the row the live writer writes)."""
     is_assistant = message.get("role") == "assistant"
     timestamp = message.get("timestamp")
+    typed: dict[str, Any] = {k: message[k] for k in PROVENANCE_FIELDS if message.get(k) is not None}
+    if has_parts(message) and message.get("role") == "user":
+        with contextlib.suppress(ValueError):
+            typed["parts"] = validate_parts(message[MESSAGE_PARTS])
     kwargs = {
         "session_id": session_id,
         "role": message.get("role", "unknown"),
@@ -87,7 +95,10 @@ def transcript_append_kwargs(session_id: str, message: dict[str, Any], *, fallba
         # notification turns, #82888). DB-only; stripped from provider-bound payloads.
         "display_kind": message.get("display_kind"),
         "display_metadata": message.get("display_metadata"),
+        **typed,
     }
+    if is_assistant and (origin := message.get(ASSISTANT_ORIGIN)):
+        kwargs["origin"] = origin
     for key in _BOUND_TEXT_KEYS:
         kwargs[key] = _bindable_text(kwargs[key])
     return kwargs

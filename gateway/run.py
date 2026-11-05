@@ -41,6 +41,7 @@ from agent.conversation_compression_archive import MERGED_DURABLE_ROWS, RETIRED_
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.interrupt_compat import request_hard_interrupt
 from agent.message_metadata import ABSORBED_MESSAGE_UIDS, MESSAGE_UID, copy_identity_fields, is_compaction_scaffolding, scaffolding_replay_fields
+from agent.message_parts import has_parts, typed_fields
 from agent.turn_context import compression_made_progress
 from agent.session_activity import ActivityProvenance, AwakeIdleMeter
 from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get, config_exists
@@ -1099,20 +1100,10 @@ def _prepare_resume_pending_message(
 
 
 # Assistant fields that must survive replay for CLI parity (reasoning continuity, prefix-cache hits, provider
-# echo): unreconstructable thinking text (DeepSeek/Kimi), opaque signatures, Codex blobs (caching degrades).
-# ``reasoning`` and ``reasoning_details`` were the original three preserved by PR #2974 (schema v6).
-# ``reasoning_content``, ``codex_reasoning_items``, ``codex_message_items``, and ``finish_reason`` were
-# added to the DB later but the gateway's replay whitelist was never expanded to match — so any pure-text
-# assistant turn (no ``tool_calls``) silently dropped them on replay, regressing the CLI-vs-gateway
-# behavioural parity. Why each field matters on replay: ``_copy_reasoning_content_for_api`` promotes
-# ``reasoning`` → ``reasoning_content`` at send time, but only when the strings happen to match. Carrying
-# the original ``reasoning_content`` verbatim avoids reconstruction loss for providers that return them as
-# distinct fields (DeepSeek/Kimi/Moonshot thinking modes). * ``reasoning_details``: opaque structured array
-# (signature, encrypted_content) used by OpenRouter/Anthropic to maintain reasoning continuity across turns.
-# * ``codex_reasoning_items``: encrypted reasoning blobs for the OpenAI Codex Responses API. *
-# ``codex_message_items``: exact assistant message items with ``phase``. OpenAI docs: "preserve and resend
-# phase on all assistant messages — dropping it can degrade performance."  Required for prefix cache hits. *
-# ``finish_reason``: informational; cheap to keep so transcripts replay identically across CLI and gateway.
+# echo); a pure-text assistant turn used to drop the later-added ones. ``reasoning_content`` verbatim avoids
+# reconstruction loss (DeepSeek/Kimi/Moonshot thinking); ``reasoning_details`` holds OpenRouter/Anthropic
+# signatures; ``codex_reasoning_items`` / ``codex_message_items`` are the Codex Responses blobs and phased
+# message items OpenAI requires resent for prefix-cache hits; ``finish_reason`` keeps transcripts identical.
 _ASSISTANT_REPLAY_FIELDS: tuple[str, ...] = (
     "reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items", "codex_message_items",
     "finish_reason")
@@ -1157,6 +1148,7 @@ def _build_replay_entry(
     # Replay rebuilds the SAME conversation: every role keeps its uid and merge witness, so a context engine sees the
     # uids the store holds. Tool-call uid maps stay on rows that still carry their calls (those pass through whole).
     copy_identity_fields({key: msg[key] for key in (MESSAGE_UID, ABSORBED_MESSAGE_UIDS) if key in msg}, entry)
+    entry.update(typed_fields(msg))  # and its typing, wherever the uid goes (key-preservation rule 1)
     # Replay rewrites are view-only: keep the durable-row stamp so marker-only
     # flushes skip rows already in state.db (#121462/#123462).
     if msg.get("_db_persisted"):
@@ -1316,6 +1308,8 @@ def _build_gateway_agent_history(
         if "tool_calls" in msg or "tool_call_id" in msg or role == "tool":
             clean_msg = {k: v for k, v in msg.items() if k not in {"timestamp", "observed"}}
             agent_history.append(clean_msg)
+        elif has_parts(msg):  # typed: content is the parts' plain view, time rides in the origin
+            agent_history.append(_build_replay_entry(role, content, msg, preserve_timestamp=(role == "user")))
         elif content or _has_replayable_sidecar(role, content, msg):
             replay_timestamp = msg.get("timestamp")
             # Clean before rendering: a timestamp prefix hides recovery notes

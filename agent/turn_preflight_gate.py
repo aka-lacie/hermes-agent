@@ -11,6 +11,7 @@ from contextlib import suppress
 from typing import Any
 
 from agent.message_metadata import append_message
+from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
 from agent.turn_context import _compression_warrants_another_preflight_pass
 from agent.turn_preflight import PreflightGateVerdict, run_preflight_compression
 
@@ -48,7 +49,8 @@ def run_preflight_gate(
         v.final_response = _runtime_context_error
         v.failed = True
         v._turn_exit_reason = "ollama_runtime_context_too_small"
-        append_message(messages, {"role": "assistant", "content": v.final_response})
+        # TODO(2e): harness error text, not model output; a system_event once the renderer owns alternation.
+        append_message(messages, {"role": "assistant", "content": v.final_response, ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN})
         agent._emit_diagnostic_status("❌ Ollama runtime context is too small for Hermes tool use")
         v.api_call_count -= 1
         agent._api_call_count = v.api_call_count

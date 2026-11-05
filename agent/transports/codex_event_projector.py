@@ -14,6 +14,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
+
 
 def _deterministic_call_id(item_type: str, item_id: str) -> str:
     """Stable tool_call id: the codex item id, else a hash so replay keeps prefix caches valid."""
@@ -168,4 +170,6 @@ class CodexEventProjector:
             payload = json.dumps(item, ensure_ascii=False)[:1500]
         except (TypeError, ValueError):
             payload = repr(item)[:1500]
-        return ProjectionResult(messages=[{"role": "assistant", "content": f"[codex {item_type}] {payload}"}])
+        # TODO(2e): an opaque app-server item is not model text; reclassify as a tool-result/system row.
+        return ProjectionResult(messages=[{"role": "assistant", "content": f"[codex {item_type}] {payload}",
+                                           ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN}])

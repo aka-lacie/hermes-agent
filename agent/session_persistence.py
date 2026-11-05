@@ -26,6 +26,7 @@ from agent.trajectory import save_trajectory as _save_trajectory_to_file
 from agent.message_metadata import (
     DB_ROW_SNAPSHOT, MERGED_TURN_PREFIX, REPAIR_BOOKKEEPING_FIELDS, RESTORED_FROM_STORE, TOOL_CALL_UID,
     copy_identity_fields, message_uid_or_none, tool_call_uid_from_history)
+from agent.message_parts import ASSISTANT_ORIGIN, MODEL_ORIGIN, typed_fields
 from agent.transcript_repair import sync_flushed_message_markers
 
 
@@ -259,6 +260,11 @@ def _db_flush_row(agent, msg: dict, is_current_turn_user: bool) -> dict[str, Any
     # The merge witness rides on the survivor's row (an owned column: a row-addressed rewrite of the
     # survivor writes it too), so a restart sees which rows the composite folded.
     copy_identity_fields(msg, row)
+    row.update(typed_fields(msg))
+    if role == "assistant":
+        # Rule 1: the agent loop's own transcript is this session's model output; the harness rows that
+        # still ride in it carry their own (temporary) origin.
+        row[ASSISTANT_ORIGIN] = msg.get(ASSISTANT_ORIGIN) or MODEL_ORIGIN
     if isinstance(msg.get(DB_ROW_SNAPSHOT), str):
         row[DB_ROW_SNAPSHOT] = msg[DB_ROW_SNAPSHOT]
     return row

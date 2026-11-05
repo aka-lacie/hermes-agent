@@ -15,6 +15,7 @@ import shlex
 from typing import Optional, Union
 
 from agent.i18n import t
+from agent.message_parts import copy_row_fields
 from agent.turn_context import extract_api_content_sidecar
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply
@@ -100,6 +101,7 @@ def _branch_row(msg: dict) -> dict:
     row["role"] = msg.get("role", "user")
     row["tool_name"] = msg.get("tool_name") or msg.get("name")
     row["api_content"] = extract_api_content_sidecar(msg)
+    row.update(copy_row_fields(msg))  # typing + the Rule 1 copy origin
     return row
 
 

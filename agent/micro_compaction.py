@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from agent.compaction_events import publish_micro
 from agent.context_compressor_telemetry import _safe_int
 from agent.message_metadata import record_absorbed_message
+from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
 from agent.model_metadata import estimate_messages_tokens_rough, estimate_tokens_rough
 
 # Log name parity with the origin module.
@@ -475,6 +476,8 @@ class MicroCompactionMixin:
             cc.MICRO_COMPACT_MARKER_KEY: True,
             # Micro markers absorb only assistant/tool content; user turns stay in the transcript.
             cc.COMPRESSED_SUMMARY_HAS_USER_TURN_KEY: False,
+            # TODO(2e): a compaction SystemEvent on a user row; assistant only for strict alternation.
+            ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN,
         }
         result = messages[:splice_start] + [summary_msg] + messages[splice_end:]
 
