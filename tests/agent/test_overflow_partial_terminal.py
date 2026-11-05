@@ -157,7 +157,9 @@ class TestRecoverFromTruncationOverflowTerminal:
         # The interrupted tool tail is closed by a visible harness notice (never an assistant row:
         # Rule 1); no fragment or nudge was appended.
         assert messages[-1]["role"] == "user" and messages[-1]["sender_kind"] == "system"
-        assert messages[-1]["content"] == _CONTEXT_OVERFLOW_PARTIAL_FINAL
+        from agent.message_parts import project_harness_notice_for_display
+        assert project_harness_notice_for_display(messages[-1])["content"] == _CONTEXT_OVERFLOW_PARTIAL_FINAL
+        assert messages[-1]["content"] == "The turn ended before delivering a response."
         assert messages[-1]["turn_outcome"] == "partial"
         assert len(messages) == 4
         assert result.get("messages") is messages

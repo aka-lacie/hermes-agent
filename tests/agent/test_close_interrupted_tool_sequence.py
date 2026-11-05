@@ -57,7 +57,9 @@ def test_closing_makes_next_user_message_alternation_safe():
     # A caller banner is the turn's only explanation: it stays visible (agent chrome in the UI).
     bannered = _tool_tail()
     assert close_interrupted_tool_sequence(bannered, "Response truncated.") is True
-    assert bannered[-1]["content"] == "Response truncated."
+    from agent.message_parts import project_harness_notice_for_display
+    assert project_harness_notice_for_display(bannered[-1])["content"] == "Response truncated."
+    assert bannered[-1]["content"] == "The turn ended before delivering a response."
     assert bannered[-1]["role"] == "user" and bannered[-1]["display_kind"] == "harness_notice"
 
 
@@ -82,7 +84,7 @@ def test_only_an_interrupted_close_carries_the_stopped_mark():
     """The closing row is the turn's last stored row: it alone tells a reopened transcript the turn was stopped."""
     stopped = _tool_tail()
     assert close_interrupted_tool_sequence(stopped, None, stopped=True) is True
-    assert stopped[-1]["display_metadata"] == {"interrupted": True}
+    assert stopped[-1]["display_metadata"]["interrupted"] is True
     truncated = _tool_tail()
     assert close_interrupted_tool_sequence(truncated, "Response truncated.") is True
-    assert "display_metadata" not in truncated[-1]
+    assert truncated[-1]["display_metadata"] == {"harness_notice_text": "Response truncated."}

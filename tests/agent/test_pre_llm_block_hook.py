@@ -93,7 +93,9 @@ def test_blocked_turn_never_reaches_the_provider_and_stores_only_the_placeholder
 
         history = db.get_messages_as_conversation("s-block")
         assert [(m["role"], m["content"]) for m in history] == [
-            ("user", PRE_LLM_BLOCK_WITHHELD_PROMPT), ("user", BLOCK_MSG)]
+            ("user", PRE_LLM_BLOCK_WITHHELD_PROMPT), ("user", "The turn was blocked by a pre-LLM plugin check.")]
+        from agent.message_parts import project_harness_notice_for_display
+        assert project_harness_notice_for_display(history[1])["content"] == BLOCK_MSG
         assert (history[1]["sender_kind"], history[1]["part_kind"], history[1]["turn_outcome"]) == (
             "system", "error_notice", "completed")
         assert withheld_prompt_text(history[0]) == f"look up {SECRET}"
@@ -105,6 +107,7 @@ def test_blocked_turn_never_reaches_the_provider_and_stores_only_the_placeholder
         (sent,) = _Provider.chat_requests
         wire = json.dumps(sent["messages"])
         assert SECRET not in wire and PRE_LLM_BLOCK_WITHHELD_PROMPT in wire
+        assert BLOCK_MSG not in wire  # human-only explanation is display metadata, not event evidence
     finally:
         db.close()
 

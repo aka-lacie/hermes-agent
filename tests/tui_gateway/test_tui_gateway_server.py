@@ -2698,7 +2698,7 @@ def test_history_to_messages_types_the_failed_turn_boundary_for_resume():
     projected = server._history_to_messages(history)
     assert [m.get("display_kind") for m in projected] == [None, FAILED_TURN_DISPLAY_KIND, None, None, None, None]
     assert [m["role"] for m in projected] == ["user", "assistant", "user", "assistant", "user", "assistant"]
-
+    assert projected[1]["text"] == FAILED_TURN_NOTICE
 
 def test_history_to_messages_drops_pure_compaction_scaffolding():
     from agent.context_compressor import (

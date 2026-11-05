@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent.message_parts import FAILED_TURN_EVENT_TEXT
 from agent.turn_failure_copy import FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
 import gateway.run as gateway_run
 from gateway.config import GatewayConfig, Platform
@@ -164,7 +165,7 @@ async def test_agent_failed_early_skip_db_when_agent_has_session_db(
         if len(call.args) >= 2 and call.args[1].get("role") in {"user", "assistant"}
     ]
     assert [row["role"] for row in transcript_rows] == ["user", "user"]
-    assert transcript_rows[-1]["content"] == FAILED_TURN_NOTICE
+    assert transcript_rows[-1]["content"] == FAILED_TURN_EVENT_TEXT
     assert (transcript_rows[-1]["display_kind"], transcript_rows[-1]["turn_outcome"]) == ("failed_turn", "failed")
 
     # The next unrelated input remains its own row instead of alternation repair merging the failed
@@ -211,7 +212,7 @@ async def test_boundary_keyed_on_durable_tail_when_user_row_is_deduped(
         if len(call.args) >= 2 and call.args[1].get("role") in {"user", "assistant"}
     ]
     assert [row["role"] for row in rows] == expected_roles
-    assert all(row["content"] == FAILED_TURN_NOTICE and row["display_kind"] == "failed_turn" for row in rows)
+    assert all(row["content"] == FAILED_TURN_EVENT_TEXT and row["display_kind"] == "failed_turn" for row in rows)
 
 
 @pytest.mark.asyncio
@@ -253,7 +254,7 @@ async def test_failed_turn_with_tool_activity_does_not_recommend_blind_retry(
         if len(call.args) >= 2 and call.args[1].get("display_kind") == "failed_turn"
     ]
     assert len(boundary_rows) == 1 and boundary_rows[0]["role"] == "user"
-    assert boundary_rows[0]["content"] == PARTIAL_FAILED_TURN_NOTICE
+    assert boundary_rows[0]["content"] == FAILED_TURN_EVENT_TEXT
     assert boundary_rows[0]["turn_outcome"] == "partial"
     assert PARTIAL_FAILED_TURN_NOTICE in response
     assert "not processed" not in response

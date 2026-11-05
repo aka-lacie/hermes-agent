@@ -48,11 +48,11 @@ def stamp_failure(result: dict[str, Any], reason: str, retryable: bool) -> dict[
 
 
 # ---- failed-turn transcript boundary ----------------------------------------------------------
-# The Hermes-authored assistant row that closes a durable turn which ended without one. A
-# transcript boundary, NOT the model's answer: no provider/model error or refusal detail is
-# ever interpolated (that rides ``final_response``). Owned here so the core closer
-# (``agent/conversation_loop.py::run_conversation``) and the gateway's own writer
-# (``gateway/run_turn.py::_hmwa_close_failed_turn``) say the same thing.
+# The Hermes-authored system_event row that closes a durable turn which ended without a response.
+# Its model-facing text is neutral evidence; the human UI copy below lives only in display metadata.
+# Provider/model error or refusal detail rides ``final_response``, not the event text. Owned here so
+# the core closer (``agent/conversation_loop.py::run_conversation``) and the gateway's writer
+# (``gateway/run_turn.py::_hmwa_close_failed_turn``) use the same boundary.
 
 FAILED_TURN_NOTICE = (
     "Your request was not processed. Send it again if you still want me to carry it out."
@@ -100,15 +100,15 @@ def failed_turn_notice(turn_messages: Any) -> str:
 def failed_turn_boundary(outcome: str, *, notice: Optional[str] = None,
                          display_metadata: Optional[dict] = None, timestamp: Optional[float] = None) -> dict:
     """The row that closes a failed turn (Rule 1: a ``role="user"`` system_event, never assistant):
-    ``turn_outcome=<outcome>`` on the row closes the durable tail; its text is the boundary copy (or an
-    explicit *notice*, e.g. an owner-stop explanation) and renders as a system-reminder in front of the
-    next user turn."""
+    ``turn_outcome=<outcome>`` on the row closes the durable tail. The event text is neutral evidence
+    rendered before the next user turn; the boundary copy (or explicit *notice*, e.g. an owner-stop
+    explanation) stays in display metadata for UI projection only."""
     from agent.message_parts import harness_notice_message
 
     row = harness_notice_message("error_notice", notice or FAILED_TURN_COPY[outcome], notice="failed_turn",
                                  turn_outcome=outcome, display_kind=FAILED_TURN_DISPLAY_KIND)
     if display_metadata:
-        row["display_metadata"] = display_metadata
+        row["display_metadata"].update(display_metadata)
     if timestamp is not None:
         row["timestamp"] = timestamp
     return row

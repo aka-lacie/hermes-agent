@@ -166,7 +166,7 @@ def close_discarded_turn(db, conn, row, notice=None, *, replace_after=None, disp
             and tail[3] == FAILED_TURN_DISPLAY_KIND and tail[2] > replace_after):
         conn.execute("UPDATE messages SET content=?, parts_json=?, turn_outcome=?, display_metadata=? WHERE id=?",
                      (boundary['content'], encode_parts_json(boundary[MESSAGE_PARTS]), boundary['turn_outcome'],
-                      db._encode_display_metadata(display_metadata), tail[2]))
+                      db._encode_display_metadata(boundary['display_metadata']), tail[2]))
         return True
     open_user_tail = tail is not None and tail[0] == 'user' and tail[4] is None and tail[3] != FAILED_TURN_DISPLAY_KIND
     if notice is None and (tail is None or not (

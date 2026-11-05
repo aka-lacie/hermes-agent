@@ -147,7 +147,8 @@ def test_acp_refusal_closes_the_turn_and_is_not_replayed_into_the_next_prompt(ac
     provider text, never an assistant row), and the next prompt reaches the provider after it, the
     notice rendered as a system-reminder that says the earlier request was not processed.
     """
-    from agent.turn_failure_copy import CLOSED_TURN_TAIL, FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE
+    from agent.message_parts import FAILED_TURN_EVENT_TEXT
+    from agent.turn_failure_copy import CLOSED_TURN_TAIL, FAILED_TURN_DISPLAY_KIND
 
     provider, prompt, conversation_rows, db, sid, conn, server = acp
 
@@ -156,7 +157,7 @@ def test_acp_refusal_closes_the_turn_and_is_not_replayed_into_the_next_prompt(ac
 
     rows = conversation_rows()
     assert [r[0] for r in rows] == ["user", "user"], rows
-    assert rows[1][1] == FAILED_TURN_NOTICE  # no tool ran: no hedging, no provider detail
+    assert rows[1][1] == FAILED_TURN_EVENT_TEXT  # neutral evidence, no UI advice or provider detail
     assert db.latest_conversation_role(sid) == CLOSED_TURN_TAIL
     # Typed, so a renderer or room poller never has to match the English copy to tell the
     # boundary from a model reply.
@@ -178,7 +179,7 @@ def test_acp_refusal_closes_the_turn_and_is_not_replayed_into_the_next_prompt(ac
     # One wire user turn: the failed request, the boundary as a system-reminder, the new request.
     assert [m["role"] for m in sent] == ["user"], sent
     reminder = ('<system-reminder kind="error_notice" notice="failed_turn" turn_outcome="failed">\n'
-                f"{FAILED_TURN_NOTICE}\n</system-reminder>")
+                f"{FAILED_TURN_EVENT_TEXT}\n</system-reminder>")
     assert sent[0]["content"] == f"{_REFUSED}\n\n{reminder}\n\n{_NEW_REQUEST}"
 
     # Turn 3: cancelled mid-turn. The interrupt envelope carries ``final_response=None``
@@ -205,7 +206,8 @@ def test_failed_turn_boundary_is_idempotent_on_the_durable_tail_and_skips_contex
     from types import SimpleNamespace
 
     from agent.conversation_loop import _close_durable_failed_turn
-    from agent.turn_failure_copy import CLOSED_TURN_TAIL, PARTIAL_FAILED_TURN_NOTICE
+    from agent.message_parts import FAILED_TURN_EVENT_TEXT
+    from agent.turn_failure_copy import CLOSED_TURN_TAIL
     from hermes_state import SessionDB
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -239,7 +241,7 @@ def test_failed_turn_boundary_is_idempotent_on_the_durable_tail_and_skips_contex
     _close_durable_failed_turn(agent, failed)
     _close_durable_failed_turn(agent, failed)  # redelivery: the tail is already closed
     assert len(written) == 1
-    assert (messages[-1]["role"], messages[-1]["content"]) == ("user", PARTIAL_FAILED_TURN_NOTICE)  # a tool ran: hedge
+    assert (messages[-1]["role"], messages[-1]["content"]) == ("user", FAILED_TURN_EVENT_TEXT)
     assert messages[-1]["turn_outcome"] == "partial" and messages[-1]["sender_kind"] == "system"
     assert db.latest_conversation_role(sid) == CLOSED_TURN_TAIL
     db.close()
@@ -314,7 +316,8 @@ def test_failed_turn_after_a_tool_row_is_closed_with_its_error_card(tmp_path, mo
     from types import SimpleNamespace
 
     from agent.conversation_loop import _close_durable_failed_turn
-    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, PARTIAL_FAILED_TURN_NOTICE
+    from agent.message_parts import FAILED_TURN_EVENT_TEXT
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND
     from hermes_state import SessionDB
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -347,7 +350,7 @@ def test_failed_turn_after_a_tool_row_is_closed_with_its_error_card(tmp_path, mo
     stored = db.get_messages(sid)
     assert [row["role"] for row in stored] == ["user", "assistant", "tool", "user"]
     boundary = stored[-1]
-    assert (boundary["content"], boundary["display_kind"]) == (PARTIAL_FAILED_TURN_NOTICE, FAILED_TURN_DISPLAY_KIND)
+    assert (boundary["content"], boundary["display_kind"]) == (FAILED_TURN_EVENT_TEXT, FAILED_TURN_DISPLAY_KIND)
     metadata = boundary["display_metadata"]
     assert (metadata if isinstance(metadata, dict) else json.loads(metadata))["error_surface"]["code"] == "rate_limit"
     db.close()

@@ -307,7 +307,7 @@ def close_interrupted_tool_sequence(messages: list, final_response: Any = None, 
 
     row = interrupt_notice_row(text.strip(), notice="interrupted_tool_sequence", stopped=stopped)
     if stopped:
-        row["display_metadata"] = {"interrupted": True}
+        row.setdefault("display_metadata", {})["interrupted"] = True
     append_message(messages, row)
     return True
 

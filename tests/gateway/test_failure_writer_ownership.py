@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agent.message_parts import FAILED_TURN_EVENT_TEXT
 from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, PARTIAL_FAILED_TURN_NOTICE
 
 
@@ -116,7 +117,7 @@ def test_failure_owner_follows_only_live_lineage_markers(tmp_path):
             assert sum(m.get("display_kind") == FAILED_TURN_DISPLAY_KIND for m in live_messages) <= 1, location
             assert not any(m["role"] == "assistant" for m in live_messages), location  # Rule 1
             if not owned:
-                assert live_messages[-1]["content"] == PARTIAL_FAILED_TURN_NOTICE
+                assert live_messages[-1]["content"] == FAILED_TURN_EVENT_TEXT
                 persisted_user = live_messages[-2]
                 assert persisted_user["content"] == prepared.persist_user_message
                 assert persisted_user["display_metadata"]["gateway_input_owner"] == owner
@@ -288,7 +289,7 @@ def test_failed_turn_whose_tail_is_a_tool_row_is_closed(tmp_path):
             )
         rows = [m for m in db.get_messages(sid) if m["role"] != "session_meta"]
         assert [m["role"] for m in rows] == ["user", "assistant", "tool", "user"]
-        assert (rows[-1]["content"], rows[-1]["display_kind"]) == (PARTIAL_FAILED_TURN_NOTICE, FAILED_TURN_DISPLAY_KIND)
+        assert (rows[-1]["content"], rows[-1]["display_kind"]) == (FAILED_TURN_EVENT_TEXT, FAILED_TURN_DISPLAY_KIND)
         assert rows[-1]["turn_outcome"] == "partial"
         db.close()
 

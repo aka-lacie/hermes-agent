@@ -360,8 +360,10 @@ def _settle_on_real_store(tmp_path, cause, principal='person', payload=None):
 
 
 def _notices(db):
+    from agent.message_parts import project_harness_notice_for_display
     from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND
-    return [m['content'] for m in db.get_messages('s') if m.get('display_kind') == FAILED_TURN_DISPLAY_KIND]
+    return [project_harness_notice_for_display(m)['content'] for m in db.get_messages('s')
+            if m.get('display_kind') == FAILED_TURN_DISPLAY_KIND]
 
 
 @pytest.mark.parametrize(('cause', 'notice'), [('Gateway restarting', RESTART_INTERRUPT_NOTICE),
@@ -454,7 +456,9 @@ def test_restart_notice_replaces_the_core_failed_turn_boundary_of_the_same_turn(
         # The boundary is a user-side harness notice (Rule 1) whose typed part was replaced with its text.
         rows = db.get_messages_as_conversation('s')
         assert [m['role'] for m in rows] == ['user', 'user']
-        assert rows[-1]['_parts'][0]['text'] == expected
+        from agent.message_parts import FAILED_TURN_EVENT_TEXT
+        assert rows[-1]['_parts'][0]['text'] == FAILED_TURN_EVENT_TEXT
+        assert rows[-1]['content'] == FAILED_TURN_EVENT_TEXT
         assert rows[-1]['turn_outcome'] == 'interrupted'
 
 

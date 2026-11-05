@@ -88,3 +88,6 @@ def test_message_pages_project_failed_turn_boundaries_as_agent_chrome(tmp_path, 
         None, FAILED_TURN_DISPLAY_KIND, None, FAILED_TURN_DISPLAY_KIND, None, None,
     ]
     assert [row["role"] for row in rows] == ["user", "assistant", "user", "assistant", "user", "assistant"]
+    assert rows[1]["content"] == FAILED_TURN_NOTICE
+    from agent.turn_failure_copy import PARTIAL_FAILED_TURN_NOTICE
+    assert rows[3]["content"] == PARTIAL_FAILED_TURN_NOTICE

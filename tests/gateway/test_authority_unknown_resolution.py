@@ -164,7 +164,8 @@ async def test_discard_and_its_transcript_boundary_commit_atomically_on_the_phys
 async def test_discarded_lost_turn_is_closed_and_never_merged_into_the_follower_request(tmp_path, monkeypatch):
     """Discard keeps the lost text visible for resending, but the next provider request must not
     glue it onto the follower (consecutive-user merge): it is closed like a failed turn."""
-    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, PARTIAL_FAILED_TURN_NOTICE
+    from agent.message_parts import FAILED_TURN_EVENT_TEXT
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND
     from run_agent import AIAgent
     from tests.acp_adapter.test_failed_turn_closure import _LoopbackProvider
     monkeypatch.setenv('HERMES_DISABLE_PLUGINS', '1')
@@ -183,7 +184,7 @@ async def test_discarded_lost_turn_is_closed_and_never_merged_into_the_follower_
         await authority.sessions['s'].task
         rows = [m for m in db.get_messages('s') if m['role'] in ('user', 'assistant')]
         assert [(m['role'], m['content']) for m in rows[:2]] == [
-            ('user', 'HEAD lost in restart'), ('user', PARTIAL_FAILED_TURN_NOTICE)]
+            ('user', 'HEAD lost in restart'), ('user', FAILED_TURN_EVENT_TEXT)]
         assert rows[1]['display_kind'] == FAILED_TURN_DISPLAY_KIND and rows[1]['turn_outcome'] == 'partial'
         assert not [m for m in rows if m['role'] == 'assistant' and m.get('display_kind')]  # Rule 1
         # The follower's real provider request, built from the live-replay transcript.

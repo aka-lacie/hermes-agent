@@ -80,7 +80,10 @@ async def test_cron_refusal_is_in_the_reopened_transcript(owner, monkeypatch, tm
     assert len(history) == 3, 'the refusal is the turn after the job\'s own exchange'
     tail = history[-1]
     assert (tail['role'], tail['display_kind'], tail['turn_outcome']) == ('user', 'failed_turn', 'failed')
-    assert 'scheduled job' in tail['content']
+    from agent.message_parts import FAILED_TURN_EVENT_TEXT, project_harness_notice_for_display
+    assert tail['content'] == FAILED_TURN_EVENT_TEXT
+    displayed = project_harness_notice_for_display(tail)['content']
+    assert 'scheduled job' in displayed
     metadata = tail['display_metadata']
     metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
-    assert metadata == {'error': tail['content'], 'error_surface': _SURFACE}
+    assert metadata == {'error': displayed, 'error_surface': _SURFACE, 'harness_notice_text': displayed}

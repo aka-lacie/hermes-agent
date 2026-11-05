@@ -48,7 +48,8 @@ PART_TYPES = frozenset({HUMAN, SYSTEM_EVENT, INJECTION, MEDIA})
 # Parts whose ``text`` makes up the plain view, in message order: what the row's sender actually wrote
 # (a human's words, an event's evidence). Injections are harness context riding with the turn, never
 # the sender's words, so ``content`` (FTS, UI, re-anchoring, legacy readers) never carries them; only the
-# wire renderer shows them. Media contributes nothing: its bytes (or a one-line reference outside the
+# wire renderer shows them. Harness notices carry neutral event evidence here; their user-facing
+# copy is separate display metadata. Media contributes nothing: its bytes (or a one-line reference outside the
 # replay window) are the renderer's business.
 _TEXT_PART_TYPES = frozenset({HUMAN, SYSTEM_EVENT})
 # Set by the wire renderer on a per-call clone whose ``content`` is already the rendered wire text and
@@ -90,6 +91,17 @@ FAILED_TURN_DISPLAY_KIND = "failed_turn"  # agent.turn_failure_copy re-exports i
 # Display kinds of harness notices the UI draws where the reply would have been (agent chrome).
 HARNESS_NOTICE_DISPLAY_KINDS = frozenset({HARNESS_NOTICE_DISPLAY_KIND, FAILED_TURN_DISPLAY_KIND})
 HARNESS_NOTICE_SENDER_PREFIX = "system:"
+# Human-facing explanations are display data, never model-facing event text. Select neutral
+# evidence by the structural notice id (not by recognizing or rewriting the UI wording).
+HARNESS_NOTICE_DISPLAY_TEXT = "harness_notice_text"
+FAILED_TURN_EVENT_TEXT = "Previous turn ended with an error before delivering a response."
+_HARNESS_NOTICE_EVENT_TEXT = {
+    "failed_turn": FAILED_TURN_EVENT_TEXT,
+    "tool_guardrail_halt": "The turn was halted by the repeated-tool-call guardrail.",
+    "preflight_context_error": "The turn failed the model context preflight check.",
+    "pre_llm_call_blocked": "The turn was blocked by a pre-LLM plugin check.",
+    "pending_tool_result": "The turn ended while a tool result was pending.",
+}
 
 _DB_PERSISTED_MARKER = "_db_persisted"  # agent.context_compressor._DB_PERSISTED_MARKER (import-light here)
 _COMPRESSED_SUMMARY_KEY = "_compressed_summary"  # agent.context_compressor.COMPRESSED_SUMMARY_METADATA_KEY
@@ -151,14 +163,24 @@ def harness_notice_message(kind: str, text: str, *, notice: str, turn_outcome: O
                            display_kind: Optional[str] = HARNESS_NOTICE_DISPLAY_KIND) -> dict:
     """A harness notice row (Rule 1: never assistant): ``role="user"``, ``sender_kind="system"``,
     ``sender_id="system:<notice>"``, one ``system_event(kind)`` part whose meta names the ``notice``
-    (and the ``turn_outcome`` when it closes a turn). ``turn_outcome`` also lands on the row, which is
-    what marks the turn closed for the durable-tail checks (``SessionDB.latest_conversation_role``)."""
+    (and the ``turn_outcome`` when it closes a turn). Visible notices' ``text`` is human UI copy,
+    kept only in ``display_metadata``; the event carries neutral evidence selected by ``notice``.
+    Hidden interrupt checkpoints already carry runtime evidence and keep it. ``turn_outcome``
+    also lands on the row, marking it closed for durable-tail checks."""
     if turn_outcome is not None and turn_outcome not in TURN_OUTCOMES:
         raise ValueError(f"unknown turn_outcome {turn_outcome!r}")
     event_meta = {"notice": notice, **dict(meta or {})}
     if turn_outcome is not None:
         event_meta["turn_outcome"] = turn_outcome
-    msg = system_event_message(kind, text, sender_id=HARNESS_NOTICE_SENDER_PREFIX + notice, meta=event_meta)
+    # Hidden interrupt checkpoints are already runtime evidence, not human UI copy (they may
+    # preserve a model's interrupted draft). Do not replace that evidence with a generic notice.
+    neutral_text = text if display_kind == "hidden" else _HARNESS_NOTICE_EVENT_TEXT.get(notice)
+    if neutral_text is None:
+        neutral_text = ("The turn was interrupted before the model replied." if kind == "interrupt"
+                        else "The turn ended before delivering a response.")
+    msg = system_event_message(kind, neutral_text, sender_id=HARNESS_NOTICE_SENDER_PREFIX + notice, meta=event_meta)
+    if display_kind != "hidden":
+        msg["display_metadata"] = {HARNESS_NOTICE_DISPLAY_TEXT: text}
     if turn_outcome is not None:
         msg["turn_outcome"] = turn_outcome
     if display_kind:
@@ -207,6 +229,9 @@ def project_harness_notice_for_display(msg: Mapping[str, Any]) -> Mapping[str, A
     if display_role(msg) == msg.get("role"):
         return msg
     projected = {**msg, "role": "assistant"}
+    display_text = (msg.get("display_metadata") or {}).get(HARNESS_NOTICE_DISPLAY_TEXT)
+    if isinstance(display_text, str):
+        projected["content"] = display_text
     if projected.get("display_kind") == HARNESS_NOTICE_DISPLAY_KIND:
         projected.pop("display_kind")
     return projected
