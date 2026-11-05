@@ -70,7 +70,7 @@ def legacy_db(tmp_path):
     # Rows that predate the topology triggers: clear the stamps the insert trigger just wrote.
     conn.execute("UPDATE sessions SET root_session_id = NULL, depth = NULL")
     conn.execute("UPDATE sessions SET root_session_id = 'elsewhere' WHERE id = 'hook'")  # a stored value wins
-    from tools.delegate_session_store import _SCHEMA as DELEGATE_SESSIONS_SCHEMA
+    from agent.session_directory import LEGACY_DELEGATE_SESSIONS_SCHEMA as DELEGATE_SESSIONS_SCHEMA
     conn.executescript(DELEGATE_SESSIONS_SCHEMA)
     conn.execute("INSERT INTO delegate_sessions (session_id, owner_session_id, current_session_id, title, "
                  "initial_goal, assignment, context, workspace, forked_context, route_descriptor, model, provider, "

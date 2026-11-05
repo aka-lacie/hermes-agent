@@ -105,6 +105,33 @@ def _effective_kind(row) -> Optional[str]:
     return None
 
 
+# TODO(phase5): the retired parallel store's DDL, kept only so migration fixtures (and the read shim's tests)
+# can build a pre-unified store. Nothing in the runtime creates this table any more.
+LEGACY_DELEGATE_SESSIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS delegate_sessions (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    owner_session_id TEXT NOT NULL,
+    current_session_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    initial_goal TEXT NOT NULL,
+    assignment TEXT NOT NULL,
+    context TEXT NOT NULL,
+    workspace TEXT,
+    forked_context INTEGER NOT NULL DEFAULT 0,
+    route_descriptor TEXT,
+    model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    role TEXT NOT NULL,
+    depth INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running', 'idle', 'closed')),
+    created_at REAL NOT NULL,
+    last_activity_at REAL NOT NULL,
+    run_token TEXT,
+    runner TEXT
+)
+"""
+
+
 def _legacy_delegate(conn, session_id: str) -> Optional[dict]:
     """TODO(phase5): one-way read shim for pre-unified ``delegate_sessions`` rows (2f copies them into the
     sessions columns; this only fills what a not-yet-migrated store still keeps there). Never written."""
