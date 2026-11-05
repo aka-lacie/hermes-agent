@@ -1268,7 +1268,7 @@
  },
  {
   "path": "cron/scheduler_delivery.py",
-  "symbol": "_deliver_result",
+  "symbol": "_wrapped_delivery_content",
   "rule": "literal",
   "detail": "Cronjob Response:",
   "count": 1

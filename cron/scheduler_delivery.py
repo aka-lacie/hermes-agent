@@ -95,6 +95,9 @@ def _cron_mirror_delivery_enabled(job: dict, cfg: Optional[dict] = None) -> bool
     independently of this knob (the seed IS that feature) — this governs only the thread-surface
     mirror. ``mirror_to_session`` runs at a turn boundary, so it is alternation- and cache-safe.
     """
+    from cron.session_delivery import platform_only
+    if platform_only(job):
+        return False  # delivery_target kind=platform: the channel only, no transcript row anywhere
     per_job = job.get("attach_to_session")
     if isinstance(per_job, bool):
         return per_job
@@ -1413,6 +1416,9 @@ def _seed_live_delivery_sessions(t: _TargetDelivery, delivered_message_id) -> No
     """After a confirmed live send, seed continuation session(s) and run the generic mirror.
     Thread seeding is deferred here so open-succeeds/deliver-fails never seeds an unseen brief."""
     job = t.job
+    from cron.session_delivery import platform_only
+    if platform_only(job):
+        return  # delivery_target kind=platform: never seed a continuation session
     origin = t.origin
     seed_kwargs = dict(
         chat_name=origin.get("chat_name"), is_dm=t.is_dm_target, scope_id=origin.get("scope_id"))
@@ -1785,15 +1791,36 @@ def _unresolved_delivery_outcome(job: dict, for_failure: bool) -> Optional[str]:
     return msg
 
 
+def _wrapped_delivery_content(job: dict, content: str, wrap_response: bool) -> str:
+    """The delivered text: the job header/footer unless ``cron.wrap_response`` is false."""
+    if not wrap_response:
+        return content
+    task_name = job.get("name", job["id"])
+    return (
+        f"Cronjob Response: {task_name}\n"
+        f"(job_id: {job.get('id', '')})\n"
+        f"-------------\n\n"
+        f"{content}\n\n"
+        "To stop or manage this job, send me a new message "
+        f"(e.g. \"stop reminder {task_name}\")."
+    )
+
+
 def _deliver_result(
     job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
 ) -> Optional[str]:
     """Deliver job output to the configured target(s). With ``adapters``/``loop`` (gateway
     running) the live adapter is tried first (E2EE rooms can't use the standalone HTTP path), then
     standalone fallback. ``for_failure=True`` routes failure-category notices through the job's
-    ``failure_deliver`` override when present (NS-788). Returns None on success, else an error."""
+    ``failure_deliver`` override when present (NS-788). Returns None on success, else an error.
+    A job's ``delivery_target`` decides first (cron/session_delivery.py): a session admission, one channel
+    (this delivery on a rewritten copy, mirror off), or nothing."""
     job.pop("_bot_chat_delivery_receipts", None)
     job.pop("_notification_all_targets_suppressed", None)
+    from cron.session_delivery import route_declared
+    handled, outcome = route_declared(job, content, _deliver_result, adapters, loop, for_failure=for_failure)
+    if handled:
+        return outcome
     targets = _resolve_delivery_targets(job, for_failure=for_failure)
     if not targets:
         _record_delivery_verification(job, [])
@@ -1834,18 +1861,7 @@ def _deliver_result(
     # Targets acked with NO evidence (bare SendResult(success=True) — Slack/Matrix/Mattermost);
     # persisted as ``last_delivery_unverified`` so `hermes cron list` shows it.
     unverified_targets: list = []
-    if wrap_response:
-        task_name = job.get("name", job["id"])
-        delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job.get('id', '')})\n"
-            f"-------------\n\n"
-            f"{content}\n\n"
-            "To stop or manage this job, send me a new message "
-            f"(e.g. \"stop reminder {task_name}\")."
-        )
-    else:
-        delivery_content = content
+    delivery_content = _wrapped_delivery_content(job, content, wrap_response)
 
     from gateway.platforms.base import BasePlatformAdapter
     # Bridge media-policy config into the env vars the path validator reads. The gateway does this
