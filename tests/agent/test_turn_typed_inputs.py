@@ -54,9 +54,11 @@ def test_length_continuation_nudge_is_a_typed_system_event(loop_agent):
     assert nudge["role"] == "user" and nudge["sender_kind"] == "system"
     assert nudge["part_kind"] == "continuation_nudge" and nudge["sender_id"] == "system:continuation_nudge"
     assert nudge["_parts"] == [mp.system_event("continuation_nudge", nudge["content"])]
-    # The wire still carries the same text, and no provenance key reaches the provider.
+    # The wire renderer frames the event as one system-reminder block, and no provenance key reaches
+    # the provider.
     wire_nudge = wire[-1]
-    assert wire_nudge["role"] == "user" and wire_nudge["content"] == nudge["content"]
+    assert wire_nudge["role"] == "user"
+    assert wire_nudge["content"] == f'<system-reminder kind="continuation_nudge">\n{nudge["content"]}\n</system-reminder>'
     assert not {"_parts", "sender_kind", "sender_id", "part_kind"} & set(wire_nudge)
 
 

@@ -1456,7 +1456,10 @@ def build_api_messages(
         # the same set, so it never prices bytes the provider never receives.
         _api_content = api_msg.pop("api_content", None)
         for key in PERSISTENCE_ONLY_MESSAGE_FIELDS:
-            api_msg.pop(key, None)
+            # ``_parts`` survives to the render point (agent.wire_render, in assemble_api_request),
+            # which consumes it; the estimator never prices it.
+            if key != MESSAGE_PARTS:
+                api_msg.pop(key, None)
 
         # Inject ephemeral context (memory prefetch + pre_llm_call user hooks)
         # at API time only; `messages` is untouched beyond the api_content stamp.

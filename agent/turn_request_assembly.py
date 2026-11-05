@@ -13,12 +13,14 @@ from dataclasses import dataclass
 import logging
 from typing import Any
 
+from agent.message_parts import append_parts, has_parts, turn_injection
 from agent.message_sanitization import _sanitize_messages_surrogates
 from agent.usage_anchor import anchored_context_tokens
 from agent.prompt_caching import build_prompt_cache_plan, effective_cache_ttl
 from agent.turn_context import build_api_messages
 
 logger = logging.getLogger("agent.conversation_loop")
+MOA_INJECTION_KIND = "moa_guidance"
 
 
 @dataclass
@@ -44,6 +46,8 @@ def _append_moa_context(agent: Any, api_messages: Any, moa_config: Any, original
         from agent.message_content import flatten_message_text as _flatten_mt
         from agent.moa_loop import _preset_temperature, aggregate_moa_context
 
+        from agent.wire_render import render_messages
+
         _moa_context = aggregate_moa_context(
             user_prompt=(
                 original_user_message
@@ -52,7 +56,9 @@ def _append_moa_context(agent: Any, api_messages: Any, moa_config: Any, original
                 # str()-ing parts, which would leak base64 image payloads.
                 else _flatten_mt(original_user_message)
             ),
-            api_messages=api_messages,
+            # Advisors read the conversation as the main model will: rendered (this path runs before
+            # the request's render point, so it renders a view of its own).
+            api_messages=render_messages(agent, api_messages),
             reference_models=moa_config.get("reference_models") or [],
             aggregator=moa_config.get("aggregator") or {},
             temperature=_preset_temperature(moa_config, "reference_temperature"),
@@ -72,6 +78,11 @@ def _append_moa_context(agent: Any, api_messages: Any, moa_config: Any, original
         if not _moa_context:
             return
         for _msg in reversed(api_messages):
+            if _msg.get("role") == "user" and has_parts(_msg):
+                # Typed row (a per-call clone): the advisors' context is one more injection part, so
+                # the render point presents it without touching the row's plain view.
+                append_parts(_msg, [turn_injection(MOA_INJECTION_KIND, _moa_context)])
+                break
             if _msg.get("role") == "user":
                 _base = _msg.get("content", "")
                 if isinstance(_base, str):
@@ -151,6 +162,14 @@ def assemble_api_request(
     from agent.anthropic_thinking_replay import apply_rejected_thinking_suppression
 
     apply_rejected_thinking_suppression(agent, api_messages)
+
+    # THE render point (agent.wire_render): typed rows become wire content here, after the final
+    # replacement hook and before every send-time pass, so sanitize / eviction / merge / whitespace /
+    # cache plan all see the bytes the provider receives. Live and replayed rows carry the same parts,
+    # so they render byte-identically.
+    from agent.wire_render import render_messages
+
+    api_messages = render_messages(agent, api_messages)
 
     # Runs unconditionally (not gated on context_compressor) so orphaned tool
     # results from session loading or manual message edits are always caught.

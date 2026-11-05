@@ -52,9 +52,9 @@ PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
      MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID,
      # The alternation repair's row counts: an in-place compaction reads them off the live dict.
      MERGED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS, RETIRED_DURABLE_ROWS,
-     # Provenance (agent/message_parts.py). ``content`` is the parts' plain view, so the request
-     # carries the same text without them and the estimator never prices it twice. TODO(2c): the wire
-     # renderer reads ``_parts`` off the canonical dict before this pop, never off the outgoing copy.
+     # Provenance (agent/message_parts.py): never priced, never sent. ``build_api_messages`` keeps
+     # ``_parts`` on the per-call clone for the one render point (agent.wire_render), which consumes it
+     # (adapter-owned routes keep it for their adapter; the transport's ``_`` sweep removes it).
      MESSAGE_PARTS, ASSISTANT_ORIGIN, *PROVENANCE_FIELDS}
 ) | REPAIR_BOOKKEEPING_FIELDS
 

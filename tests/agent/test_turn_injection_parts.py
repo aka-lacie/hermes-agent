@@ -55,3 +55,18 @@ def test_injections_ride_the_canonical_dict_and_reach_an_early_row():
     assert msg["content"] == "what changed?"  # injections never enter the plain view
     assert "api_content" not in msg
     assert db.calls and db.calls[0][1] == 7 and db.calls[0][3] == msg["_parts"]
+def test_typed_current_turn_gets_no_sidecar_composition():
+    msg = {"role": "user"}
+    mp.set_parts(msg, [mp.human_message("hi")])
+    mp.append_parts(msg, [mp.turn_injection("jev_system1", "hint")])
+    agent = SimpleNamespace(
+        _current_turn_timestamp=0.0, ephemeral_system_prompt=None, _should_sanitize_tool_calls=lambda: False,
+        _copy_reasoning_content_for_api=lambda src, dst: None)
+    with patch("agent.image_replay.replay_for_agent"), \
+            patch("agent.anthropic_thinking_replay.apply_rejected_thinking_suppression"):
+        api_messages, _ = build_api_messages(
+            agent, [msg], current_turn_user_idx=0, ext_prefetch_cache="", plugin_user_context="hint",
+            moa_config=None, active_system_prompt="")
+    # The clone still carries the parts for the render point; nothing was appended to content.
+    assert api_messages[0]["content"] == "hi"
+    assert api_messages[0]["_parts"] == msg["_parts"]

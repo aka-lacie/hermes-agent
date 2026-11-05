@@ -2135,12 +2135,16 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
         # MoA: agent.model is the virtual preset; use the real aggregator so Gemini keeps thought_signature.
         agg_slot = getattr(getattr(agent, "client", None), "last_aggregator_slot", None)
         sanitize_model = (agg_slot or {}).get("model") or sanitize_model
+    from agent.message_parts import MESSAGE_PARTS
+    from agent.wire_render import render_messages
+
     api_messages = []
     for msg in messages:
         api_msg = msg.copy()
         agent._copy_reasoning_content_for_api(msg, api_msg)
         for key in _SUMMARY_FOREIGN_MESSAGE_KEYS:
-            api_msg.pop(key, None)
+            if key != MESSAGE_PARTS:  # consumed by the render below, before any sweep
+                api_msg.pop(key, None)
         # Mirror of the transport's role-qualified strip: ``name`` is
         # schema-foreign on tool results only (strict providers reject with
         # "contains item with unknown key name"); it stays on user/assistant.
@@ -2159,6 +2163,9 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
         if needs_sanitize:
             agent._sanitize_tool_calls_for_strict_api(api_msg, model=sanitize_model)
         api_messages.append(api_msg)
+    # This path bypasses assemble_api_request, so it renders typed rows itself: the summary request
+    # replays the same wire bytes as the main loop's (agent.wire_render).
+    api_messages = render_messages(agent, api_messages)
 
     effective_system = agent._cached_system_prompt or ""
     if agent.ephemeral_system_prompt:

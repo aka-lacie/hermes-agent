@@ -21,7 +21,7 @@ from agent.message_sanitization import (
 )
 from agent.message_metadata import (
     TOOL_CALL_UIDS, merge_tool_call_uids, per_occurrence_tool_call_uids, record_absorbed_message)
-from agent.message_parts import MESSAGE_PARTS, merge as merge_parts
+from agent.message_parts import MESSAGE_PARTS, RENDERED, merge as merge_parts
 from agent.cache_bounds import publish_lru
 from agent.prompt_builder import STEER_DISPLAY_KIND, steer_user_row
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
@@ -1237,7 +1237,9 @@ def drop_thinking_only_and_merge_users(
             merged.append(m)
         else:
             merged[-1] = {**prev, "content": content}  # copy so caller dicts are never mutated
-            if not merge_parts(merged[-1], m):  # typed rows concatenate parts; untypable content drops them
+            # Typed rows concatenate parts; untypable content drops them. A rendered adapter-route clone
+            # keeps its joined wire text and concatenated parts (agent.wire_render, native renderers).
+            if not merge_parts(merged[-1], m) and not merged[-1].get(RENDERED):
                 merged[-1].pop(MESSAGE_PARTS, None)
             merges += 1
     if dropped == 0 and merges == 0:
