@@ -16,6 +16,7 @@ from agent.reasoning_effort import (
     clamp_reasoning_config, kimi_supported_efforts, requested_effort, tokenhub_effort,
 )
 from agent.message_metadata import DATA_USE, MESSAGE_UID, data_use_requirement
+from agent.message_parts import PROVENANCE_FIELDS
 from agent.message_sanitization import coalesce_tool_call_id, normalize_finish_reason as _normalize_finish_reason
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
@@ -41,7 +42,7 @@ _STRIP_MSG_KEYS = (
     # ``platform_message_id`` is persisted as-is and comes back from replay as ``message_id``
     # (JSONL transcript compat); both are delivery bookkeeping, never model input.
     "platform_message_id", "message_id", "api_content", "anthropic_content_blocks", "bedrock_content_blocks",
-    MESSAGE_UID, DATA_USE,
+    MESSAGE_UID, DATA_USE, *PROVENANCE_FIELDS,  # row provenance: persistence-only, like the uid
 )
 _STRIP_TC_KEYS = ("call_id", "response_item_id")
 _HIGH_EFFORTS = {"high", "xhigh", "max", "ultra"}
