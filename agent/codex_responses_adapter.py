@@ -244,6 +244,13 @@ def _part_type(part: dict[str, Any]) -> str:
     return str(part.get("type") or "").strip().lower()
 
 
+# Role messages the Responses conversion and preflight carry. ``developer`` is harness authority (above
+# ``user`` in the instruction hierarchy): the wire renderer emits it only for turn injections, never for
+# system events (agent.wire_render.ResponsesWireRenderer).
+_INPUT_ROLES = frozenset({"user", "developer"})
+_ROLE_MESSAGE_ROLES = _INPUT_ROLES | {"assistant"}
+
+
 def _text_type_for(role: str) -> str:
     return "output_text" if role == "assistant" else "input_text"
 
@@ -710,7 +717,7 @@ def _chat_messages_to_responses_input(
         if role == "tool":
             emit(_tool_output_items(msg, wire_ids=wire_ids), msg)
             continue
-        if role not in {"user", "assistant"}:
+        if role not in _ROLE_MESSAGE_ROLES:
             continue
         content = msg.get("content", "")
         content_parts = _chat_content_to_responses_parts(content, role=role)  # [] unless a list
@@ -721,7 +728,9 @@ def _chat_messages_to_responses_input(
         )
         def wire_content(value: Any) -> Any:
             return [{"type": text_type, "text": value}] if typed_text_only and isinstance(value, str) else value
-        if role == "user":
+        if role in _INPUT_ROLES:
+            # ``developer`` (harness turn injections, agent.wire_render) shares the user branch: input
+            # text parts, never the assistant replay path (reasoning items, output_text).
             emit([_role_message_item(role, wire_content(content_parts or content_text))], msg)
             continue
         reasoning_items = [] if not replay_encrypted_reasoning else _replay_reasoning_items(
@@ -942,9 +951,9 @@ def _preflight_message(item: dict[str, Any], idx: int, ctx: _PreflightCtx) -> di
 
 
 def _preflight_role_message(item: dict[str, Any], idx: int, ctx: _PreflightCtx) -> dict[str, Any]:
-    """``user``/``assistant`` role message, typed or untyped; string content or Responses parts."""
+    """``user``/``developer``/``assistant`` role message, typed or untyped; string content or Responses parts."""
     role = item.get("role")
-    if role not in {"user", "assistant"}:
+    if role not in _ROLE_MESSAGE_ROLES:
         raise ValueError(
             f"Codex Responses input[{idx}] has unsupported item shape (type={item.get('type')!r}, role={role!r})."
         )
