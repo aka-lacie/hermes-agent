@@ -29,6 +29,7 @@ from agent.prompt_refresh import refresh_warm_prompt
 from agent.message_metadata import (
     PERSISTENCE_ONLY_MESSAGE_FIELDS, PRE_LLM_BLOCK_WITHHELD_PROMPT, append_message, stamp_message_timestamp,
 )
+from agent.message_parts import current_turn_inputs
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_native_anthropic_request_tokens_rough,
@@ -849,12 +850,14 @@ def _withhold_blocked_prompt(agent: Any, turn_user_msg: dict[str, Any], typed: A
 def _collect_pre_llm_call_context(
     agent: Any, *, effective_task_id: str, turn_id: str, original_user_message: Any,
     messages: list[Any], conversation_history: Optional[list[Any]], blocks: Optional[list[str]] = None,
+    current_turn_user_idx: Optional[int] = None,
 ) -> str:
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
     runaway plugin can't inflate every subsequent turn's prompt. Each
     ``{"action": "block", "message": ...}`` veto is appended to ``blocks`` (#57364); one
-    without a message is ignored, as for ``pre_tool_call``."""
+    without a message is ignored, as for ``pre_tool_call``. ``inputs`` (additive) is a read-only copy
+    of the current turn's typed parts (``agent.message_parts``; empty for an untyped turn)."""
     if getattr(agent, "_persist_disabled", False):
         return ""
     try:
@@ -871,6 +874,7 @@ def _collect_pre_llm_call_context(
             platform=getattr(agent, "platform", None) or "",
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
+            inputs=current_turn_inputs(messages, current_turn_user_idx),
         )
         try:
             # Spill oversized per-hook context to disk so a runaway plugin can't inflate every subsequent
@@ -1241,6 +1245,7 @@ def build_turn_context(
             agent, effective_task_id=effective_task_id, turn_id=turn_id,
             original_user_message=original_user_message, messages=messages,
             conversation_history=conversation_history, blocks=_blocks,
+            current_turn_user_idx=current_turn_user_idx,
         )
     plugin_block_message = _blocks[0] if _blocks else ""  # first veto wins
     compaction = CompactionOutcome(

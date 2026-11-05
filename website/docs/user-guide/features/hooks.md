@@ -694,6 +694,7 @@ def my_callback(session_id: str, user_message: str, conversation_history: list,
 | `is_first_turn` | `bool` | `True` if this is the first turn of a new session, `False` on subsequent turns |
 | `model` | `str` | The model identifier (e.g. `"anthropic/claude-sonnet-4.6"`) |
 | `platform` | `str` | Where the session is running: `"cli"`, `"telegram"`, `"discord"`, etc. |
+| `inputs` | `list` | The current turn's typed parts (JSON-shaped dicts: `human`, `system_event`, `injection`, `media`; see `agent/message_parts.py`). A copy: treat it as read-only. Empty when the turn's message carries no typing |
 
 **Fires:** In `agent/turn_context.py` (turn preparation for `run_conversation()` in `agent/conversation_loop.py`), after context compression but before the main `while` loop. Fires once per `run_conversation()` call (i.e. once per user turn), not once per API call within the tool loop.
 
