@@ -29,7 +29,7 @@ from agent.prompt_refresh import refresh_warm_prompt
 from agent.message_metadata import (
     PERSISTENCE_ONLY_MESSAGE_FIELDS, PRE_LLM_BLOCK_WITHHELD_PROMPT, append_message, stamp_message_timestamp,
 )
-from agent.message_parts import current_turn_inputs
+from agent.message_parts import MESSAGE_PARTS, current_turn_inputs, has_parts
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_native_anthropic_request_tokens_rough,
@@ -875,14 +875,19 @@ def _withhold_blocked_prompt(agent: Any, turn_user_msg: dict[str, Any], typed: A
 def _collect_pre_llm_call_context(
     agent: Any, *, effective_task_id: str, turn_id: str, original_user_message: Any,
     messages: list[Any], conversation_history: Optional[list[Any]], blocks: Optional[list[str]] = None,
-    current_turn_user_idx: Optional[int] = None,
+    current_turn_user_idx: Optional[int] = None, injections: Optional[list[tuple[str, str]]] = None,
 ) -> str:
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
     runaway plugin can't inflate every subsequent turn's prompt. Each
     ``{"action": "block", "message": ...}`` veto is appended to ``blocks`` (#57364); one
     without a message is ignored, as for ``pre_tool_call``. ``inputs`` (additive) is a read-only copy
-    of the current turn's typed parts (``agent.message_parts``; empty for an untyped turn)."""
+    of the current turn's typed parts (``agent.message_parts``; empty for an untyped turn).
+
+    ``injections`` collects one ``(kind, text)`` pair per context result, in order: the turn
+    injections a typed turn carries as parts. The kind is the result's own ``"kind"`` (a
+    ``{"context": ..., "kind": ...}`` result) or :data:`PLUGIN_CONTEXT_INJECTION_KIND` for the legacy
+    ``{"context": ...}`` / bare-string shapes."""
     if getattr(agent, "_persist_disabled", False):
         return ""
     try:
@@ -912,14 +917,18 @@ def _collect_pre_llm_call_context(
             _spill_if_oversized = None  # type: ignore[assignment]
             _spill_config_cached = None
         _ctx_parts: list[str] = []
+        _kinds: list[str] = []
         for r in _pre_results:
             if isinstance(r, dict) and r.get("action") == "block":
                 _msg = r.get("message")
                 if blocks is not None and isinstance(_msg, str) and _msg.strip():
                     blocks.append(_msg.strip())
                 continue
+            _kind = PLUGIN_CONTEXT_INJECTION_KIND
             if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])
+                if isinstance(r.get("kind"), str) and r["kind"].strip():
+                    _kind = r["kind"].strip()
             elif isinstance(r, str) and r.strip():
                 _piece = r
             else:
@@ -933,14 +942,25 @@ def _collect_pre_llm_call_context(
                 except Exception as _spill_exc:
                     logger.warning("hook context spill failed: %s", _spill_exc)
             _ctx_parts.append(_piece)
+            _kinds.append(_kind)
+        if injections is not None:
+            injections.extend(zip(_kinds, _ctx_parts))
         return "\n\n".join(_ctx_parts)
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
     return ""
 
 
+# Kind of a ``pre_llm_call`` context result that names none, and of the gateway/plugin per-turn notes,
+# as turn injection parts (agent.message_parts.turn_injection).
+PLUGIN_CONTEXT_INJECTION_KIND = "plugin_context"
+TURN_NOTE_INJECTION_KIND = "turn_note"
+MEMORY_INJECTION_KIND = "memory_context"
+
+
 def _merge_gateway_notes(
-    agent: Any, messages: list[Any], current_turn_user_idx: int, plugin_user_context: str
+    agent: Any, messages: list[Any], current_turn_user_idx: int, plugin_user_context: str,
+    injections: Optional[list[tuple[str, str]]] = None,
 ) -> str:
     """Must-deliver per-turn notes ride the user-message injection channel (one-shot) so the
     ephemeral system prompt stays byte-stable: the gateway's staged notes, plugin go-live notices no
@@ -963,6 +983,8 @@ def _merge_gateway_notes(
     if isinstance(_gw_turn_content, list):
         append_notes_to_multimodal_content(_gw_turn_content, _turn_notes)
         return plugin_user_context
+    if injections is not None:
+        injections.append((TURN_NOTE_INJECTION_KIND, _turn_notes))
     return (
         plugin_user_context + "\n\n" + _turn_notes if plugin_user_context else _turn_notes
     )
@@ -1068,6 +1090,36 @@ def _stamp_api_content_sidecar(
                 _db.set_latest_user_api_content(agent.session_id, durable_content, _api_content)
         except Exception:
             logger.warning("api_content backfill failed for session=%s", agent.session_id or "none", exc_info=True)
+
+
+def _append_turn_injections(
+    agent: Any, turn_user_msg: dict[str, Any], ext_prefetch_cache: str, injections: list[tuple[str, str]],
+) -> None:
+    """Append this turn's context to a typed user dict as injection parts: the fenced memory recall
+    first, then each ``pre_llm_call`` result and the per-turn notes, in the order the untyped sidecar
+    joins them. The canonical dict carries them, so the turn-start flush persists them in
+    ``parts_json`` and every replay renders the bytes this turn sends. A row another writer
+    materialized first is updated in place (same ``_row_id``-under-lock protocol as the sidecar)."""
+    from agent.message_parts import append_parts, turn_injection
+    from agent.session_persistence import _persist_lock
+
+    pieces = ([(MEMORY_INJECTION_KIND, build_memory_context_block(ext_prefetch_cache))] if ext_prefetch_cache else [])
+    parts = [turn_injection(kind, text) for kind, text in [*pieces, *injections]
+             if isinstance(text, str) and text.strip() and isinstance(kind, str) and kind]
+    if not parts:
+        return
+    with _persist_lock(agent):
+        append_parts(turn_user_msg, parts)
+        _row_id = turn_user_msg.get("_row_id")
+        _db = getattr(agent, "_session_db", None)
+        _writer = getattr(_db, "set_message_parts", None)
+        if not callable(_writer) or not isinstance(_row_id, int):
+            return
+        try:
+            _writer(turn_user_msg.get("_submit_row_session_id") or agent.session_id, _row_id,
+                    turn_user_msg["content"], turn_user_msg[MESSAGE_PARTS])
+        except Exception:
+            logger.warning("typed injection backfill failed for session=%s", agent.session_id or "none", exc_info=True)
 
 
 def _append_multimodal_context(
@@ -1266,12 +1318,13 @@ def build_turn_context(
     # Before turn-start compaction: its summary request quotes recent user turns, this one included,
     # so a vetoed prompt skips it (the turn makes no model call at all).
     _blocks: list[str] = []
+    _injections: list[tuple[str, str]] = []
     with bind_fork_source(agent, messages):
         plugin_user_context = _collect_pre_llm_call_context(
             agent, effective_task_id=effective_task_id, turn_id=turn_id,
             original_user_message=original_user_message, messages=messages,
             conversation_history=conversation_history, blocks=_blocks,
-            current_turn_user_idx=current_turn_user_idx,
+            current_turn_user_idx=current_turn_user_idx, injections=_injections,
         )
     plugin_block_message = _blocks[0] if _blocks else ""  # first veto wins
     compaction = CompactionOutcome(
@@ -1291,7 +1344,7 @@ def build_turn_context(
     # prompt in memory for the whole conversation and would never re-check its skills index.
     stage_skills_index_note(agent, active_system_prompt, messages)
     plugin_user_context = _merge_gateway_notes(
-        agent, messages, current_turn_user_idx, plugin_user_context
+        agent, messages, current_turn_user_idx, plugin_user_context, injections=_injections,
     )
 
     _bind_interrupt_scope(agent, ra)
@@ -1309,6 +1362,12 @@ def build_turn_context(
     if 0 <= current_turn_user_idx < len(messages) and messages[current_turn_user_idx].get("role") == "user":
         if plugin_block_message:
             _withhold_blocked_prompt(agent, messages[current_turn_user_idx], original_user_message)
+        elif has_parts(messages[current_turn_user_idx]):
+            # Typed turn: the context rides as injection parts on the canonical dict (persisted in
+            # parts_json, rendered at the wire), never as an api_content sidecar.
+            if getattr(agent, "api_mode", None) != "codex_app_server":
+                _append_turn_injections(
+                    agent, messages[current_turn_user_idx], ext_prefetch_cache, _injections)
         elif isinstance(messages[current_turn_user_idx].get("content"), list):
             _append_multimodal_context(
                 agent, messages[current_turn_user_idx], ext_prefetch_cache, plugin_user_context,
@@ -1401,7 +1460,9 @@ def build_api_messages(
 
         # Inject ephemeral context (memory prefetch + pre_llm_call user hooks)
         # at API time only; `messages` is untouched beyond the api_content stamp.
-        if msg is current_turn_message and msg.get("role") == "user":
+        if msg is current_turn_message and msg.get("role") == "user" and has_parts(msg):
+            pass  # typed turn: its injections are parts; the wire renderer presents them
+        elif msg is current_turn_message and msg.get("role") == "user":
             if isinstance(_api_content, str) and _api_content:
                 # Reuse the prologue's stamp so sidecar and wire cannot drift
                 # and every pass this turn sends identical bytes.

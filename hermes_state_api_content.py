@@ -65,3 +65,22 @@ class SessionApiContentMixin:
             "UPDATE messages SET api_content = ? WHERE id = ? AND session_id = ? "
             "AND role = 'user' AND active = 1 AND content IS ?",
             (_scrub_surrogates(api_content), row_id, session_id, self._encode_content(content)))
+
+    def set_message_parts(self, session_id: str, row_id: int, content: Any, parts: list) -> int:
+        """Rewrite ``parts_json`` on ONE known active user row whose ``content`` is still *content*.
+
+        The typed counterpart of :meth:`set_message_api_content`: the turn prologue appends this
+        turn's injection parts (``pre_llm_call`` results, memory recall, gateway notes) to the
+        canonical user dict, and a row another writer materialized first (in-place preflight
+        compaction, a close/early flush that raced the prologue) gets them here, so a replay renders
+        the bytes the live turn sent. Injections are not part of the plain view, so ``content`` is
+        unchanged and doubles as the guard against a racing rewrite."""
+        from agent.message_parts import encode_parts_json, plain_text
+        if not session_id or isinstance(row_id, bool) or not isinstance(row_id, int) or row_id <= 0:
+            return 0
+        if not isinstance(content, str) or plain_text(parts) != content:
+            return 0  # parts_json is written only while content is their plain view
+        return self._write_rowcount(
+            "UPDATE messages SET parts_json = ? WHERE id = ? AND session_id = ? "
+            "AND role = 'user' AND active = 1 AND content IS ?",
+            (encode_parts_json(parts), row_id, session_id, self._encode_content(content)))
