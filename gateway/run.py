@@ -38,7 +38,6 @@ from agent.conversation_compression import (
     COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE, IDLE_COMPACTION_STATUS_TEMPLATE,
     PRE_API_COMPRESSION_STATUS_TEMPLATE, PREFLIGHT_COMPRESSION_STATUS_TEMPLATE)
 from agent.conversation_compression_archive import MERGED_DURABLE_ROWS, RETIRED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS
-from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.interrupt_compat import request_hard_interrupt
 from agent.message_metadata import ABSORBED_MESSAGE_UIDS, MESSAGE_UID, copy_identity_fields, is_compaction_scaffolding, scaffolding_replay_fields
 from agent.message_parts import has_parts, typed_fields
@@ -711,11 +710,6 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     if _eos_start >= 0:
         text = text[:_eos_start].rstrip()
 
-    # Cancellation metadata, not prose; ACP/TUI already suppress this sentinel, chat surfaces should too.
-    # See #7921.
-    if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
-        return ""
-
     redacted = _redact_gateway_user_facing_secrets(str(text))
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
@@ -1236,44 +1230,6 @@ def _has_replayable_sidecar(role: Any, content: Any, msg: dict[str, Any]) -> boo
     )
 
 
-def _discord_note_pattern() -> "re.Pattern[str]":
-    """Regex for exactly the Discord triggering-message note ``discord_triggering_note`` produces."""
-    from gateway.run_inbound import discord_triggering_note
-
-    head, _, tail = discord_triggering_note("\x00").partition("\x00")
-    return re.compile(re.escape(head) + r"[^`\n]+" + re.escape(tail) + r"\n\n")
-
-
-def _sidecar_matches_rendered_user(sidecar: Any, rendered: str, content: str) -> bool:
-    """True when an ``api_content`` sidecar is the bytes sent for this rendered user row.
-
-    The sent message is ``rendered`` optionally followed by ``\\n\\n<context>``. On Discord the
-    live turn also carried the routing note between the timestamp and the authored text
-    (``[ts] [Triggering message id: …]\\n\\n<text>``) while the durable ``content`` keeps only
-    ``<text>`` — so a plain ``startswith(rendered)`` check rejected every Discord sidecar on
-    rebuild and broke the prompt-cache prefix at each user row. Accept exactly that one
-    known note shape, nothing else.
-    """
-    if not isinstance(sidecar, str) or not sidecar:
-        return False
-
-    def _is_sent(body: str) -> bool:
-        return sidecar == body or sidecar.startswith(body + "\n\n")
-
-    if _is_sent(rendered):
-        return True
-    if not content or not rendered.endswith(content):
-        return False
-    ts_head = rendered[: len(rendered) - len(content)]
-    if not sidecar.startswith(ts_head):
-        return False
-    note = _discord_note_pattern().match(sidecar, len(ts_head))
-    if note is None:
-        return False
-    rest = sidecar[note.end():]
-    return rest == content or rest.startswith(content + "\n\n")
-
-
 def _build_gateway_agent_history(
     history: list[dict[str, Any]], *, channel_prompt: Optional[str] = None,
     inject_timestamps: bool = False) -> tuple[list[dict[str, Any]], Optional[str]]:
@@ -1281,10 +1237,7 @@ def _build_gateway_agent_history(
 
     Observed context stays out of ``conversation_history`` so consecutive-user repair can't merge it in."""
     from hermes_time import get_timezone as _get_msg_tz
-    from gateway.message_timestamps import (
-        render_user_content_with_timestamp as _render_msg_ts,
-        strip_leading_message_timestamps as _strip_msg_ts,
-    )
+    from gateway.legacy_untyped_replay import legacy_render_untyped_user, legacy_untyped_user_body
 
     _msg_tz = _get_msg_tz()
     agent_history: list[dict[str, Any]] = []
@@ -1299,8 +1252,8 @@ def _build_gateway_agent_history(
 
         content = msg.get("content")
         if separate_observed_context and msg.get("observed") and role == "user" and content:
-            if inject_timestamps and isinstance(content, str):
-                content = _render_msg_ts(content, msg.get("timestamp"), tz=_msg_tz)
+            if inject_timestamps and isinstance(content, str) and not has_parts(msg):
+                content = legacy_render_untyped_user(content, msg.get("timestamp"), tz=_msg_tz)
             observed_group_context.append(str(content).strip())
             continue
 
@@ -1312,35 +1265,19 @@ def _build_gateway_agent_history(
             agent_history.append(_build_replay_entry(role, content, msg, preserve_timestamp=(role == "user")))
         elif content or _has_replayable_sidecar(role, content, msg):
             replay_timestamp = msg.get("timestamp")
-            # Clean before rendering: a timestamp prefix hides recovery notes
-            # from the startswith-based stripper. Retain an embedded original time.
+            # An untyped user row (no parts): the legacy shim (gateway/legacy_untyped_replay.py, deleted in
+            # Phase 5) drops replayed auto-continue notes and keeps an embedded original time.
             if role == "user":
-                if isinstance(content, str):
-                    body, embedded_timestamp = _strip_msg_ts(content, tz=_msg_tz)
-                    clean_body = _strip_auto_continue_noise(body)
-                    if clean_body != body:
-                        content = clean_body
-                        if embedded_timestamp is not None:
-                            replay_timestamp = embedded_timestamp
+                content, embedded_timestamp = legacy_untyped_user_body(content, tz=_msg_tz)
+                if embedded_timestamp is not None:
+                    replay_timestamp = embedded_timestamp
                 if not content:
                     continue
             # Keep user timestamps for the stale-dangerous-confirmation stripper in agent/replay_cleanup.py.
+            # A kept ``api_content`` sidecar is authoritative: it is exactly what was sent (never re-validated).
             entry = _build_replay_entry(role, content, msg, preserve_timestamp=(role == "user"))
             if inject_timestamps and role == "user" and isinstance(content, str) and not is_compaction_scaffolding(msg):
-                rendered = _render_msg_ts(content, replay_timestamp, tz=_msg_tz)
-                # Preserve only a sidecar matching the complete rendered message,
-                # optionally followed by the normal context separator. Cleanup
-                # above already invalidated sidecars containing stripped content.
-                sidecar = entry.get("api_content")
-                if rendered != content and sidecar and not _sidecar_matches_rendered_user(
-                    sidecar, rendered, content
-                ):
-                    entry.pop("api_content", None)
-                entry["content"] = rendered
-            if msg.get("mirror"):
-                mirror_src = msg.get("mirror_source", "another session")
-                entry["content"] = f"[Delivered from {mirror_src}] {entry['content']}"
-                entry.pop("api_content", None)  # prefix rewrite: the sidecar no longer matches
+                entry["content"] = legacy_render_untyped_user(content, replay_timestamp, tz=_msg_tz)
             agent_history.append(entry)
 
     # Keep gateway resume byte-identical to the TUI resume and send paths. The
@@ -1423,28 +1360,6 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool", "image
 # surface and the send path share one implementation.
 from agent.replay_cleanup import canonicalize_replay_history
 
-
-_AUTO_CONTINUE_NOTE_PREFIX = "[System note: Your previous turn"
-_AUTO_CONTINUE_FALLBACK_PREFIX = "[System note: A new message"
-
-
-def _is_auto_continue_noise(content: Any) -> bool:
-    """Return True if this user-message content is a gateway-injected auto-continue note (never replay it)."""
-    return isinstance(content, str) and content.startswith(
-        (_AUTO_CONTINUE_NOTE_PREFIX, _AUTO_CONTINUE_FALLBACK_PREFIX))
-
-
-def _strip_auto_continue_noise(content: Any) -> Any:
-    """Strip leading persisted auto-continue notes from user text; the trailing real question is preserved."""
-    if not _is_auto_continue_noise(content):
-        return content
-    text = str(content)
-    while _is_auto_continue_noise(text):
-        end = text.find("]")
-        if end < 0:
-            return ""
-        text = text[end + 1 :].lstrip()
-    return text
 
 # Tools whose deliverable is a JSON payload with a local-file path field rather than a literal ``MEDIA:`` tag.
 _JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image")

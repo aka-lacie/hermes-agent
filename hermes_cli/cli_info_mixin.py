@@ -1007,16 +1007,9 @@ class CLIInfoMixin:
                 if enabled_override is not None:
                     self.enabled_toolsets = enabled_override
 
-            # Tell the model tools changed — appended at the END so the prefix cache survives.
-            change_parts = [
-                f"{label} servers: {', '.join(sorted(names))}" for label, names in diff.items() if names
-            ]
-            tool_summary = f"{len(new_tools)} MCP tool(s) now available" if new_tools else "No MCP tools available"
-            change_detail = ". ".join(change_parts) + ". " if change_parts else ""
-            self.conversation_history.append({
-                "role": "user",
-                "content": f"[IMPORTANT: MCP servers have been reloaded. {change_detail}{tool_summary}. The tool list for this conversation has been updated accordingly.]",
-            })
+            # Tell the model tools changed — a typed system_event appended at the END so the prefix cache survives.
+            from agent.harness_events import mcp_reload_message
+            self.conversation_history.append(mcp_reload_message(diff, len(new_tools)))
 
             # Persist now so the session log reflects the refreshed tools list (best-effort).
             if self.agent is not None:

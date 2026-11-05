@@ -327,13 +327,10 @@ def _turn_outcome(result: Any, error_surface: dict | None = None) -> tuple[Any, 
     # step) rather than the bare provider body.  An empty successful turn still renders as empty.
     if (not raw) and result.get("error") and (result.get("failed") or result.get("partial")):
         raw = turn_error_text(result.get("error"), error_surface)
-    # "Operation interrupted: waiting for model response (…)" is cancellation
-    # metadata, not assistant prose (gateway/run.py and ACP suppress it too).
-    # "Operation interrupted: waiting for model response (…)" is cancellation metadata, not assistant prose.
-    # gateway/run.py and the ACP adapter already suppress this sentinel; without this the desktop paints it
-    # as the agent's reply whenever a stop/steer lands mid-request (#7921).
-    if status == "interrupted" and isinstance(raw, str) and raw.strip().startswith(
-            INTERRUPT_WAITING_FOR_MODEL_PREFIX):
+    # The waiting-for-model interrupt notice is cancellation metadata, not assistant prose: the result
+    # flags it (``interrupt_notice``); without this the desktop paints it as the agent's reply whenever a
+    # stop/steer lands mid-request (#7921).
+    if status == "interrupted" and result.get("interrupt_notice"):
         raw = ""
     lr = result.get("last_reasoning")
     last_reasoning = lr.strip() if isinstance(lr, str) and lr.strip() else None

@@ -74,6 +74,8 @@ def completion_payload(row, settled, response, captured):
         complete['error_surface'] = surface
     if response and captured_result.get('response_reused'):
         complete['response_reused'] = True
+    if captured_result.get('interrupt_notice'):
+        complete['interrupt_notice'] = True  # cancellation metadata, not a reply (never matched by text)
     if captured_result.get('local_viewer'):
         if captured_result.get('response_previewed'):
             complete['response_previewed'] = True

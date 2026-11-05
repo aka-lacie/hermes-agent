@@ -99,15 +99,12 @@ class GatewayReplyMixin:
 
     def _final_remainder(self, aid, payload):
         """The part of the settled reply the editor has not been shown yet (exactly-once text)."""
-        from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
-
         text = _text(payload)
         streamed = self._streamed.pop(aid, "")
         shown = self._segments.pop(aid, [])
         cut = self._cut.pop(aid, None)
         # Local interrupt status is metadata; ACP carries it in stop_reason.
-        if not text or (payload.get("outcome") == "cancelled"
-                        and text.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)):
+        if not text or (payload.get("outcome") == "cancelled" and payload.get("interrupt_notice")):
             return ""
         segments = {s.strip() for s in shown}
         if payload.get("response_reused") is True and (

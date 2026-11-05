@@ -41,7 +41,8 @@ def _origin_user_id(entry: dict) -> str:
 def mirror_to_session(
     platform: str, chat_id: str, message_text: str, source_label: str = "cli", thread_id: Optional[str] = None,
     user_id: Optional[str] = None, session_id: Optional[str] = None, *, sender_id: str,
-    exclude_session_id: Optional[str] = None,
+    exclude_session_id: Optional[str] = None, event_kind: str = MIRROR_EVENT_KIND, sender_kind: str = "system",
+    meta: Optional[dict] = None,
 ) -> bool:
     """Append a delivery-mirror notice to the target session's SQLite transcript.
 
@@ -52,7 +53,9 @@ def mirror_to_session(
     ``system_event`` part: it collapses safely into the next user turn via the
     consecutive-user merge and never teaches the model a reply it did not write.
     ``exclude_session_id``: the sending session itself; a send into its own chat is already
-    on record as its tool call, so nothing is mirrored there.
+    on record as its tool call, so nothing is mirrored there. ``event_kind`` / ``sender_kind`` /
+    ``meta`` type a producer's own delivery (``cron`` with the job, ``webhook`` with the route):
+    provenance is structure, never a bracket label prefixed to ``message_text`` (Rule 2).
     Returns True if mirrored, False if no matching session or error. Never raises.
     """
     try:
@@ -68,8 +71,8 @@ def mirror_to_session(
             logger.debug("Mirror: skipped, %s sent into its own session", session_id)
             return False
         _append_to_sqlite(session_id, system_event_message(
-            MIRROR_EVENT_KIND, message_text, sender_id=sender_id,
-            meta={"source": source_label, "platform": platform}))
+            event_kind, message_text, sender_id=sender_id, sender_kind=sender_kind,
+            meta={"source": source_label, "platform": platform, **(meta or {})}))
         logger.debug("Mirror: wrote to session %s (from %s)", session_id, source_label)
         return True
     except Exception as e:

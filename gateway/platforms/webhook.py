@@ -1066,8 +1066,10 @@ class WebhookAdapter(BasePlatformAdapter):
         route = delivery.get("route") or "webhook"
         try:
             from gateway.mirror import mirror_to_session
-            ok = mirror_to_session(platform_name, chat_id, f"[Webhook delivery: {route}]\n{content}",
-                                   source_label="webhook", thread_id=thread_id, sender_id=f"webhook:{route}")
+            # Typed: a ``webhook`` system_event naming its route (meta), never a bracket label (Rule 2).
+            ok = mirror_to_session(platform_name, chat_id, content, source_label="webhook", thread_id=thread_id,
+                                   sender_id=f"webhook:{route}", event_kind="webhook", sender_kind="webhook",
+                                   meta={"route": route})
             logger.log(logging.INFO if ok else logging.DEBUG,
                        "[webhook] Route '%s' delivery %smirrored into %s:%s session", route, "" if ok else "not ",
                        platform_name, chat_id)

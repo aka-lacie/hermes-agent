@@ -860,7 +860,8 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
             result = saved.get("result") or {}
             await self._finish_reply(session_id, held_id, admission_id, {
                 "text": result.get("final_response") or "", "outcome": outcome,
-                "response_reused": result.get("response_reused"), "receipt": True})
+                "response_reused": result.get("response_reused"), "receipt": True,
+                "interrupt_notice": bool(result.get("interrupt_notice"))})
             async with self._changed:
                 self._terminals[admission_id] = {"outcome": outcome}
                 self._changed.notify_all()

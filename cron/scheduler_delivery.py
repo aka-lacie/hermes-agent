@@ -187,8 +187,11 @@ def _cron_display_name(job: dict) -> str:
     return _redact_cron_payload(job.get("name") or job.get("id", "cron"), "job name")
 
 
-def _cron_mirror_message(job: dict, text: str) -> str:
-    return f"[Cron delivery: {_cron_display_name(job)}]\n{text}"
+def _cron_mirror_kwargs(job: dict) -> dict:
+    """``mirror_to_session`` typing for a cron delivery: a ``cron`` system_event from the job (its name
+    and id as meta), never a ``[Cron delivery: …]`` prefix on the text (Rule 2)."""
+    return {"event_kind": "cron", "sender_kind": "cron", "sender_id": _cron_sender_id(job),
+            "meta": {"job_name": _cron_display_name(job), **({"job_id": job["id"]} if job.get("id") else {})}}
 
 
 def _cron_sender_id(job: dict) -> str:
@@ -212,16 +215,16 @@ def _maybe_mirror_cron_delivery(
         return
     try:
         from gateway.mirror import mirror_to_session
-        # USER role + labelled prefix, NOT assistant: an assistant-role mirror lands
+        # USER role + typed cron system_event (job as meta), NOT assistant: an assistant-role mirror lands
         # assistant→assistant and breaks strict alternation; consecutive user turns merge safely.
         # The brief is not the agent speaking; an assistant-role mirror lands as assistant→assistant after
         # the agent's last turn and breaks strict alternation (issue #2221, the exact failure #2313
         # removed). A user-role turn collapses safely via repair_message_sequence's consecutive-user merge
-        # on every provider, and the prefix preserves the "this came from cron" context that the dropped
-        # SQLite mirror metadata would otherwise lose on replay.
+        # on every provider; the event kind and sender (cron:<job>) carry the "this came from cron" context
+        # as structure, and the wire renderer presents it.
         ok = mirror_to_session(
-            platform_name, str(chat_id), _cron_mirror_message(job, text),
-            source_label="cron", thread_id=thread_id, user_id=user_id, sender_id=_cron_sender_id(job))
+            platform_name, str(chat_id), text,
+            source_label="cron", thread_id=thread_id, user_id=user_id, **_cron_mirror_kwargs(job))
         if ok:
             logger.info(
                 "Job '%s': mirrored delivery into %s:%s session transcript",
@@ -304,9 +307,9 @@ def _seed_cron_session(
             _entry = session_store.get_or_create_session(dest_source)
             seeded_session_id = getattr(_entry, "session_id", None)
     return mirror_to_session(
-        platform_name, str(chat_id), _cron_mirror_message(job, text),
-        source_label="cron", thread_id=thread_id, user_id=user_id, sender_id=_cron_sender_id(job),
-        session_id=seeded_session_id,
+        platform_name, str(chat_id), text,
+        source_label="cron", thread_id=thread_id, user_id=user_id, session_id=seeded_session_id,
+        **_cron_mirror_kwargs(job),
     )
 
 
