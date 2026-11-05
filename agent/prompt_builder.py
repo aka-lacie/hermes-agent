@@ -677,7 +677,9 @@ def wire_conventions_section(agent: Any = None, **route: Any) -> str:
 
     It replaces the per-turn copies of that prose (the triggering-message id note, the steer origin
     preamble, the internal-notification footer) for typed rows, and the bracket-marker steering note.
-    Deterministic per route and built once per system-prompt build, so the cached prefix is stable."""
+    Deterministic per route and built once per system-prompt build, so the cached prefix is stable.
+    The default conventions describe sent_at as optional under gateway.message_timestamps.enabled;
+    changing the setting never changes this standing prose."""
     from agent.wire_render import describe_conventions
 
     return describe_conventions(agent, **route)

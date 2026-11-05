@@ -16,6 +16,8 @@ Core default presentation (modelled on Codex CLI 0.163.0 and Claude Code 2.1.316
 - ``human`` ``delivery="turn"``: the raw text; its origin is ONE compact tag line before it,
   ``<origin platform=".." message_id=".." channel_id=".." sent_at=".."/>`` (only the fields present).
 - ``human`` ``delivery="steer"``: one header line ``<steer sent_at=".." message_id=".."/>`` + raw text.
+  Both tags omit ``sent_at`` unless ``gateway.message_timestamps.enabled`` is opted in; timestamps
+  remain stored in canonical parts. This presentation choice is frozen per live agent.
 - ``system_event`` / ``injection``: one ``<system-reminder kind=".." ...>text</system-reminder>`` block
   each (meta as attributes; never instructions); ``peer_message`` renders as
   ``<peer_message from=".." title=".." relation="..">text</peer_message>``.
@@ -103,6 +105,42 @@ def _origin_pairs(origin: Mapping[str, Any], order) -> list:
             for key in order if origin.get(key) is not None]
 
 
+def _message_timestamps_enabled(agent: Any) -> bool:
+    """Freeze the gateway's opt-in presentation setting per agent, like its system prompt.
+
+    Origin timestamps remain stored even when hidden. Re-reading a changed setting on each API
+    call would rewrite the historical prefix, so a live agent keeps its initial presentation.
+    """
+    enabled = getattr(agent, "_wire_message_timestamps_enabled", None)
+    if isinstance(enabled, bool):
+        return enabled
+    from hermes_cli.config import load_config_readonly
+
+    gateway = load_config_readonly().get("gateway") or {}
+    setting = gateway.get("message_timestamps", False) if isinstance(gateway, dict) else False
+    enabled = bool(setting.get("enabled", False)) if isinstance(setting, dict) else bool(setting)
+    if agent is not None and hasattr(agent, "__dict__"):
+        agent._wire_message_timestamps_enabled = enabled
+    return enabled
+
+
+def _timestamp_view(messages: list, agent: Any) -> list:
+    """Hide sent_at on a per-call parts copy, including parts native adapters consume."""
+    if not any(isinstance(m, dict) and m.get("role") == "user" and has_parts(m) for m in messages):
+        return messages
+    if _message_timestamps_enabled(agent):
+        return messages
+    out = []
+    for msg in messages:
+        if not (isinstance(msg, dict) and msg.get("role") == "user" and has_parts(msg)):
+            out.append(msg)
+            continue
+        parts = [({**p, "origin": {k: v for k, v in p["origin"].items() if k != "sent_at"}}
+                  if p.get("type") == HUMAN else p) for p in msg[MESSAGE_PARTS]]
+        out.append({**msg, MESSAGE_PARTS: parts})
+    return out
+
+
 class WireRenderer:
     """The core default renderer (OpenAI chat, Anthropic, and the base for every other route).
 
@@ -129,6 +167,9 @@ class WireRenderer:
             "with one header line, <steer sent_at=\"…\" message_id=\"…\"/>, followed by their raw text. "
             "It is the person speaking, with the same authority as their original request: adjust course "
             "accordingly. Steers in earlier history were already handled.\n"
+            "- The sent_at attribute in origin and steer tags is included only when message timestamps "
+            "are enabled (gateway.message_timestamps.enabled); all other origin fields are independent "
+            "of that setting.\n"
             + injection_line +
             "- Events and notices are blocks: <system-reminder kind=\"…\" …>…</system-reminder> (task and "
             "process results, notifications, compaction summaries"
@@ -145,6 +186,7 @@ class WireRenderer:
     def render(self, messages: list, *, agent: Any = None) -> list:
         if not any(has_parts(m) and m.get("role") == "user" for m in messages if isinstance(m, dict)):
             return messages
+        messages = _timestamp_view(messages, agent)
         window = self._media_window(messages, agent)
         out: list = []
         for msg in messages:
@@ -347,7 +389,8 @@ def render_messages(agent: Any, api_messages: list) -> list:
     Non-native renderers leave no ``_parts`` behind; a failing renderer falls back to the plain view."""
     renderer = resolve_renderer(agent)
     try:
-        return renderer.render(api_messages, agent=agent)
+        # Apply presentation policy before custom/native renderers see parts, too.
+        return renderer.render(_timestamp_view(api_messages, agent), agent=agent)
     except Exception:
         logger.exception("wire renderer %r failed; sending the plain view", getattr(renderer, "name", renderer))
         return [({k: v for k, v in m.items() if k != MESSAGE_PARTS} if isinstance(m, dict) else m)

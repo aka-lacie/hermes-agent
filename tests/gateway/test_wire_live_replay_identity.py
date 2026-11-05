@@ -29,8 +29,13 @@ _SHA = "c" * 64
 _IMAGE = f"/native-inputs/{_SHA}/photo.png"
 
 
+@pytest.fixture(params=[False, True], ids=["timestamps-off", "timestamps-on"])
+def timestamp_mode(request):
+    return request.param
+
+
 @pytest.fixture
-def agent(tmp_path, monkeypatch):
+def agent(tmp_path, monkeypatch, timestamp_mode):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     from run_agent import AIAgent
 
@@ -44,6 +49,8 @@ def agent(tmp_path, monkeypatch):
     agent._disable_streaming = True
     agent._pending_cli_user_message = None
     agent._model_supports_vision = lambda: True  # images go out natively on this route
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly",
+                        lambda: {"gateway": {"message_timestamps": {"enabled": timestamp_mode}}})
     return agent
 
 
@@ -102,7 +109,8 @@ def _live_transcript(agent):
 
     # turn + injection: a Discord message whose pre_llm_call / recall context rides as injection parts
     human = _gateway_turn(agent, "what changed in the wire?", "1567683734684041401", sent_at=1762299300.0)
-    _append_turn_injections(agent, human, "Freya prefers terse replies.", [("jev_system1", "route: analysis")])
+    _append_turn_injections(agent, human, "Freya prefers terse replies.",
+                            [("jev_system1", "route: analysis"), ("post_compaction_reminder", "check the summary")])
     turn(human, "turn+injection")
     messages.append(_assistant("", tool_calls=[{"id": "call_1", "type": "function",
                                                 "function": {"name": "terminal", "arguments": "{\"cmd\": \"ls\"}"}}]))
@@ -132,7 +140,7 @@ def _live_transcript(agent):
     return messages, live_turns
 
 
-def _replayed(messages, tmp_path):
+def _replayed(messages, tmp_path, timestamp_mode):
     from gateway.run import _build_gateway_agent_history
 
     db = SessionDB(db_path=tmp_path / "state.db")
@@ -142,25 +150,27 @@ def _replayed(messages, tmp_path):
         history = db.get_messages_as_conversation("s")
     finally:
         db.close()
-    replay, _ = _build_gateway_agent_history(history, inject_timestamps=True)
+    replay, _ = _build_gateway_agent_history(history, inject_timestamps=timestamp_mode)
     return replay
 
 
-def test_every_part_type_renders_the_same_live_and_from_state_db(agent, tmp_path):
+def test_every_part_type_renders_the_same_live_and_from_state_db(agent, tmp_path, timestamp_mode):
     messages, live_turns = _live_transcript(agent)
     live_requests = {label: _wire(agent, messages[: idx + 1], idx) for idx, label in live_turns}
     # The rendered shape of each live current row (the bytes under test), spot-checked.
+    origin_end = ' sent_at="' if timestamp_mode else '/>'
     assert live_requests["turn+injection"][-1]["content"].startswith(
-        '<origin platform="discord" message_id="1567683734684041401" channel_id="42" sent_at="')
+        '<origin platform="discord" message_id="1567683734684041401" channel_id="42"' + origin_end)
     assert '<system-reminder kind="jev_system1">\nroute: analysis\n</system-reminder>' in \
         live_requests["turn+injection"][-1]["content"]
-    assert live_requests["steer"][-1]["content"].startswith('<steer sent_at="')
+    steer_start = '<steer sent_at="' if timestamp_mode else '<steer message_id="'
+    assert live_requests["steer"][-1]["content"].startswith(steer_start)
     assert live_requests["system_event"][-1]["content"].startswith('<system-reminder kind="process_complete">')
-    assert live_requests["turn-start steer"][-1]["content"].startswith('<steer sent_at="')
+    assert live_requests["turn-start steer"][-1]["content"].startswith(steer_start)
     assert live_requests["image"][-1]["content"][-1] == {"type": "image_url",
                                                         "image_url": {"url": "data:image/png;base64,QUJD"}}
 
-    replay = _replayed(messages, tmp_path)
+    replay = _replayed(messages, tmp_path, timestamp_mode)
     replay.append({"role": "user", "content": "next question"})
     replayed_request = _wire(agent, replay, len(replay) - 1)
     for idx, label in live_turns:
@@ -168,11 +178,11 @@ def test_every_part_type_renders_the_same_live_and_from_state_db(agent, tmp_path
         assert replayed_request[: len(live)] == live, label  # byte-identical, append-only
 
 
-def test_a_replayed_typed_steer_keeps_its_shape(agent, tmp_path):
+def test_a_replayed_typed_steer_keeps_its_shape(agent, tmp_path, timestamp_mode):
     """Forensics §1-2: the gateway's timestamp head used to turn a replayed steer into a different shape."""
     messages, live_turns = _live_transcript(agent)
     steer_idx = next(idx for idx, label in live_turns if label == "steer")
-    replay = _replayed(messages, tmp_path)
+    replay = _replayed(messages, tmp_path, timestamp_mode)
     replayed_steer = next(m for m in replay if m.get("intent") == "steer" and m.get("role") == "user"
                           and m["_parts"][0]["origin"].get("message_id") == "1567683734684041408")
     assert replayed_steer["content"] == messages[steer_idx]["content"]  # no "[Wed …] " head
@@ -195,3 +205,9 @@ def test_the_live_rows_persist_their_parts(agent, tmp_path):
     stored = [m for m in rows if mp.has_parts(m)]
     assert [m["_parts"] for m in stored] == [m["_parts"] for m in typed]
     assert [m.get("sender_kind") for m in stored] == ["human", "human", "system", "human", "human"]
+    assert stored[0]["content"] == "what changed in the wire?"
+    assert [p["kind"] for p in stored[0]["_parts"] if p["type"] == mp.INJECTION] == [
+        "memory_context", "jev_system1", "post_compaction_reminder"]
+    assert "route: analysis" not in stored[0]["content"] and "check the summary" not in stored[0]["content"]
+    rendered = _wire(agent, [stored[0]], 0)[-1]["content"]
+    assert "route: analysis" in rendered and "check the summary" in rendered

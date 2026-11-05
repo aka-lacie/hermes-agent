@@ -23,7 +23,9 @@ def _human(text="hello", **origin):
     return row
 
 
-def test_default_presentation_of_each_part_type():
+def test_default_presentation_of_each_part_type(monkeypatch):
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly",
+                        lambda: {"gateway": {"message_timestamps": {"enabled": True}}})
     turn = _human("hello", platform="discord", message_id="15", channel_id="42", sent_at=0.0)
     mp.append_parts(turn, [mp.turn_injection("jev_system1", "route hint")])
     steer = {"role": "user"}
