@@ -15,7 +15,7 @@ import time
 from typing import Any, Dict, Optional
 
 from agent.error_classifier import FailoverReason
-from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholder_row
+from agent.agent_runtime_helpers_placeholders import interrupt_notice_row
 from agent.message_metadata import append_message
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.turn_failure_copy import site_copy, stamp_failure
@@ -181,7 +181,7 @@ def handle_api_interrupt(
     """``InterruptedError`` during the provider call: a pending redirect keeps its correction
     queued for the outer-loop rebuild; otherwise keep any streamed partial text so the next
     turn has a record of the half-finished reply."""
-    from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
+    from agent.conversation_loop import interrupt_waiting_notice
 
     thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
     # redirect() cancelled only this request: keep the correction queued, clear the
@@ -202,9 +202,8 @@ def handle_api_interrupt(
     ).strip()
     if _partial and is_runaway_repetition(_partial):
         # The interrupted row is replayed next turn; looped bytes there re-seed the loop
-        # (#112764). Same hidden shape as the redirect placeholder: nothing visible in the
-        # transcript, a neutral api_content so the pre-call sanitizer does not re-heal it.
-        append_message(messages, hidden_interrupt_placeholder_row())
+        # (#112764): a hidden interrupt notice (user-side system_event) closes the turn instead.
+        append_message(messages, interrupt_notice_row(notice="runaway_partial_interrupted"))
         final_response = REPETITION_LOOP_INTERRUPTED
     elif _partial:
         append_message(messages, {
@@ -212,7 +211,7 @@ def handle_api_interrupt(
         })
         final_response = _partial
     else:
-        final_response = f"{INTERRUPT_WAITING_FOR_MODEL_PREFIX}{api_elapsed:.1f}s elapsed)."
+        final_response = interrupt_waiting_notice(agent, api_elapsed)
     agent._persist_session(messages, conversation_history)
     return ApiInterruptVerdict("break", thinking_spinner, interrupted, final_response)
 

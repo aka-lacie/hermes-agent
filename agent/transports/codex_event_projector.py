@@ -14,7 +14,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
+from agent.message_parts import system_event_message
 
 
 def _deterministic_call_id(item_type: str, item_id: str) -> str:
@@ -170,6 +170,7 @@ class CodexEventProjector:
             payload = json.dumps(item, ensure_ascii=False)[:1500]
         except (TypeError, ValueError):
             payload = repr(item)[:1500]
-        # TODO(2e): an opaque app-server item is not model text; reclassify as a tool-result/system row.
-        return ProjectionResult(messages=[{"role": "assistant", "content": f"[codex {item_type}] {payload}",
-                                           ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN}])
+        # An opaque app-server item is not model text (Rule 1): a user-side system_event carrying the raw
+        # item, its type as structured meta (never a bracket label in the text).
+        return ProjectionResult(messages=[system_event_message(
+            "codex_event", payload, sender_id="system:codex_app_server", meta={"item_type": item_type})])

@@ -287,8 +287,12 @@ class TestUserAndOpaqueProjection:
             {"method": "item/completed", "params": {"item": item}}
         ).messages
         assert len(msgs) == 1
-        assert msgs[0]["role"] == "assistant"
-        assert "plan" in msgs[0]["content"].lower()
+        # Not model text (Rule 1): a user-side system_event carrying the raw item, its type as meta.
+        assert msgs[0]["role"] == "user" and msgs[0]["sender_kind"] == "system"
+        assert msgs[0]["sender_id"] == "system:codex_app_server"
+        [part] = msgs[0]["_parts"]
+        assert (part["type"], part["kind"], part["meta"]) == ("system_event", "codex_event", {"item_type": "plan"})
+        assert "do the thing" in msgs[0]["content"] and "[codex" not in msgs[0]["content"]
         assert "tool_calls" not in msgs[0]
 
 

@@ -50,9 +50,18 @@ def test_strict_mode_refuses_unattributed_production_writes(db):
 def test_named_origins_pass(db):
     single, batch = _production_writer()
     single(db, origin=mp.MODEL_ORIGIN)
-    batch(db, [{"role": "assistant", "content": "copied", mp.ASSISTANT_ORIGIN: mp.COPY_ORIGIN},
-               {"role": "assistant", "content": "notice", mp.ASSISTANT_ORIGIN: mp.HARNESS_LEGACY_ORIGIN}])
-    assert [r[0] for r in _rows(db)] == ["assistant"] * 3
+    batch(db, [{"role": "assistant", "content": "copied", mp.ASSISTANT_ORIGIN: mp.COPY_ORIGIN}])
+    assert [r[0] for r in _rows(db)] == ["assistant"] * 2
+
+
+def test_harness_legacy_origin_is_gone(db):
+    """Phase 2e: harness copy is a user system_event row; no non-model assistant origin remains."""
+    assert mp.ASSISTANT_ORIGINS == {mp.MODEL_ORIGIN, mp.COPY_ORIGIN}
+    assert not hasattr(mp, "HARNESS_LEGACY_ORIGIN")
+    _single, batch = _production_writer()
+    with pytest.raises(prov.AssistantOriginError):
+        batch(db, [{"role": "assistant", "content": "notice", mp.ASSISTANT_ORIGIN: "harness_legacy"}])
+    assert _rows(db) == []
 
 
 def test_test_code_fixture_rows_pass(db):

@@ -97,6 +97,16 @@ def restore_provenance_columns(row: Any, msg: MutableMapping[str, Any]) -> None:
             msg[MESSAGE_PARTS] = parts
 
 
+# ── durable turn tail ─────────────────────────────────────────────────────────
+
+# The newest conversation row's role for the failed-turn closers, with a row that closes its turn (a
+# harness notice carrying ``turn_outcome``, or a failed-turn boundary the 2f migration re-tagged as a user
+# row) reported as ``agent.turn_failure_copy.CLOSED_TURN_TAIL``: closure is a column, never a role.
+TAIL_ROLE_SQL = ("SELECT CASE WHEN turn_outcome IS NOT NULL OR display_kind = 'failed_turn' THEN 'closed' "
+                 "ELSE role END FROM messages WHERE session_id = ? AND active = 1 "
+                 "AND role NOT IN ('session_meta', 'system') ORDER BY id DESC LIMIT 1")
+
+
 # ── Rule 1 gate ───────────────────────────────────────────────────────────────
 
 

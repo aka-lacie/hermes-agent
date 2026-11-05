@@ -214,9 +214,10 @@ def test_rotated_here_n_publishes_the_kept_exchanges(session_db):
     assert _live(durable[-4:]) == _live(history[-4:])
 
 
-def test_in_place_here_n_folds_the_seam_once(session_db):
-    """A head ending on a user turn folds the tail's first message into it; the stored transcript carries the
-    same fold, and the tail is not rejoined a second time."""
+def test_in_place_here_n_keeps_the_user_seam_once(session_db):
+    """A head ending on a user turn keeps the tail's first (user) message as its own row right after it
+    (Phase 2e: no text fold, no bridging assistant row; the API copy merges consecutive user rows); the
+    stored transcript carries the same seam, and the tail is not rejoined a second time."""
     history = _exchanges(10, unanswered={7})
     agent, loaded = _stored_agent(session_db, history)
     result = _compress_here(agent, loaded, 2)
@@ -224,7 +225,11 @@ def test_in_place_here_n_folds_the_seam_once(session_db):
 
     durable = session_db.get_messages_as_conversation("sid")
     assert _live(durable) == _live(result.after_messages)
-    assert f"{history[-5]['content']}\n\n{history[-4]['content']}" in [m["content"] for m in durable]
+    contents = [m["content"] for m in durable]
+    seam = contents.index(history[-5]["content"])
+    assert contents[seam + 1] == history[-4]["content"]
+    assert [m["role"] for m in durable[seam:seam + 2]] == ["user", "user"]
+    assert contents.count(history[-4]["content"]) == 1
     assert _live(durable[-3:]) == _live(history[-3:])
 
 

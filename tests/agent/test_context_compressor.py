@@ -1779,11 +1779,10 @@ class TestCompressWithClient:
         assert summary_msg["role"] == "user"
         assert summary_msg["content"].rstrip().endswith(_SUMMARY_END_MARKER.strip())
 
-    def test_assistant_role_summary_carries_end_marker(self):
-        """When the summary lands as standalone role='assistant' (head ends
-        with user), the message body must include the explicit
-        '--- END OF CONTEXT SUMMARY ---' marker. Without it, models may
-        regurgitate the summary text as their own output (#33256).
+    def test_summary_after_a_user_head_is_a_user_event_with_end_marker(self):
+        """When the head ends with user, the summary is still a role='user' system_event (Phase 2e,
+        Rule 1: never an assistant row; the API copy merges it into that user turn), and its body
+        keeps the explicit '--- END OF CONTEXT SUMMARY ---' marker (#33256).
         """
         mock_client = MagicMock()
         mock_response = MagicMock()
@@ -1817,19 +1816,18 @@ class TestCompressWithClient:
         )
         from agent.context_compressor import _SUMMARY_END_MARKER
 
-        assert summary_msg["role"] == "assistant"
+        assert (summary_msg["role"], summary_msg["sender_id"], summary_msg["part_kind"]) == (
+            "user", "system:compaction", "compaction")
+        assert not any(m.get("role") == "assistant" and SUMMARY_PREFIX in str(m.get("content")) for m in result)
         assert summary_msg["content"].rstrip().endswith(_SUMMARY_END_MARKER.strip())
 
 
 
 
-    def test_double_collision_merges_summary_into_tail(self):
-        """When neither role avoids collision with both neighbors, the summary
-        should be merged into the first tail message rather than creating a
-        standalone message that breaks role alternation.
-
-        Common scenario: head ends with 'assistant', tail starts with 'user'.
-        summary='user' collides with tail, summary='assistant' collides with head.
+    def test_summary_before_a_user_tail_stays_its_own_row(self):
+        """Head ends with 'assistant', tail starts with 'user': the summary is a standalone
+        role='user' system_event row right before the tail (Phase 2e: never folded into the person's
+        row as text); the API copy merges the two into one user turn, so the wire alternates.
         """
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -1857,22 +1855,24 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             result = c.compress(msgs)
 
-        # Verify no consecutive user or assistant messages
+        # Only the summary row sits beside a same-role row (the API copy merges those two).
         for i in range(1, len(result)):
             r1 = result[i - 1].get("role")
             r2 = result[i].get("role")
-            if r1 in {"user", "assistant"} and r2 in {"user", "assistant"}:
-                assert r1 != r2, f"consecutive {r1} at indices {i-1},{i}"
+            if r1 in {"user", "assistant"} and r2 in {"user", "assistant"} and r1 == r2:
+                assert r1 == "user" and result[i - 1].get(COMPRESSED_SUMMARY_METADATA_KEY), (i, result)
 
-        # The summary text should be merged into the first tail message
+        # The person's first tail message is untouched; the summary is its own typed row before it.
         first_tail = [m for m in result if "msg 6" in (m.get("content") or "")]
-        assert len(first_tail) == 1
-        assert "summary text" in first_tail[0]["content"]
+        assert len(first_tail) == 1 and first_tail[0]["content"] == "msg 6"
+        summary = result[result.index(first_tail[0]) - 1]
+        assert summary["part_kind"] == "compaction" and "summary text" in summary["content"]
 
 
-    def test_merge_into_tail_end_marker_is_last(self):
-        """Regression for #56372: in a merge-into-tail summary, the END MARKER
-        must come AFTER the preserved prior tail content, not before it.
+    def test_summary_end_marker_is_last_and_tail_content_untouched(self):
+        """Regression for #56372 (end marker last). Phase 2e: the summary is never merged into a
+        tail row, so the preserved tail content stays in its own row and the summary row ends with
+        the END MARKER.
 
         The old format was SUMMARY + END_MARKER + OLD_CONTENT, so the preserved
         tail content landed after the marker and the model could read it as a
@@ -1906,23 +1906,13 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             result = c.compress(msgs)
 
-        merged = next(m for m in result if m.get(COMPRESSED_SUMMARY_METADATA_KEY))
-        content = merged["content"]
-        text = (
-            content if isinstance(content, str)
-            else " ".join(
-                b.get("text", "") for b in content if isinstance(b, dict)
-            )
-        )
+        summary = next(m for m in result if m.get(COMPRESSED_SUMMARY_METADATA_KEY))
+        text = summary["content"]
         end = _SUMMARY_END_MARKER.strip()
-        # All three fragments present.
-        assert "PRESERVED_TAIL_CONTENT" in text
-        assert "SUMMARY_BODY" in text
-        assert end in text
-        # Ordering invariant: prior content BEFORE summary BEFORE end marker,
-        # and the end marker is the very last fragment.
-        assert text.index("PRESERVED_TAIL_CONTENT") < text.index("SUMMARY_BODY")
+        assert "SUMMARY_BODY" in text and "PRESERVED_TAIL_CONTENT" not in text
         assert text.index("SUMMARY_BODY") < text.index(end)
+        tail_row = result[result.index(summary) + 1]
+        assert tail_row["content"] == [{"type": "text", "text": "PRESERVED_TAIL_CONTENT"}]
         assert text.rstrip().endswith(end)
 
     def test_merged_tail_summary_still_detected_and_stripped(self):
@@ -3082,10 +3072,10 @@ class TestDoubleCompactionSummaryRole:
         assert result[0]["role"] == "user"
         assert "summary of resumed turns" in (result[0].get("content") or "")
 
-    def test_double_compaction_user_tail_merges_into_tail(self):
-        """When the summary is forced to role=user (system-only head) and
-        the first tail message is also user, the summary must merge into
-        the tail rather than flipping back to assistant (#52160).
+    def test_double_compaction_user_tail_keeps_a_standalone_user_summary(self):
+        """System-only head, first tail message is user: the summary is a standalone role=user
+        system_event row first (#52160: the first visible message is user), never flipped to
+        assistant and never folded into the tail row (Phase 2e); the API copy merges the two.
         """
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -3112,22 +3102,13 @@ class TestDoubleCompactionSummaryRole:
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             result = c.compress(msgs)
 
-        # No standalone summary message should exist (merged into tail).
-        summary_msgs = [
-            m for m in result
-            if m.get("_compressed_summary") and "msg 5" not in (m.get("content") or "")
-        ]
-        assert len(summary_msgs) == 0, (
-            "summary should be merged into tail, not standalone"
-        )
-        # The first non-system message must be role=user.
         non_system = [m for m in result if m.get("role") != "system"]
-        assert non_system[0]["role"] == "user"
-        # The merged tail should contain the summary text.
-        assert any(
-            "summary of earlier turns" in (m.get("content") or "")
-            for m in result
-        )
+        # The first non-system message is the role=user summary row; the tail's user row follows.
+        assert non_system[0]["role"] == "user" and non_system[0].get("_compressed_summary")
+        assert "summary of earlier turns" in non_system[0]["content"]
+        assert non_system[1] == {"role": "user", "content": "msg 5",
+                                 **{k: v for k, v in non_system[1].items() if k.startswith("_")}}
+        assert not any(m.get("role") == "assistant" and m.get("_compressed_summary") for m in result)
 
 
 class TestSummaryPromptBounding:

@@ -52,7 +52,7 @@ from agent.model_metadata import (
 from agent.context_default_record import last_defaulted_context_length
 from agent.redact import redact_sensitive_text
 from agent.turn_context import drop_stale_api_content
-from agent.message_parts import harness_legacy_origin
+from agent.message_parts import HUMAN, MESSAGE_PARTS, PLAIN_TEXT_SEPARATOR, SYSTEM_EVENT, has_parts, system_event_message
 from tools.todo_tool import TODO_INJECTION_HEADER
 
 logger = logging.getLogger(__name__)
@@ -364,6 +364,23 @@ def _template_visible_role(message: Any) -> Optional[str]:
         return None
     role = message.get("role")
     return None if role == "tool" or (role == "assistant" and message.get("tool_calls")) else role
+
+
+def _summary_insert_index(head: list[dict[str, Any]], tail: list[dict[str, Any]]) -> int:
+    """Where the role="user" compaction summary goes in ``head + tail``: the end of the head (its
+    chronological place) unless only template-exempt tool flow separates it from a template-visible
+    user row on that side, a user -> user collision strict templates reject that no literal merge
+    fixes. Then the row sits directly after the head's last visible user row (or, on the tail side,
+    directly before the tail's first visible user row), so the API copy merges the two into one turn."""
+    roles = [_template_visible_role(m) for m in head]
+    last_head = next((i for i in range(len(head) - 1, -1, -1) if roles[i] is not None), None)
+    if last_head is not None and roles[last_head] == "user" and last_head < len(head) - 1:
+        return last_head + 1
+    first_tail = next((i for i, m in enumerate(tail) if _template_visible_role(m) is not None), None)
+    if (first_tail and _template_visible_role(tail[first_tail]) == "user"
+            and (last_head is None or roles[last_head] in ("assistant", "system"))):
+        return len(head) + first_tail
+    return len(head)
 
 
 def _last_template_visible_role(messages: list[dict[str, Any]]) -> Optional[str]:
@@ -954,6 +971,20 @@ def _typed_user_text(content: str) -> str:
     return (describe_skill_invocation(content, separator=" ") or "") if skills_loaded_by_scaffold(content) else content
 
 
+def _verbatim_user_text(msg: dict[str, Any]) -> str:
+    """What a person wrote in *msg*, for the verbatim section (plan §4.8 compaction hygiene): a typed row
+    contributes only its ``human`` parts (never a system event, injection or notice), a row whose
+    ``sender_kind`` is not ``human`` contributes nothing, and only an untyped legacy row falls back to
+    the scaffold-prefix check (``_synthetic_user_row``; LEGACY, deleted with untyped rows in Phase 5)."""
+    if has_parts(msg):
+        return PLAIN_TEXT_SEPARATOR.join(
+            part["text"] for part in msg[MESSAGE_PARTS] if part.get("type") == HUMAN and part.get("text", "").strip())
+    if msg.get("sender_kind") not in (None, "human"):
+        return ""
+    content = _typed_user_text(_content_text_for_contains(msg.get("content")))
+    return "" if _synthetic_user_row(content) else content
+
+
 def _build_verbatim_user_section(turns: list[dict[str, Any]]) -> str:
     """Compacted region's REAL user messages verbatim, newest-first under a char budget (straddler truncated); "" if none."""
     collected: list[str] = []
@@ -961,8 +992,8 @@ def _build_verbatim_user_section(turns: list[dict[str, Any]]) -> str:
     for msg in reversed(turns):
         if msg.get("role") != "user":
             continue
-        content = _typed_user_text(_content_text_for_contains(msg.get("content")))
-        if _synthetic_user_row(content):
+        content = _verbatim_user_text(msg)
+        if not content.strip():
             continue
         remaining = _LEAN_USER_MESSAGES_BUDGET_CHARS - used
         if remaining <= 0:
@@ -4059,7 +4090,11 @@ Be specific with file paths, commands, line numbers, and results.]
 ## Errors & Fixes
 [Errors hit during the compacted turns and how each was resolved — include the
 exact error text. Pay special attention to corrections the USER gave; quote
-the user's correction and record what changed as a result.]
+the user's correction and record what changed as a result. Describe a model
+failure mode in your own words (for example "the model twice continued past its
+turn into a fabricated completion; those rows were trimmed"); never paste the
+fabricated text itself, invented commit SHAs or ids, quoted notification or
+completion blocks, or bare silence tokens such as NO_REPLY.]
 
 ## Resolved Questions
 {_section["resolved_questions"]}
@@ -4275,10 +4310,17 @@ Write only the summary body. Do not include any preamble or prefix."""
 
     @classmethod
     def _is_context_summary_message(cls, message: Any) -> bool:
-        """Return True for summary handoff messages by metadata or content."""
+        """Return True for summary handoff messages: by the ``_compressed_summary`` flag, or a typed row's
+        compaction event (``part_kind`` / its system_event part). A typed row is never classified by its
+        text (a person quoting a summary stays a person). Only an untyped legacy row falls back to the
+        prefix check (LEGACY, deleted with untyped rows in Phase 5)."""
         if not isinstance(message, dict):
             return False
-        return cls._has_compressed_summary_metadata(message) or cls._is_context_summary_content(message.get("content"))
+        if cls._has_compressed_summary_metadata(message) or is_compaction_event_message(message):
+            return True
+        if has_parts(message):
+            return False
+        return cls._is_context_summary_content(message.get("content"))
 
     @classmethod
     def _is_blank_user_turn(cls, message: Any) -> bool:
@@ -5307,63 +5349,6 @@ Write only the summary body. Do not include any preamble or prefix."""
                 tail_messages.append(stripped)
         return tail_messages
 
-    @staticmethod
-    def _summary_placement(
-        compressed: list[dict[str, Any]], tail_messages: list[dict[str, Any]], compress_start: int,
-    ) -> tuple[str, bool, bool, Optional[int]]:
-        """Pick the summary row's role so template-visible alternation holds.
-        Returns ``(summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx)``. Roles
-        read the assembled (post-strip) head/tail and are TEMPLATE-VISIBLE: Mistral-strict templates
-        skip tool rows for alternation, so alternate against what the template counts."""
-        last_head_role: Optional[str] = "user"
-        if compressed:
-            # None = all-exempt head: the summary opens the visible sequence and must be "user".
-            last_head_role = _last_template_visible_role(compressed)
-        first_tail_visible_idx, first_tail_role = next(
-            ((idx, role) for idx, role in enumerate(map(_template_visible_role, tail_messages)) if role is not None),
-            (None, None),
-        )
-        # System-only head: the summary is the first visible message and Anthropic requires role=user
-        # (#52160). Zero-user-turn guard (#58753): if no user row with non-empty TEXT survives, the
-        # summary must be role="user" or OpenAI-compatible backends reject. Image-only rows don't count.
-        force_user_leading = compress_start == 0 or last_head_role == "system" or not any(
-            m.get("role") == "user" and bool(_content_text_for_contains(m.get("content")).strip())
-            for m in (*compressed, *tail_messages)
-        )
-        # Alternate against head first, then tail; None (all-exempt head) means "user".
-        summary_role = "user" if last_head_role in {None, "assistant", "tool"} or force_user_leading else "assistant"
-        merge_into_tail = False
-        # Flip on a tail collision only if that doesn't collide with the head. All-exempt head pins "user";
-        # flipping would open the visible sequence with "assistant". Neither alternates: merge into the first tail row.
-        if first_tail_role is not None and summary_role == first_tail_role:
-            flipped = "assistant" if summary_role == "user" else "user"
-            if flipped != last_head_role and last_head_role is not None and not force_user_leading:
-                summary_role = flipped
-            else:
-                merge_into_tail = bool(tail_messages)
-        return summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx
-
-    def _merge_summary_into_tail_row(
-        self, msg: dict[str, Any], summary: str, summary_role: str, force_user_leading: bool,
-    ) -> None:
-        """Fold the summary into a carried tail row (in place) when no standalone role alternates."""
-        old_content = msg.get("content", "")
-        if force_user_leading and summary_role == "user":
-            # Anthropic/Bedrock: summary must lead the first visible message; the real request
-            # follows the end marker.
-            msg["content"] = _append_text_to_content(old_content, summary + "\n\n" + _SUMMARY_END_MARKER + "\n\n", prepend=True)
-        else:
-            # Old tail content is kept as delimited reference BEFORE the summary; the end marker goes last.
-            suffix = "\n\n" + _MERGED_SUMMARY_DELIMITER + "\n\n" + summary + "\n\n" + _SUMMARY_END_MARKER
-            msg["content"] = _append_text_to_content(
-                _append_text_to_content(old_content, suffix, prepend=False),
-                _MERGED_PRIOR_CONTEXT_HEADER + "\n", prepend=True,
-            )
-        # Frontends use this to detect a summary-prefixed message.
-        msg[COMPRESSED_SUMMARY_METADATA_KEY], msg[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] = True, bool(self._summary_has_user_turn)
-        # Rewritten content: drop the stale api_content sidecar so replay can't resend pre-merge bytes.
-        drop_stale_api_content(msg)
-
     def _finalize_compressed(
         self, compressed: list[dict[str, Any]], messages: list[dict[str, Any]], n_messages: int,
         spare_pending_images: bool, pruned_count: int = 0,
@@ -5547,28 +5532,47 @@ Write only the summary body. Do not include any preamble or prefix."""
         compressed = self._assemble_head(messages, compress_start)
         tail_messages = self._assemble_tail(messages, compress_end, scan.tail_start, scan.summary_indices)
         summary, compressed, tail_messages = with_skill_safety_rule(summary, compressed, tail_messages)
-        summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx = (
-            self._summary_placement(compressed, tail_messages, compress_start)
-        )
-        if not merge_into_tail:
-            # End marker stops weak models treating the quoted summary as fresh input (#11475) or regurgitating it (#33256).
-            compressed.append({
-                "role": summary_role, "content": summary + "\n\n" + _SUMMARY_END_MARKER,
-                COMPRESSED_SUMMARY_METADATA_KEY: True, **harness_legacy_origin(summary_role),  # TODO(2e): user SystemEvent
-                COMPRESSED_SUMMARY_HAS_USER_TURN_KEY: bool(self._summary_has_user_turn),
-            })
-        # Default carrier is tail[0]: an exempt row absorbs the summary invisibly. The forced repair
-        # path needs a non-empty role=user row, so it targets the template-visible row.
-        merge_target_idx = first_tail_visible_idx if force_user_leading and first_tail_visible_idx is not None else 0
-        for tail_idx, msg in enumerate(tail_messages):
+        # The summary is always its own role="user" system_event row (plan §4.8 compaction hygiene, Rule 1):
+        # never an assistant row and never folded into a carried row. Alternation is the wire's job: the
+        # API copy merges LITERALLY consecutive user rows into one user turn, so the row is placed where
+        # that merge also satisfies strict (Mistral-family) templates, which skip the tool flow.
+        summary_row = compaction_summary_row(
+            summary + "\n\n" + _SUMMARY_END_MARKER, has_user_turn=bool(self._summary_has_user_turn))
+        for msg in tail_messages:
             # Tag carried-forward tail rows so archive_and_compact treats their originals as
             # superseded duplicates (#86366).
             if isinstance(msg, dict):
                 msg[_COMPACTION_TAIL_MARKER] = True
-            if merge_into_tail and tail_idx == merge_target_idx:
-                self._merge_summary_into_tail_row(msg, summary, summary_role, force_user_leading)
-            compressed.append(msg)
-        return compressed
+        at = _summary_insert_index(compressed, tail_messages)
+        joined = compressed + tail_messages
+        return joined[:at] + [summary_row] + joined[at:]
+
+
+COMPACTION_EVENT_KIND = "compaction"
+COMPACTION_SENDER_ID = "system:compaction"
+
+
+def is_compaction_event_message(message: Any) -> bool:
+    """A typed compaction summary row, by its columns and parts (never its text)."""
+    if not isinstance(message, dict):
+        return False
+    if message.get("part_kind") == COMPACTION_EVENT_KIND and message.get("sender_kind") == "system":
+        return True
+    return has_parts(message) and any(
+        part.get("type") == SYSTEM_EVENT and part.get("kind") == COMPACTION_EVENT_KIND
+        for part in message[MESSAGE_PARTS])
+
+
+def compaction_summary_row(text: str, *, has_user_turn: bool, meta: Optional[dict] = None, **flags: Any) -> dict:
+    """The compaction summary row: ``role="user"``, ``sender_kind="system"``, ``sender_id="system:compaction"``,
+    one ``system_event(kind="compaction")`` part (rendered as a system-reminder, never as the user's
+    words), plus the ``_compressed_summary`` flags the compaction machinery keys on. *flags* add more of
+    those keys (the micro marker's)."""
+    row = system_event_message(COMPACTION_EVENT_KIND, text, sender_id=COMPACTION_SENDER_ID, meta=meta)
+    row[COMPRESSED_SUMMARY_METADATA_KEY] = True
+    row[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] = bool(has_user_turn)
+    row.update(flags)
+    return row
 
 
 def is_compaction_summary_message(message: Any) -> bool:

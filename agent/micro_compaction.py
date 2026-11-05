@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 from agent.compaction_events import publish_micro
 from agent.context_compressor_telemetry import _safe_int
 from agent.message_metadata import record_absorbed_message
-from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
 from agent.model_metadata import estimate_messages_tokens_rough, estimate_tokens_rough
 
 # Log name parity with the origin module.
@@ -462,23 +461,20 @@ class MicroCompactionMixin:
     def _splice_micro_compact_result(
         self, messages: list[dict[str, Any]], splice_start: int, splice_end: int, supersede: bool = True,
     ) -> list[dict[str, Any]]:
-        """Replace *messages[splice_start:splice_end]* with an assistant-role summary marker.
-        Merges user turns left adjacent by a superseded marker so the result is alternation-valid."""
+        """Replace *messages[splice_start:splice_end]* with the summary marker: a ``role="user"`` compaction
+        system_event (``meta.mode="micro"``; Rule 1, never an assistant row). Merges user turns left
+        adjacent by a superseded marker."""
         cc = _cc()
         summary_text = self._micro_compact_rolling_summary
         if not summary_text.strip():
             return messages
 
-        summary_msg = {
-            "role": "assistant", "content": self._render_micro_marker_content(summary_text),
-            cc.COMPRESSED_SUMMARY_METADATA_KEY: True,
-            # Micro marker: eligible for supersede/defrag; batch markers never carry this key.
-            cc.MICRO_COMPACT_MARKER_KEY: True,
+        summary_msg = cc.compaction_summary_row(
+            self._render_micro_marker_content(summary_text),
             # Micro markers absorb only assistant/tool content; user turns stay in the transcript.
-            cc.COMPRESSED_SUMMARY_HAS_USER_TURN_KEY: False,
-            # TODO(2e): a compaction SystemEvent on a user row; assistant only for strict alternation.
-            ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN,
-        }
+            has_user_turn=False, meta={"mode": "micro"},
+            # Micro marker: eligible for supersede/defrag; batch markers never carry this key.
+            **{cc.MICRO_COMPACT_MARKER_KEY: True})
         result = messages[:splice_start] + [summary_msg] + messages[splice_end:]
 
         # Cumulative summary: keep only the newest marker. Drop an older one only if supersede AND

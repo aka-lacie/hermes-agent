@@ -161,10 +161,11 @@ def rejoin_compressed_head_and_tail(
     """Concatenate a compressed head with the verbatim tail, defending the seam's role alternation.
 
     The head compressor's output shape isn't contractually guaranteed (a plugin engine could end on
-    a user turn). If the last head message and first tail message share a user/assistant role, the
-    tail's first string content is folded onto the head's last message; non-string (multimodal)
-    content gets a minimal bridging turn instead so nothing is lost. ``tool`` messages are left
-    alone — consecutive tool entries are the one legal repetition (parallel results).
+    a user turn). Consecutive ``user`` rows stay separate rows: the wire renderer merges consecutive
+    non-assistant rows into one user turn, so no synthetic assistant row bridges them (Rule 1) and a
+    typed row's parts are never rewritten by a text fold. Two ``assistant`` rows (both model text) fold
+    their string content; non-string content gets an empty ``user`` bridging row so nothing is lost.
+    ``tool`` messages are left alone — consecutive tool entries are the one legal repetition.
     """
     if not tail:
         return list(compressed_head)
@@ -176,13 +177,13 @@ def rejoin_compressed_head_and_tail(
     last, first = head[-1], rest[0]
     last_role, first_role = last.get("role"), first.get("role")
 
-    if last_role == first_role and last_role in ("user", "assistant"):
+    if last_role == first_role == "assistant":
         last_content = last.get("content")
         first_content = first.get("content")
         if isinstance(last_content, str) and isinstance(first_content, str):
             head[-1] = {**last, "content": f"{last_content}\n\n{first_content}"}
             rest = rest[1:]
         else:
-            head.append({"role": "assistant" if first_role == "user" else "user", "content": ""})
+            head.append({"role": "user", "content": ""})
 
     return head + rest

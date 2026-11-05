@@ -8,13 +8,6 @@ import re
 from .method_ctx import bind_module
 from agent.prompt_builder import STEER_DISPLAY_KIND
 
-# Discord routing note (gateway/run_inbound.py::discord_triggering_note) persisted as user
-# ``content`` by gateways before the authored-text fix; presentation-only heal for those rows.
-_DISCORD_TRIGGERING_NOTE_RE = re.compile(
-    r"(^|\n)\[Triggering message id: `[^`\n]*` — use as `message_id` for reply/react/pin via the discord tools\.\]\n*"
-)
-
-
 def _bridged_tool_labels(name: str, args: dict) -> list[dict]:
     from agent.display import tool_labels_for_call
 
@@ -264,11 +257,6 @@ _AUTO_CONTINUE_NOTE_PREFIX = "[System note: Your previous turn was interrupted m
 def _legacy_display_kind(role: str, text: str) -> str | None:
     """Display type of a synthetic row persisted untyped: new rows are typed at turn start (``persist_user_display_kind``);
     this prefix sniff migrates rows already on disk (a turn killed mid-run never reached the stamp)."""
-    # Imported functions are not rebound onto server.py (method_ctx.bind_module): import here.
-    from agent.turn_failure_copy import untyped_failed_turn_display_kind
-
-    if failed_turn := untyped_failed_turn_display_kind(role, text):
-        return failed_turn
     return "auto_continue" if role == "user" and text.lstrip().startswith(_AUTO_CONTINUE_NOTE_PREFIX) else None
 
 
@@ -299,6 +287,7 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls: 
     so a remote client's history read stays kilobytes instead of re-transmitting every stored attachment."""
     from agent.history_commentary import project_history_commentary
     from agent.message_metadata import withheld_prompt_text
+    from agent.message_parts import project_harness_notice_for_display
 
     messages = []
     tool_call_args = {}
@@ -308,6 +297,9 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls: 
         m = project_compaction_message_for_display(m)
         if m is None:
             continue
+        # A harness notice (failed-turn boundary, interrupt, guardrail halt) is a role="user" system_event
+        # row on the wire; the UI draws it where the reply would have been.
+        m = project_harness_notice_for_display(m)
         role = m.get("role")
         if role not in _HISTORY_ROLES:
             continue
@@ -323,7 +315,6 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls: 
         if _is_display_hidden_marker(role, content_text):
             continue
         if role == "user":
-            content_text = _DISCORD_TRIGGERING_NOTE_RE.sub(r"\1", content_text)
             # A pre_llm_call veto stores a placeholder; the transcript shows what the user typed.
             content_text = withheld_prompt_text(m) or content_text
         if role == "user" and m.get("display_kind") == STEER_DISPLAY_KIND:

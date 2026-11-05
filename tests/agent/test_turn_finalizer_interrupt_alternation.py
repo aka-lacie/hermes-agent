@@ -8,7 +8,8 @@ providers (Gemini, Claude) react to by hallucinating a continuation of the
 user's message before transitioning into the assistant persona.
 
 ``finalize_turn`` closes the tool-call sequence on interrupt by appending a
-synthetic ``assistant`` message before persistence. ``final_response`` is
+harness notice row (Phase 2e, Rule 1: ``role="user"``, one system_event, ``turn_outcome`` set;
+formerly a synthetic ``assistant`` message) before persistence. ``final_response`` is
 typically empty on an interrupt, so the placeholder text is used rather than
 an empty-content assistant turn. The synthetic row is hidden from the user
 (``content=""`` + ``display_kind="hidden"``); the placeholder lives in the
@@ -16,7 +17,7 @@ an empty-content assistant turn. The synthetic row is hidden from the user
 """
 
 
-from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
+from agent.agent_runtime_helpers_placeholders import INTERRUPTED_NO_OUTPUT_TEXT
 from agent.turn_finalizer import finalize_turn
 
 
@@ -142,11 +143,12 @@ def _finalize(agent, messages, *, interrupted, final_response=None):
 
 
 def _assert_no_tool_then_user(messages):
+    """A tool result is followed by the harness notice that closes the turn, never a bare person row."""
     for i in range(len(messages) - 1):
         if messages[i].get("role") == "tool":
-            assert messages[i + 1].get("role") != "user", (
-                f"role-alternation violation: tool → user at index {i}"
-            )
+            nxt = messages[i + 1]
+            assert nxt.get("role") == "user" and nxt.get("sender_kind") == "system" and nxt.get("turn_outcome"), (
+                f"unclosed tool tail at index {i}")
 
 
 def test_interrupt_after_tool_closes_sequence_with_placeholder():
@@ -154,18 +156,15 @@ def test_interrupt_after_tool_closes_sequence_with_placeholder():
     messages = _interrupted_tool_tail()
     _finalize(agent, messages, interrupted=True, final_response=None)
 
-    # Tail must now be an assistant message, not a raw tool result.
-    assert messages[-1]["role"] == "assistant"
-    # Hidden from user: content intentionally empty, display_kind marks it
-    # hidden; placeholder lives in api_content (LLM sees it via sidecar).
-    assert messages[-1]["content"] == ""
+    # Tail is a hidden interrupt notice (user-side system_event), not a raw tool result.
+    assert messages[-1]["role"] == "user" and messages[-1]["sender_kind"] == "system"
+    assert messages[-1]["content"] == INTERRUPTED_NO_OUTPUT_TEXT
     assert messages[-1]["display_kind"] == "hidden"
-    assert messages[-1]["api_content"] == _INTERRUPTED_PLACEHOLDER
+    assert messages[-1]["turn_outcome"] == "interrupted"
 
-    # The persisted snapshot is alternation-safe: appending a new user
-    # message would follow an assistant, not an orphan tool.
+    # The persisted snapshot closes the tool tail: a new user message follows the notice.
     assert agent.persisted_messages is not None
-    assert agent.persisted_messages[-1]["role"] == "assistant"
+    assert agent.persisted_messages[-1]["role"] == "user" and agent.persisted_messages[-1]["turn_outcome"]
     follow_on = agent.persisted_messages + [{"role": "user", "content": "forget it"}]
     _assert_no_tool_then_user(follow_on)
 
@@ -232,11 +231,11 @@ def test_non_interrupted_tool_tail_gets_visible_close():
     assert result["failed"] is True
     assert result["completed"] is False
     assert result["final_response"].strip()
-    # The durable tail is an assistant row, not the raw tool result.
-    assert messages[-1]["role"] == "assistant"
-    assert messages[-1]["content"].strip()
+    # The durable tail is a visible harness notice (never an assistant row: Rule 1), not the raw tool result.
+    assert messages[-1]["role"] == "user" and messages[-1]["display_kind"] == "harness_notice"
+    assert messages[-1]["content"].strip() and messages[-1]["turn_outcome"] == "failed"
     assert agent.persisted_messages is not None
-    assert agent.persisted_messages[-1]["role"] == "assistant"
+    assert agent.persisted_messages[-1]["role"] == "user"
     follow_on = agent.persisted_messages + [{"role": "user", "content": "continue"}]
     _assert_no_tool_then_user(follow_on)
 

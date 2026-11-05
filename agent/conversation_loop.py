@@ -15,11 +15,9 @@ import time
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
-from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholder_row
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message, without_persistence_fields
-from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
 from agent.message_sanitization import _repair_tool_call_arguments, _sanitize_surrogates
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, _estimate_tools_tokens_rough
 from agent.process_bootstrap import _install_safe_stdio
@@ -46,7 +44,7 @@ from agent.turn_scripted_prelude import Prelude, play_prelude
 from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, perform_api_call
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
-from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, OPEN_TURN_TAIL_ROLES, failed_turn_notice, site_copy
+from agent.turn_failure_copy import OPEN_TURN_TAIL_ROLES, failed_turn_boundary, failed_turn_outcome, site_copy
 from agent.turn_final_response import finish_text_response
 from agent.turn_finalizer import finalize_turn
 from agent.turn_iteration_prep import (
@@ -209,8 +207,17 @@ _COMPRESSION_TIMEOUT_FINAL_RESPONSE = (
 )
 
 
-# Stable prefix ACP/TUI match on to treat the text as cancellation metadata, not assistant prose.
+# The CLI's line for a turn interrupted while waiting on the provider. Cancellation metadata, not
+# assistant prose: the turn result says so structurally (``result["interrupt_notice"]``), and every
+# other surface suppresses it by that flag, never by matching this text (Rule 2).
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
+
+
+def interrupt_waiting_notice(agent, elapsed: float) -> str:
+    """The waiting-for-model interrupt notice as ``final_response``, flagged on *agent* so
+    ``finalize_turn`` reports ``interrupt_notice=True``."""
+    agent._turn_interrupt_notice = True
+    return f"{INTERRUPT_WAITING_FOR_MODEL_PREFIX}{elapsed:.1f}s elapsed)."
 
 
 def _should_rearm_compression_budget(
@@ -342,15 +349,11 @@ def _apply_active_turn_redirect(agent: Any, messages: list[dict[str, Any]], text
     checkpoint = "\n\n".join(checkpoint_parts)
     correction = f"[Context from the interrupted assistant response]\n{checkpoint}\n\n{text}"
 
-    # The live tail is normally user or tool, so an assistant placeholder + correction
-    # keeps strict alternation; if the tail is already assistant, the checkpoint is folded
-    # into the user correction instead of creating assistant→assistant. The placeholder
-    # preserves alternation only — scaffold bytes must never land in it, since api_content
-    # is substituted back into content on replay (#81841).
-    if not (messages and messages[-1].get("role") == "assistant"):
-        # Hidden row with a neutral api_content (#88955). Never _INTERRUPT_SCAFFOLD_MARKER:
-        # as assistant text the model echoes it (#81841).
-        append_message(messages, {"role": "assistant", "content": visible} if visible else hidden_interrupt_placeholder_row())
+    # The partial reply the model already streamed stays its own assistant row. With none, nothing is
+    # synthesized (Rule 1): the correction follows the user/tool tail and the wire renderer merges
+    # consecutive non-assistant rows. Scaffold bytes never land in an assistant row (#81841).
+    if visible and not (messages and messages[-1].get("role") == "assistant"):
+        append_message(messages, {"role": "assistant", "content": visible})
     # Transcript shows the user's own words; the provider replays the scaffolded form.
     append_message(messages, {"role": "user", "content": text, "api_content": correction})
 
@@ -1915,7 +1918,8 @@ def _redact_display_metadata(metadata: dict) -> dict:
 
 
 def _close_durable_failed_turn(agent, result: Any) -> None:
-    """Append a Hermes-authored assistant boundary when a failed turn left its durable tail open
+    """Append the failed-turn boundary (a ``role="user"`` harness notice carrying ``turn_outcome``, Rule 1)
+    when a failed turn left its durable tail open
     (``OPEN_TURN_TAIL_ROLES``: the accepted ``user`` row, or a ``tool`` row when a call ran before
     the failure), in place on ``result["messages"]`` and in SessionDB.
 
@@ -1950,12 +1954,8 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
         # hedge over the whole list rather than under-report a possible side effect.
         start = result.get("current_turn_user_idx")
         turn_messages = messages[start:] if isinstance(start, int) and 0 <= start < len(messages) else messages
-        boundary = {
-            "role": "assistant", "content": failed_turn_notice(turn_messages), "display_kind": FAILED_TURN_DISPLAY_KIND,
-            ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN,  # TODO(2e): turn_outcome on the user row instead
-        }
-        if failure := _failed_turn_display_metadata(agent, result):
-            boundary["display_metadata"] = failure
+        boundary = failed_turn_boundary(failed_turn_outcome(turn_messages),
+                                        display_metadata=_failed_turn_display_metadata(agent, result) or None)
         append_message(messages, boundary)
         agent._flush_messages_to_session_db(messages)
     except Exception:

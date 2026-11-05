@@ -75,8 +75,9 @@ def worker_tail_role(db, conn, session_id, payload):
     """``SessionDB.latest_conversation_role`` on the receipt connection (failed-turn boundary)."""
     if payload:
         raise RuntimeStoreError('invalid_params')
-    row = conn.execute("SELECT role FROM messages WHERE session_id=? AND active=1 "
-                       "AND role NOT IN ('session_meta','system') ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+    from hermes_state_provenance import TAIL_ROLE_SQL
+
+    row = conn.execute(TAIL_ROLE_SQL, (session_id,)).fetchone()
     return {'value': row[0] if row else None}
 
 

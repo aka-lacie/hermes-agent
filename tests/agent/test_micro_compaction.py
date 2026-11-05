@@ -72,12 +72,13 @@ class TestMicroCompaction:
         markers = _summary_markers(result)
         assert len(markers) == 1
         assert "ROLLING SUMMARY" in markers[0]["content"]
-        # The marker is assistant-role: an exchange is a full agent turn
-        # bounded by user messages, so user → marker(assistant) → user keeps
-        # strict alternation. A user-role marker produced user → user → user,
-        # and the pre-request repair_message_sequence pass merged the marker
-        # into the neighbouring real user turn — metadata gone, cursor lost.
-        assert markers[0]["role"] == "assistant"
+        # Phase 2e (Rule 1): the marker is a role="user" compaction system_event, never an assistant
+        # row. user → marker → user is merged into one turn by the API copy only; the canonical
+        # repair pass keeps the marker its own row (metadata and cursor survive, see
+        # test_spliced_transcript_survives_repair_message_sequence).
+        assert (markers[0]["role"], markers[0]["sender_id"], markers[0]["part_kind"]) == (
+            "user", "system:compaction", "compaction")
+        assert markers[0]["_parts"][0]["meta"] == {"mode": "micro"}
 
     def test_disabled_is_a_no_op(self):
         cc = _compressor()
@@ -575,6 +576,10 @@ class TestMicroCompaction:
             msgs = cc._micro_compact(msgs)
             for a, b in itertools.pairwise(msgs):
                 ra, rb = a.get("role"), b.get("role")
+                # Only the (user-role) marker may sit beside a user row: the API copy merges them.
+                if ra == rb == "user":
+                    assert a.get(COMPRESSED_SUMMARY_METADATA_KEY) or b.get(COMPRESSED_SUMMARY_METADATA_KEY)
+                    continue
                 assert not (ra == rb and ra in ("user", "assistant")), (
                     f"consecutive {ra} messages after micro-compaction"
                 )
@@ -814,7 +819,7 @@ class TestMergeAdjacentUserTurnsPersistedMarker:
 
         cc, result = self._spliced_merge()
 
-        merged = [m for m in result if m.get("role") == "user"]
+        merged = [m for m in result if m.get("role") == "user" and not m.get(COMPRESSED_SUMMARY_METADATA_KEY)]
         assert len(merged) == 1
         assert merged[0]["content"] == "first\n\nsecond"
         assert _DB_PERSISTED_MARKER not in merged[0]
@@ -843,8 +848,9 @@ def test_superseding_marker_never_shows_a_user_input_twice_in_display_history(tm
     assert len(_summary_markers(messages)) == 1
     assert any("question 0\n\nquestion 1" in str(m.get("content")) for m in messages), "no supersede merge happened"
 
-    def shown(msgs):
-        return sorted(t for m in msgs if m.get("role") == "user" for t in str(m["content"]).split("\n\n"))
+    def shown(msgs):  # the person's inputs: compaction summaries are user-role system events, not input
+        return sorted(t for m in msgs if m.get("role") == "user" and m.get("part_kind") != "compaction"
+                      and not m.get(COMPRESSED_SUMMARY_METADATA_KEY) for t in str(m["content"]).split("\n\n"))
 
     typed = sorted(m["content"] for m in _conversation(exchanges=8) if m["role"] == "user")
     model, display = db.get_resume_conversations("s")

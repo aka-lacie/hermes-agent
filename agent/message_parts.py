@@ -78,18 +78,18 @@ PROVENANCE_FIELDS = ("sender_kind", "sender_id", "sent_at", "source_event_id", "
 ASSISTANT_ORIGIN = "_assistant_origin"
 MODEL_ORIGIN = "model"  # this session's model generated the tokens in one of this session's turns
 COPY_ORIGIN = "copy"  # re-issue of rows already durable elsewhere (branch seeds, spool replay)
-# TODO(2e): harness rows that exist only to keep strict user/assistant alternation (failed-turn
-# notices, interrupt placeholder, guardrail halt, preflight errors, compaction summary role flip,
-# micro-compaction marker, codex event projection, pre_llm_call veto reply). The wire renderer owns
-# alternation after 2c; 2e deletes every producer of this origin and then the origin itself.
-HARNESS_LEGACY_ORIGIN = "harness_legacy"
-ASSISTANT_ORIGINS = frozenset({MODEL_ORIGIN, COPY_ORIGIN, HARNESS_LEGACY_ORIGIN})
+ASSISTANT_ORIGINS = frozenset({MODEL_ORIGIN, COPY_ORIGIN})
 
-
-def harness_legacy_origin(role: Any) -> dict:
-    """``{ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN}`` for a harness row built with a computed *role* that
-    lands on ``assistant`` only to keep alternation, else ``{}``. TODO(2e): delete with its callers."""
-    return {ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN} if role == "assistant" else {}
+# Harness copy that closes or explains a turn (failed-turn boundaries, interrupts, tool-guardrail halts,
+# preflight errors, a pre_llm_call veto) is a role="user" system_event row, never an assistant row: the
+# wire renderer merges consecutive non-assistant rows, so no synthetic assistant row keeps alternation.
+# ``display_kind`` keeps the human UI's chrome (display and wire are separate projections: the UI may
+# draw these as agent chrome, :func:`display_role`); ``turn_outcome`` on the row closes the turn.
+HARNESS_NOTICE_DISPLAY_KIND = "harness_notice"
+FAILED_TURN_DISPLAY_KIND = "failed_turn"  # agent.turn_failure_copy re-exports it
+# Display kinds of harness notices the UI draws where the reply would have been (agent chrome).
+HARNESS_NOTICE_DISPLAY_KINDS = frozenset({HARNESS_NOTICE_DISPLAY_KIND, FAILED_TURN_DISPLAY_KIND})
+HARNESS_NOTICE_SENDER_PREFIX = "system:"
 
 _DB_PERSISTED_MARKER = "_db_persisted"  # agent.context_compressor._DB_PERSISTED_MARKER (import-light here)
 
@@ -142,6 +142,52 @@ def system_event_message(kind: str, text: str, *, sender_id: str, sender_kind: s
         msg["source_event_id"] = str(source_event_id)
     set_parts(msg, [system_event(kind, text, meta=meta)])
     return msg
+
+
+def harness_notice_message(kind: str, text: str, *, notice: str, turn_outcome: Optional[str] = None,
+                           meta: Optional[Mapping[str, Any]] = None,
+                           display_kind: Optional[str] = HARNESS_NOTICE_DISPLAY_KIND) -> dict:
+    """A harness notice row (Rule 1: never assistant): ``role="user"``, ``sender_kind="system"``,
+    ``sender_id="system:<notice>"``, one ``system_event(kind)`` part whose meta names the ``notice``
+    (and the ``turn_outcome`` when it closes a turn). ``turn_outcome`` also lands on the row, which is
+    what marks the turn closed for the durable-tail checks (``SessionDB.latest_conversation_role``)."""
+    if turn_outcome is not None and turn_outcome not in TURN_OUTCOMES:
+        raise ValueError(f"unknown turn_outcome {turn_outcome!r}")
+    event_meta = {"notice": notice, **dict(meta or {})}
+    if turn_outcome is not None:
+        event_meta["turn_outcome"] = turn_outcome
+    msg = system_event_message(kind, text, sender_id=HARNESS_NOTICE_SENDER_PREFIX + notice, meta=event_meta)
+    if turn_outcome is not None:
+        msg["turn_outcome"] = turn_outcome
+    if display_kind:
+        msg["display_kind"] = display_kind
+    return msg
+
+
+def is_harness_notice(msg: Any) -> bool:
+    """A harness notice row (:func:`harness_notice_message`), by its columns."""
+    return (isinstance(msg, Mapping) and msg.get("role") == "user" and msg.get("sender_kind") == "system"
+            and msg.get("display_kind") in HARNESS_NOTICE_DISPLAY_KINDS)
+
+
+def display_role(msg: Mapping[str, Any]) -> Any:
+    """The role a human UI draws *msg* with: harness notices stand where the reply would have been
+    (agent chrome), everything else keeps its own role. Display only; the wire never uses this."""
+    if msg.get("role") == "user" and msg.get("display_kind") in HARNESS_NOTICE_DISPLAY_KINDS:
+        return "assistant"
+    return msg.get("role")
+
+
+def project_harness_notice_for_display(msg: Mapping[str, Any]) -> Mapping[str, Any]:
+    """*msg* as a human UI draws it: a harness notice becomes agent chrome (``role="assistant"``; a plain
+    ``harness_notice`` loses that kind so it reads as the reply it stands in for, a ``failed_turn``
+    keeps its kind). Anything else is returned unchanged. Display only."""
+    if display_role(msg) == msg.get("role"):
+        return msg
+    projected = {**msg, "role": "assistant"}
+    if projected.get("display_kind") == HARNESS_NOTICE_DISPLAY_KIND:
+        projected.pop("display_kind")
+    return projected
 
 
 # ── validation and the plain view ─────────────────────────────────────────────

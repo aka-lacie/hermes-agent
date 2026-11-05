@@ -26,11 +26,12 @@ Because the summary persists in the stored conversation, every retry
 replays the same poisoned history: the session is permanently broken, on
 EVERY compaction, overflow or not.
 
-These tests pin the fix: neighbour roles for summary-role selection are
-computed by ``_template_visible_role`` (skipping the exempt tool flow), and
-the assembled output always satisfies the Mistral alternation check. The
-existing #52160 / #58753 forced-user guards must keep winning: their forced
-shapes (summary-user followed only by exempt messages) are alternation-safe.
+These tests pin the fix. Since Phase 2e (Rule 1) the summary is always a role="user"
+system_event row, never an assistant row; what adapts is its PLACEMENT: neighbour roles are
+computed by ``_template_visible_role`` (skipping the exempt tool flow), and the row is put where
+the API copy's consecutive-user merge yields a sequence that satisfies the Mistral alternation
+check (``_wire_view`` replays that merge). The #52160 / #58753 forced-user shapes (summary-user
+followed only by exempt messages) stay alternation-safe.
 """
 
 from __future__ import annotations
@@ -93,6 +94,17 @@ def _summary_rows(messages: list[dict]) -> list[dict]:
     ]
 
 
+def _wire_view(messages: list[dict]) -> list[dict]:
+    """The API copy's consecutive-user merge (roles only matter here)."""
+    out: list[dict] = []
+    for m in messages:
+        if out and m.get("role") == "user" and out[-1].get("role") == "user":
+            out[-1] = {**out[-1], "content": f"{out[-1].get('content')}\n\n{m.get('content')}"}
+            continue
+        out.append(dict(m))
+    return out
+
+
 def _mistral_alternation_ok(messages: list[dict]) -> bool:
     """Replay the Mistral template's pre-flight alternation check: count
     only user and assistant-without-tool_calls messages; the counted
@@ -132,12 +144,12 @@ class TestTemplateVisibleRoleHelper:
 
 
 class TestSummaryRoleAlternatesAgainstVisibleNeighbours:
-    def test_captured_devstral_shape_emits_assistant_summary(self, compressor):
+    def test_captured_devstral_shape_places_the_user_summary_beside_the_visible_user(self, compressor):
         """The byte-captured poisoning shape: protected head ends
         ``[user, assistant(tool_calls), tool]``, tail is all tool flow.
-        The literal previous role is ``tool`` (which used to pin the
-        summary to "user"); the template-visible previous role is
-        ``user``, so the summary must be emitted as ``assistant``."""
+        The template-visible previous role is ``user``, so a user summary at the end of the head
+        would read user -> user; it goes directly after that visible user row instead, where the
+        API copy merges the two into one turn."""
         c = compressor
         messages = [{"role": "user", "content": "run a full systems diagnostic"}]
         messages += _tool_turns(0, 30)
@@ -148,13 +160,12 @@ class TestSummaryRoleAlternatesAgainstVisibleNeighbours:
 
         rows = _summary_rows(out)
         assert len(rows) == 1
-        assert rows[0].get("role") == "assistant", (
-            "REGRESSION: compaction summary emitted as role=user directly "
-            "after a template-visible user turn (only exempt tool-flow "
-            "messages between). Mistral-strict templates reject the whole "
-            "request with a Jinja alternation 500 and the stored session is "
-            f"poisoned permanently. Got role={rows[0].get('role')!r}."
-        )
+        assert rows[0].get("role") == "user" and rows[0].get("sender_kind") == "system"  # Rule 1
+        assert out.index(rows[0]) == 1, "summary must sit directly after the visible user row"
+        assert _mistral_alternation_ok(_wire_view(out)), (
+            "REGRESSION: compaction summary separated from the template-visible user turn only by "
+            "exempt tool flow. Mistral-strict templates reject the whole request with a Jinja "
+            "alternation 500 and the stored session is poisoned permanently.")
 
     def test_captured_shape_passes_mistral_alternation(self, compressor):
         c = compressor
@@ -165,21 +176,19 @@ class TestSummaryRoleAlternatesAgainstVisibleNeighbours:
         with patch.object(c, "_generate_summary", return_value=mocked):
             out = c.compress(messages, current_tokens=90_000)
 
-        assert _mistral_alternation_ok(out), (
+        wire = _wire_view(out)
+        assert _mistral_alternation_ok(wire), (
             "Compressed transcript fails the Mistral template alternation "
             "check. Visible-role sequence: "
-            f"{[_template_visible_role(m) for m in out if _template_visible_role(m)]}"
+            f"{[_template_visible_role(m) for m in wire if _template_visible_role(m)]}"
         )
 
     def test_visible_head_assistant_visible_tail_user_merges(self, compressor):
         """When the visible head ends ``assistant`` and the visible tail
-        opens ``user``, NO standalone role can satisfy alternation (user
-        collides with the tail, assistant with the head -- and the
-        intervening tool flow is template-exempt, so literal separation
-        does not help). The existing merge-into-tail fallback must fire.
-        The literal-role logic used to emit a standalone role="user"
-        summary here (literal previous role was ``tool``), which is a
-        second poisoning shape: visible user(summary) -> user(tail)."""
+        opens ``user`` after exempt tool flow, a user summary at the end of
+        the head would read user(summary) -> user(tail) to the template.
+        It goes directly before the tail's first visible user row instead,
+        so the API copy merges it into that turn."""
         c = compressor
         messages = [
             {"role": "user", "content": "question " + "q" * 200},
@@ -199,10 +208,10 @@ class TestSummaryRoleAlternatesAgainstVisibleNeighbours:
 
         rows = _summary_rows(out)
         assert len(rows) == 1
-        # Merged into a template-exempt tail message: invisible to the
-        # alternation check, summary content still delivered.
-        assert _template_visible_role(rows[0]) is None
-        assert _mistral_alternation_ok(out)
+        assert rows[0]["role"] == "user"
+        nxt = out[out.index(rows[0]) + 1]
+        assert nxt == {"role": "user", "content": "latest question", **{k: v for k, v in nxt.items() if k.startswith("_")}}
+        assert _mistral_alternation_ok(_wire_view(out))
 
 
 class TestForcedUserGuardsStillWin:
@@ -222,11 +231,11 @@ class TestForcedUserGuardsStillWin:
         rows = _summary_rows(out)
         assert len(rows) == 1
         assert rows[0].get("role") == "user"
-        assert _mistral_alternation_ok(out)
+        assert _mistral_alternation_ok(_wire_view(out))
 
-    def test_no_literal_consecutive_user_roles(self, compressor):
-        """The pre-existing literal invariant still holds alongside the
-        template-visible one."""
+    def test_only_the_summary_sits_beside_another_user_row(self, compressor):
+        """Literal consecutive user rows appear only where the summary row joins a user turn
+        (the API copy merges them); the wire view has none."""
         c = compressor
         messages = [{"role": "user", "content": "run diagnostics"}]
         messages += _tool_turns(0, 30)
@@ -236,6 +245,7 @@ class TestForcedUserGuardsStillWin:
             out = c.compress(messages, current_tokens=90_000)
 
         for prev, cur in itertools.pairwise(out):
-            assert not (
-                prev.get("role") == "user" and cur.get("role") == "user"
-            ), "compression introduced literal consecutive user-role messages"
+            if prev.get("role") == "user" and cur.get("role") == "user":
+                assert prev.get(COMPRESSED_SUMMARY_METADATA_KEY) or cur.get(COMPRESSED_SUMMARY_METADATA_KEY)
+        for prev, cur in itertools.pairwise(_wire_view(out)):
+            assert not (prev.get("role") == "user" and cur.get("role") == "user")

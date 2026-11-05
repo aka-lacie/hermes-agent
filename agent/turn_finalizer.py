@@ -165,10 +165,10 @@ def _resolve_budget_fallback(
                 # The turn ends interrupted, so the pending interrupt message is returned
                 # for requeue instead of being cleared behind a fallback summary. A redirect
                 # also ends it: the budget is spent, so there is no loop to restart into.
-                from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
+                from agent.conversation_loop import interrupt_waiting_notice
                 interrupted = True
                 _turn_exit_reason = interrupted_during_api_call_reason(agent)
-                final_response = f"{INTERRUPT_WAITING_FOR_MODEL_PREFIX}{time.time() - _summary_start:.1f}s elapsed)."
+                final_response = interrupt_waiting_notice(agent, time.time() - _summary_start)
 
     # A kanban worker must record a terminal outcome whether or not a fallback path
     # was eligible, so the dispatcher learns the worker could not complete. Only the
@@ -237,9 +237,24 @@ def _recover_final_from_stream(agent, final_response, interrupted, failed) -> tu
     return final_response, False
 
 
-def _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream) -> None:
+# Loop exits whose ``final_response`` is Hermes copy, not model output (Rule 1): the exit reason, never
+# the text, decides. ``(system_event kind, notice, turn_outcome)`` of the harness notice row that stands
+# in the transcript where the reply would have been.
+HARNESS_REPLY_EXITS = {
+    "guardrail_halt": ("error_notice", "tool_guardrail_halt", "partial"),
+    "ollama_runtime_context_too_small": ("error_notice", "preflight_context_error", "failed"),
+    "blocked_by_plugin_pre_llm_call": ("error_notice", "pre_llm_call_blocked", "failed"),
+    # The synthesized "No reply: the turn stopped while a tool result was still pending" close.
+    "pending_tool_result": ("error_notice", "pending_tool_result", "failed"),
+}
+
+
+def _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream,
+                           harness_exit=None) -> None:
     """Shape the transcript tail before the durable snapshot (scaffolding already dropped
-    and ``final_response`` already stream-recovered by the caller)."""
+    and ``final_response`` already stream-recovered by the caller). ``harness_exit`` (a
+    :data:`HARNESS_REPLY_EXITS` value) closes the turn with a harness notice row instead of an
+    assistant row: that ``final_response`` is Hermes copy, never the model's."""
     # An interrupt can leave a tool result as the tail; close the sequence so strict
     # providers don't see ``tool → user`` (placeholder: final_response is usually empty).
     if interrupted:
@@ -249,7 +264,13 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, _recove
     # Recovery ``break`` sites can return a final_response with no closing assistant
     # row; enforce "delivered final_response ⇒ assistant row" here. Compare content,
     # not role, so a matching verification candidate isn't dup'd.
-    if final_response and not interrupted:
+    if final_response and not interrupted and harness_exit is not None:
+        from agent.message_parts import harness_notice_message
+
+        kind, notice, outcome = harness_exit
+        append_message(messages, harness_notice_message(kind, flatten_message_text(final_response), notice=notice,
+                                                        turn_outcome=outcome))
+    elif final_response and not interrupted:
         # Some recovery/fallback paths return a real final_response without adding a closing assistant
         # message to the transcript (e.g. the partial-stream and prior-turn-content recovery ``break`` sites
         # in ``conversation_loop``). If persisted as-is, the durable session can end at a tool/user message
@@ -644,7 +665,7 @@ def finalize_turn(
     # message lands as ``tool → user``. Interrupted tails keep
     # ``close_interrupted_tool_sequence``; this is the non-interrupt sibling. Mint the
     # exit reason, fail the turn, and synthesize the visible close so the tail close in
-    # ``_persist_step`` persists an assistant row. A turn that already streamed text is
+    # ``_persist_step`` persists a harness notice row (``HARNESS_REPLY_EXITS``; Rule 1). A turn that already streamed text is
     # left alone: ``_recover_final_from_stream`` owns that recovery (#95514).
     if (
         not final_response
@@ -728,7 +749,8 @@ def finalize_turn(
             _raw = final_response
             final_response, _, _ = apply_llm_output_transform(agent, final_response, turn_id=turn_id, logger=logger)
             _store_rewrite_on_tail(agent, messages, _raw, final_response)
-        _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
+        _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream,
+                               harness_exit=HARNESS_REPLY_EXITS.get(str(_turn_exit_reason)))
         if not interrupted and not failed and not vetoed:
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
         agent._persist_session(messages, conversation_history)
@@ -799,6 +821,9 @@ def finalize_turn(
         # The final is byte-for-byte a response this turn already delivered (no footer or
         # explanation appended since): it carries no new text for the client to paint.
         "response_reused": bool(final_response) and final_response == getattr(agent, "_reused_response_text", None),
+        # ``final_response`` is the waiting-for-model interrupt notice (cancellation metadata, not prose):
+        # surfaces suppress it by this flag, never by its text.
+        "interrupt_notice": bool(interrupted and getattr(agent, "_turn_interrupt_notice", False) is True),
         "model": agent.model,
         # requested_model / served_model: proxy-reported deployment or Hermes' own fallback route.
         **result_model_fields(agent),
@@ -849,6 +874,7 @@ def finalize_turn(
         result["pending_steer"] = _leftover_steer
     agent._response_was_previewed = False
     agent._reused_response_text = None
+    agent._turn_interrupt_notice = False
     if interrupted and agent._interrupt_message:
         result["interrupt_message"] = agent._interrupt_message
     agent.clear_interrupt()

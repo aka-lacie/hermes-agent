@@ -5,7 +5,9 @@ standalone ACP hands ``result["messages"]`` straight back as history, so the ter
 paths that persist the user row and return before ``finalize_turn`` used to leave ``user`` as
 the tail. The next prompt then appended a second user row and ``repair_message_sequence``
 merged the failed request into the new one. Closed at the core seam
-(``agent/conversation_loop.py::_close_durable_failed_turn``).
+(``agent/conversation_loop.py::_close_durable_failed_turn``) with a failed-turn boundary: since
+Phase 2e (Rule 1) a ``role="user"`` harness notice carrying ``turn_outcome``, never an assistant
+row. On the wire it is a system-reminder between the failed request and the next one.
 
 Driven through the real ``HermesACPAgent.prompt()`` with a real ``AIAgent`` and ``SessionDB``
 against a loopback OpenAI-compatible endpoint; assertions read SQLite rows and the request
@@ -141,10 +143,11 @@ _NEW_REQUEST = "What is the capital of France?"
 def test_acp_refusal_closes_the_turn_and_is_not_replayed_into_the_next_prompt(acp):
     """Turn 1: HTTP-200 ``content_filter`` refusal. Turn 2: unrelated request.
 
-    Invariant: the durable tail after a failed turn is a Hermes-authored assistant row (never
-    provider text), and the next prompt reaches the provider as its own user row.
+    Invariant: the durable tail after a failed turn is a Hermes-authored harness notice (never
+    provider text, never an assistant row), and the next prompt reaches the provider after it, the
+    notice rendered as a system-reminder that says the earlier request was not processed.
     """
-    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE
+    from agent.turn_failure_copy import CLOSED_TURN_TAIL, FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE
 
     provider, prompt, conversation_rows, db, sid, conn, server = acp
 
@@ -152,15 +155,18 @@ def test_acp_refusal_closes_the_turn_and_is_not_replayed_into_the_next_prompt(ac
     prompt(_REFUSED)
 
     rows = conversation_rows()
-    assert [r[0] for r in rows] == ["user", "assistant"], rows
+    assert [r[0] for r in rows] == ["user", "user"], rows
     assert rows[1][1] == FAILED_TURN_NOTICE  # no tool ran: no hedging, no provider detail
-    assert db.latest_conversation_role(sid) == "assistant"
+    assert db.latest_conversation_role(sid) == CLOSED_TURN_TAIL
     # Typed, so a renderer or room poller never has to match the English copy to tell the
     # boundary from a model reply.
     with sqlite3.connect(db.db_path) as c:
-        kinds = [r[0] for r in c.execute(
-            "SELECT display_kind FROM messages WHERE session_id = ? AND role = 'assistant'", (sid,))]
-    assert kinds == [FAILED_TURN_DISPLAY_KIND]
+        kinds = [tuple(r) for r in c.execute(
+            "SELECT display_kind, sender_kind, part_kind, turn_outcome FROM messages WHERE session_id = ? "
+            "AND role = 'user' AND sender_kind = 'system'", (sid,))]
+        assert c.execute("SELECT COUNT(*) FROM messages WHERE session_id = ? AND role = 'assistant'",
+                         (sid,)).fetchone()[0] == 0
+    assert kinds == [(FAILED_TURN_DISPLAY_KIND, "system", "error_notice", "failed")]
     # The refusal reaches the ACP client, but never becomes canonical assistant history.
     texts = [getattr(getattr(u, "content", None), "text", None) or getattr(u, "text", None) for u in conn.updates]
     assert any(_REFUSAL_DETAIL in (t or "") for t in texts)
@@ -169,9 +175,11 @@ def test_acp_refusal_closes_the_turn_and_is_not_replayed_into_the_next_prompt(ac
     prompt(_NEW_REQUEST)
 
     sent = [m for m in provider.requests[-1]["messages"] if m["role"] != "system"]
-    assert [m["role"] for m in sent] == ["user", "assistant", "user"], sent
-    assert [m["content"] for m in sent if m["role"] == "user"] == [_REFUSED, _NEW_REQUEST]
-    assert sent[1] == {"role": "assistant", "content": FAILED_TURN_NOTICE}  # the type never reaches the wire
+    # One wire user turn: the failed request, the boundary as a system-reminder, the new request.
+    assert [m["role"] for m in sent] == ["user"], sent
+    reminder = ('<system-reminder kind="error_notice" notice="failed_turn" turn_outcome="failed">\n'
+                f"{FAILED_TURN_NOTICE}\n</system-reminder>")
+    assert sent[0]["content"] == f"{_REFUSED}\n\n{reminder}\n\n{_NEW_REQUEST}"
 
     # Turn 3: cancelled mid-turn. The interrupt envelope carries ``final_response=None``
     # (no assistant text yet); ``_finish_turn`` must still report ``cancelled`` — never crash
@@ -197,7 +205,7 @@ def test_failed_turn_boundary_is_idempotent_on_the_durable_tail_and_skips_contex
     from types import SimpleNamespace
 
     from agent.conversation_loop import _close_durable_failed_turn
-    from agent.turn_failure_copy import PARTIAL_FAILED_TURN_NOTICE
+    from agent.turn_failure_copy import CLOSED_TURN_TAIL, PARTIAL_FAILED_TURN_NOTICE
     from hermes_state import SessionDB
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -209,7 +217,9 @@ def test_failed_turn_boundary_is_idempotent_on_the_durable_tail_and_skips_contex
     written: list[list[dict]] = []
 
     def flush(messages):
-        db.append_message(sid, messages[-1]["role"], messages[-1]["content"])
+        last = messages[-1]
+        db.append_message(sid, last["role"], last["content"], display_kind=last.get("display_kind"),
+                          turn_outcome=last.get("turn_outcome"), sender_kind=last.get("sender_kind"))
         written.append(list(messages))
 
     agent = SimpleNamespace(_session_db=db, session_id=sid, _flush_messages_to_session_db=flush)
@@ -227,10 +237,11 @@ def test_failed_turn_boundary_is_idempotent_on_the_durable_tail_and_skips_contex
     failed = {"completed": False, "failed": True, "failure_reason": "server_error", "messages": messages,
               "current_turn_user_idx": 0}
     _close_durable_failed_turn(agent, failed)
-    _close_durable_failed_turn(agent, failed)  # redelivery: tail is already assistant
+    _close_durable_failed_turn(agent, failed)  # redelivery: the tail is already closed
     assert len(written) == 1
-    assert (messages[-1]["role"], messages[-1]["content"]) == ("assistant", PARTIAL_FAILED_TURN_NOTICE)  # a tool ran: hedge
-    assert db.latest_conversation_role(sid) == "assistant"
+    assert (messages[-1]["role"], messages[-1]["content"]) == ("user", PARTIAL_FAILED_TURN_NOTICE)  # a tool ran: hedge
+    assert messages[-1]["turn_outcome"] == "partial" and messages[-1]["sender_kind"] == "system"
+    assert db.latest_conversation_role(sid) == CLOSED_TURN_TAIL
     db.close()
 
 
@@ -324,7 +335,7 @@ def test_failed_turn_after_a_tool_row_is_closed_with_its_error_card(tmp_path, mo
     def flush(rows):
         last = rows[-1]
         db.append_message(sid, last["role"], last["content"], display_kind=last.get("display_kind"),
-                          display_metadata=last.get("display_metadata"))
+                          display_metadata=last.get("display_metadata"), turn_outcome=last.get("turn_outcome"))
 
     agent = SimpleNamespace(_session_db=db, session_id=sid, _flush_messages_to_session_db=flush,
                             provider="nous", model="m")
@@ -334,7 +345,7 @@ def test_failed_turn_after_a_tool_row_is_closed_with_its_error_card(tmp_path, mo
     _close_durable_failed_turn(agent, failed)  # redelivery: the tail is now the boundary
 
     stored = db.get_messages(sid)
-    assert [row["role"] for row in stored] == ["user", "assistant", "tool", "assistant"]
+    assert [row["role"] for row in stored] == ["user", "assistant", "tool", "user"]
     boundary = stored[-1]
     assert (boundary["content"], boundary["display_kind"]) == (PARTIAL_FAILED_TURN_NOTICE, FAILED_TURN_DISPLAY_KIND)
     metadata = boundary["display_metadata"]

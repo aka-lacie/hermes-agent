@@ -29,7 +29,8 @@ from hermes_state_todo import SessionTodoResultMixin
 from hermes_state_identity import (
     _absorbed_uids_json, _restore_identity_columns, _stable_tool_key, _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
 from agent.message_parts import set_parts
-from hermes_state_provenance import gate_assistant_write, provenance_row_params, restore_provenance_columns
+from hermes_state_provenance import (
+    TAIL_ROLE_SQL, gate_assistant_write, provenance_row_params, restore_provenance_columns)
 
 logger = logging.getLogger("hermes_state")  # caplog tests pin the origin module's name
 
@@ -545,12 +546,11 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         return row[0] if row else None
 
     def latest_conversation_role(self, session_id: str) -> Optional[str]:
-        """Role of the newest active user/assistant/tool row, or ``None``. ``session_meta`` /
+        """Role of the newest active user/assistant/tool row, or ``None`` (``"closed"`` when that row closes
+        its turn: ``turn_outcome`` set, see ``hermes_state_provenance.TAIL_ROLE_SQL``). ``session_meta`` /
         ``system`` rows are transcript bookkeeping stripped before the model sees history, so
         they must not hide an open user tail from the failed-turn boundary check."""
-        row = self._read_one(
-            "SELECT role FROM messages WHERE session_id = ? AND active = 1 "
-            "AND role NOT IN ('session_meta', 'system') ORDER BY id DESC LIMIT 1", (session_id,))
+        row = self._read_one(TAIL_ROLE_SQL, (session_id,))
         return row[0] if row else None
 
     def get_message_role(self, session_id: str, row_id: int) -> Optional[str]:

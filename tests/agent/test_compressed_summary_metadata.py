@@ -141,13 +141,16 @@ class TestClassifyAgreesWithPredicatesOnLiveEmissions:
         assert is_compaction_summary_message(stripped) == (kind is not None)
         return kind
 
-    def test_merged_emission_classifies_merged_and_predicates_agree(self):
-        """Alternating transcripts take the merge-into-tail path on current
-        main — the emitted handoff must classify 'merged'."""
+    def test_alternating_emission_is_a_standalone_typed_row(self):
+        """Phase 2e: the merge-into-tail path is gone. Alternating transcripts emit the summary as
+        its own role="user" compaction system_event row (classified 'standalone'), detected by its
+        columns even with the flag stripped."""
         flagged = self._live_compress(_make_messages())
         assert len(flagged) == 1
         kind = self._assert_agreement(flagged[0])
-        assert kind == "merged"
+        assert kind == "standalone"
+        assert (flagged[0]["role"], flagged[0]["part_kind"], flagged[0]["sender_id"]) == (
+            "user", "compaction", "system:compaction")
 
     def test_standalone_emission_classifies_standalone_and_predicates_agree(self):
         """A degenerate all-user transcript forces the standalone-insertion

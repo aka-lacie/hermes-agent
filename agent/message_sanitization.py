@@ -14,7 +14,7 @@ import re
 from functools import partial
 from typing import Any, Callable, Iterable, NamedTuple
 
-from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER, hidden_interrupt_placeholder_row
+from agent.agent_runtime_helpers_placeholders import interrupt_notice_row
 from agent.message_metadata import DB_ROW_SNAPSHOT
 from agent.vision_message_prep import _provider_model_key
 
@@ -286,18 +286,14 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
 
 
 def close_interrupted_tool_sequence(messages: list, final_response: Any = None, *, stopped: bool = False) -> bool:
-    """Append a synthetic assistant turn when an interrupted tail is a tool result: a transcript
-    ending on a raw ``tool`` message makes the next user message land as ``tool → user``, an
-    alternation violation strict providers (Gemini, Claude) answer by hallucinating a
-    continuation. Mutates in place; True if a closing turn was appended.
+    """Close an interrupted tail that is a tool result with a harness notice row
+    (``agent_runtime_helpers_placeholders.interrupt_notice_row``: ``role="user"``, one system_event,
+    ``turn_outcome`` set; Rule 1 forbids a synthetic assistant row). The renderer sends it as a
+    system-reminder after the tool result, merged with the next user turn. Mutates in place; True if a
+    closing row was appended.
 
-    Only the placeholder closes silently: with no real text (or just the bare interrupt
-    placeholder) the row is hidden from the user — ``api_content`` carries the LLM-visible
-    text (substituted at API-build time by ``substitute_api_content``), ``content=""`` +
-    ``display_kind="hidden"`` keep it out of rendered transcripts, matching the
-    ``_INTERRUPTED_PLACEHOLDER`` shape in ``turn_api_call.py``. A caller-supplied banner
-    (truncation notices, partial-delivery text) stays visible: it is the turn's only
-    user-facing explanation.
+    With no text the notice is hidden from the user; a caller-supplied banner (truncation notices,
+    partial-delivery text) stays visible: it is the turn's only user-facing explanation.
 
     ``stopped`` (an interrupted turn: a user stop or any other interrupt, not a truncation or
     overflow exit) puts the stopped mark on the closing row, as ``turn_api_call.py`` does on every
@@ -309,11 +305,7 @@ def close_interrupted_tool_sequence(messages: list, final_response: Any = None, 
     text = final_response if isinstance(final_response, str) else ""
     from agent.message_metadata import append_message
 
-    stripped = text.strip()
-    if not stripped or stripped == _INTERRUPTED_PLACEHOLDER:
-        row = hidden_interrupt_placeholder_row()
-    else:
-        row = {"role": "assistant", "content": stripped}
+    row = interrupt_notice_row(text.strip(), notice="interrupted_tool_sequence", stopped=stopped)
     if stopped:
         row["display_metadata"] = {"interrupted": True}
     append_message(messages, row)

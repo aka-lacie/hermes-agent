@@ -154,9 +154,10 @@ class TestRecoverFromTruncationOverflowTerminal:
         # #98722 typed bit: the gateway consumes this to reset/move future input
         # to a clean session instead of leaving the bloated one authoritative.
         assert result.get("compression_exhausted") is True
-        # The interrupted tool tail is closed so the next user turn alternates;
-        # no fragment or nudge was appended.
-        assert messages[-1]["role"] == "assistant"
+        # The interrupted tool tail is closed by a visible harness notice (never an assistant row:
+        # Rule 1); no fragment or nudge was appended.
+        assert messages[-1]["role"] == "user" and messages[-1]["sender_kind"] == "system"
         assert messages[-1]["content"] == _CONTEXT_OVERFLOW_PARTIAL_FINAL
+        assert messages[-1]["turn_outcome"] == "partial"
         assert len(messages) == 4
         assert result.get("messages") is messages

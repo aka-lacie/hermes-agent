@@ -685,9 +685,8 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
     from agent.conversation_compression import _extract_steer_text_from_message
     from agent.history_commentary import project_history_commentary
     from agent.message_metadata import withheld_prompt_text
-    from agent.message_parts import has_parts
+    from agent.message_parts import has_parts, project_harness_notice_for_display
     from agent.prompt_builder import STEER_DISPLAY_KIND
-    from agent.turn_failure_copy import untyped_failed_turn_display_kind
 
     # inline_images=False (#116511): render content through the gateway's ``_coerce_message_text``
     # projection so a data-URI image part becomes ``[image]`` — the same branch session.resume's
@@ -706,11 +705,9 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
         message = _with_tool_call_labels(message)
         if coerce is not None:
             message = coerce(message)
-        # Same read-side typing as session.resume (tui_gateway/session_history.py).
-        failed_turn = not message.get("display_kind") and untyped_failed_turn_display_kind(
-            message.get("role"), message.get("content"))
-        if failed_turn:
-            message = {**message, "display_kind": failed_turn}
+        # A harness notice (failed-turn boundary, interrupt, guardrail halt) is a role="user" system_event
+        # row on the wire; the UI draws it where the reply would have been (same as session.resume).
+        message = project_harness_notice_for_display(message)
         if _is_untyped_scaffold_notice(message):
             projected = message.copy()
             projected["display_kind"] = "hidden"

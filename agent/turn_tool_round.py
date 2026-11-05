@@ -13,7 +13,6 @@ import logging
 from typing import Any, Dict, Optional, Tuple
 
 from agent.message_metadata import append_message
-from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
 from agent.message_sanitization import coalesce_tool_call_id, normalize_provider_tool_call_ids
 from agent.turn_preflight import compress_after_tool_results
 from agent.turn_tool_validation import validate_tool_calls
@@ -189,8 +188,8 @@ def run_tool_round(
         _turn_exit_reason = "guardrail_halt"
         final_response = agent._toolguard_controlled_halt_response(decision)
         agent._emit_diagnostic_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
-        # TODO(2e): harness halt text, not model output; a system_event once the renderer owns alternation.
-        append_message(messages, {"role": "assistant", "content": final_response, ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN})
+        # Harness copy, not model output: finalize_turn records it as a harness notice row (the exit
+        # reason decides, ``agent.turn_finalizer.HARNESS_REPLY_EXITS``), never an assistant row.
         # Emit the halt so it isn't mistaken for a crash; the stream callback is still
         # alive, so SSE/TUI clients see the explanation. A held turn shows it as the final only.
         if final_response:

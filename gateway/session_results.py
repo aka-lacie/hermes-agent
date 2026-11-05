@@ -99,10 +99,13 @@ def finish_result(db, *, epoch, row, response, outcome, result=None, prepared=No
     # result is not history, so a reopened chat would otherwise show nothing about the refusal.
     from gateway.session_settlement_recovery import gateway_refusal_boundary, owner_stop_notice
     notice, display_metadata = owner_stop_notice(result, outcome, row), None
+    boundary_outcome = 'interrupted'
     if notice is None and (refusal := gateway_refusal_boundary(result, outcome)) is not None:
         notice, display_metadata = refusal
+        boundary_outcome = 'failed'
     write = None if notice is None else (lambda conn, _current: close_discarded_turn(
-        db, conn, row, notice, replace_after=row.get('transcript_mark'), display_metadata=display_metadata))
+        db, conn, row, notice, replace_after=row.get('transcript_mark'), display_metadata=display_metadata,
+        outcome=boundary_outcome))
     settled = settle_session_input(db, epoch=epoch, admission_id=row['admission_id'],
         generation=row['generation'], outcome=outcome, result=stored, _transfers=transfers,
         _terminal_write=write)
@@ -119,14 +122,15 @@ def admission_result(db, admission_id):
         return load_result(saved[0]) if saved else None
 
 
-def close_discarded_turn(db, conn, row, notice=None, *, replace_after=None, display_metadata=None):
+def close_discarded_turn(db, conn, row, notice=None, *, replace_after=None, display_metadata=None,
+                         outcome='interrupted'):
     """Close a discarded ``unknown`` turn the way a failed turn is closed, on the resolution's
     own transaction (``resolve_unknown_session_input(_terminal_write=...)``).
 
     The lost input stays in the transcript for the user to resend, but an open ``user`` tail would be
     merged into the follower's provider request by consecutive-user repair, re-sending the discarded
-    turn as context. A Hermes-authored boundary (``display_kind=failed_turn``, stripped of its type
-    before the wire) ends it. Its side effects are unknown, so the hedged copy. The boundary lands on
+    turn as context. A Hermes-authored boundary (a ``role="user"`` harness notice with
+    ``display_kind=failed_turn`` and ``turn_outcome``, Rule 1) ends it. Its side effects are unknown, so the hedged copy. The boundary lands on
     the CURRENT physical transcript (local reset/compression lineage tip), resolved on this
     connection. Idempotent on the durable tail, like the gateway and core failed-turn closers.
 
@@ -144,27 +148,29 @@ def close_discarded_turn(db, conn, row, notice=None, *, replace_after=None, disp
     stacking a second boundary (#134889 GW-21). An earlier turn's boundary stays.
 
     ``display_metadata`` (``{error, error_surface}``) rides the boundary so a reopened chat redraws
-    the turn's error card from history (``agent.conversation_loop._failed_turn_display_metadata``)."""
+    the turn's error card from history (``agent.conversation_loop._failed_turn_display_metadata``).
+    ``outcome`` is the boundary's ``turn_outcome`` when a ``notice`` is given (the hedged copy is
+    ``partial``)."""
     import time
-    from agent.message_parts import ASSISTANT_ORIGIN, HARNESS_LEGACY_ORIGIN
-    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, PARTIAL_FAILED_TURN_NOTICE
+    from agent.message_parts import MESSAGE_PARTS, encode_parts_json
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, failed_turn_boundary
     from hermes_state_local_lineage import local_physical_target
     from hermes_state_runtime import _canonical_chain
     target = _canonical_chain(conn, local_physical_target(conn, row['target_session_id']))[-1]
-    tail = conn.execute("SELECT role, tool_calls, id, display_kind FROM messages WHERE session_id=? AND active=1 "
-                        "AND role NOT IN ('session_meta','system') ORDER BY id DESC LIMIT 1", (target,)).fetchone()
-    if (notice is not None and type(replace_after) is int and tail is not None and tail[0] == 'assistant'
+    tail = conn.execute("SELECT role, tool_calls, id, display_kind, turn_outcome FROM messages WHERE session_id=? "
+                        "AND active=1 AND role NOT IN ('session_meta','system') ORDER BY id DESC LIMIT 1",
+                        (target,)).fetchone()
+    boundary = failed_turn_boundary('partial' if notice is None else outcome, notice=notice,
+                                    display_metadata=display_metadata or None, timestamp=time.time())
+    if (notice is not None and type(replace_after) is int and tail is not None and tail[0] == 'user'
             and tail[3] == FAILED_TURN_DISPLAY_KIND and tail[2] > replace_after):
-        conn.execute("UPDATE messages SET content=?, display_metadata=? WHERE id=?",
-                     (notice, db._encode_display_metadata(display_metadata), tail[2]))
+        conn.execute("UPDATE messages SET content=?, parts_json=?, turn_outcome=?, display_metadata=? WHERE id=?",
+                     (boundary['content'], encode_parts_json(boundary[MESSAGE_PARTS]), boundary['turn_outcome'],
+                      db._encode_display_metadata(display_metadata), tail[2]))
         return True
+    open_user_tail = tail is not None and tail[0] == 'user' and tail[4] is None and tail[3] != FAILED_TURN_DISPLAY_KIND
     if notice is None and (tail is None or not (
-            tail[0] == 'user' or (tail[0] == 'assistant' and tail[1] not in (None, '', '[]')))):
+            open_user_tail or (tail[0] == 'assistant' and tail[1] not in (None, '', '[]')))):
         return False
-    boundary = {'role': 'assistant', 'content': notice or PARTIAL_FAILED_TURN_NOTICE, 'timestamp': time.time(),
-                'display_kind': FAILED_TURN_DISPLAY_KIND,
-                ASSISTANT_ORIGIN: HARNESS_LEGACY_ORIGIN}  # TODO(2e): turn_outcome on the user row instead
-    if display_metadata:
-        boundary['display_metadata'] = display_metadata
     db._append_messages_in_transaction(conn, target, [boundary])
     return True

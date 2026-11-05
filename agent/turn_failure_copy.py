@@ -13,6 +13,7 @@ import time
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 from agent.error_classifier import FailoverReason
+from agent.message_parts import FAILED_TURN_DISPLAY_KIND as _FAILED_TURN_DISPLAY_KIND
 from agent.stream_max_lifetime import StreamLifetimeExceeded
 from hermes_constants import display_hermes_home
 
@@ -67,32 +68,50 @@ AUTOMATION_INTERRUPTED_NOTICE = (
     "An automated delivery was interrupted and was not run again. Some "
     "actions may already have run; verify their effects."
 )
+# The boundary copy per ``messages.turn_outcome`` of the row that closes the turn.
+FAILED_TURN_COPY = {"failed": FAILED_TURN_NOTICE, "partial": PARTIAL_FAILED_TURN_NOTICE,
+                    "interrupted": AUTOMATION_INTERRUPTED_NOTICE}
 # Durable tail roles a failed turn leaves open: its accepted ``user`` row, or the ``tool`` row of a
-# call that ran before the failure. An ``assistant`` tail is already closed (a reply or a boundary).
+# call that ran before the failure. A closed tail (a reply, or a row carrying ``turn_outcome``) is not.
 OPEN_TURN_TAIL_ROLES = frozenset({"user", "tool"})
-# ``messages.display_kind`` of that row: display-only (stripped before every provider request),
-# so renderers show a Hermes notice and room pollers never read it as the model's reply.
-FAILED_TURN_DISPLAY_KIND = "failed_turn"
+# What ``SessionDB.latest_conversation_role`` reports for a tail row that closes its turn (a failed-turn
+# boundary or another harness notice carrying ``messages.turn_outcome``): never an open role.
+CLOSED_TURN_TAIL = "closed"
+# ``messages.display_kind`` of the boundary row: the human UI draws it as a Hermes notice in the reply's
+# place (``agent.message_parts.display_role``), and room pollers never read it as the model's reply.
+FAILED_TURN_DISPLAY_KIND = _FAILED_TURN_DISPLAY_KIND
 
 
-def untyped_failed_turn_display_kind(role: Any, content: Any) -> Optional[str]:
-    """``FAILED_TURN_DISPLAY_KIND`` for a boundary row persisted before the closers typed it
-    (exact notice text, so a real reply quoting it stays a reply); read-side only."""
-    if role == "assistant" and isinstance(content, str) and content.strip() in (
-        FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE, AUTOMATION_INTERRUPTED_NOTICE,
-    ):
-        return FAILED_TURN_DISPLAY_KIND
-    return None
-
-
-def failed_turn_notice(turn_messages: Any) -> str:
-    """Boundary copy for a failed turn: never claim "not processed" when a tool may have run."""
+def failed_turn_outcome(turn_messages: Any) -> str:
+    """``turn_outcome`` of a failed turn: ``partial`` when a tool may have run, else ``failed``."""
     for row in turn_messages or ():
         if isinstance(row, dict) and (
             row.get("role") == "tool" or (row.get("role") == "assistant" and row.get("tool_calls"))
         ):
-            return PARTIAL_FAILED_TURN_NOTICE
-    return FAILED_TURN_NOTICE
+            return "partial"
+    return "failed"
+
+
+def failed_turn_notice(turn_messages: Any) -> str:
+    """Boundary copy for a failed turn: never claim "not processed" when a tool may have run."""
+    return FAILED_TURN_COPY[failed_turn_outcome(turn_messages)]
+
+
+def failed_turn_boundary(outcome: str, *, notice: Optional[str] = None,
+                         display_metadata: Optional[dict] = None, timestamp: Optional[float] = None) -> dict:
+    """The row that closes a failed turn (Rule 1: a ``role="user"`` system_event, never assistant):
+    ``turn_outcome=<outcome>`` on the row closes the durable tail; its text is the boundary copy (or an
+    explicit *notice*, e.g. an owner-stop explanation) and renders as a system-reminder in front of the
+    next user turn."""
+    from agent.message_parts import harness_notice_message
+
+    row = harness_notice_message("error_notice", notice or FAILED_TURN_COPY[outcome], notice="failed_turn",
+                                 turn_outcome=outcome, display_kind=FAILED_TURN_DISPLAY_KIND)
+    if display_metadata:
+        row["display_metadata"] = display_metadata
+    if timestamp is not None:
+        row["timestamp"] = timestamp
+    return row
 
 
 def provider_label_for(provider: Any) -> str:

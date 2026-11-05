@@ -6,7 +6,7 @@ from __future__ import annotations
 import threading
 import time
 
-from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
+from agent.agent_runtime_helpers_placeholders import INTERRUPTED_NO_OUTPUT_TEXT
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED
 from agent.turn_api_call import handle_api_interrupt
 from agent.turn_retry_state import TurnRetryState
@@ -40,16 +40,18 @@ def _interrupt(streamed: str):
 
 def test_repetition_dominated_partial_is_not_kept_as_the_interrupted_row():
     """A looped partial replayed as the interrupted assistant row re-seeds the loop on the next
-    turn (#112764): the row keeps the neutral placeholder and the user is told what happened."""
+    turn (#112764): a hidden interrupt notice closes the turn instead (a user-side system_event, never
+    an assistant placeholder: Rule 1) and the user is told what happened."""
     looped = "I. " * 1941
 
     messages, verdict = _interrupt(looped)
 
-    # Same hidden shape as the redirect placeholder: no visible bubble in transcript replays.
-    assert messages[-1]["role"] == "assistant"
-    assert messages[-1]["content"] == ""
+    # Hidden: no visible bubble in transcript replays; the neutral notice is what the model reads.
+    assert messages[-1]["role"] == "user" and messages[-1]["sender_kind"] == "system"
+    assert messages[-1]["content"] == INTERRUPTED_NO_OUTPUT_TEXT
     assert messages[-1]["display_kind"] == "hidden"
-    assert messages[-1]["api_content"] == _INTERRUPTED_PLACEHOLDER
+    assert messages[-1]["turn_outcome"] == "interrupted"
+    assert messages[-1]["_parts"][0]["kind"] == "interrupt"
     assert verdict.final_response == REPETITION_LOOP_INTERRUPTED
     assert "I. I. I." not in verdict.final_response
 

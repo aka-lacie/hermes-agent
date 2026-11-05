@@ -101,16 +101,15 @@ def test_rejoin_valid_seam_assistant_then_user():
     assert _no_consecutive_dupes(out)
 
 
-def test_rejoin_user_user_seam_merges():
-    # Degenerate head ending on a user summary; tail starts on user.
+def test_rejoin_user_user_seam_keeps_both_rows():
+    # Degenerate head ending on a user summary; tail starts on user. Phase 2e: consecutive user rows
+    # stay separate (the wire renderer merges them; a typed row's parts are never folded as text) and
+    # no synthetic assistant row bridges them (Rule 1).
     head = [{"role": "user", "content": "[summary of head]"}]
     tail = [{"role": "user", "content": "latest question"},
             {"role": "assistant", "content": "answer"}]
     out = rejoin_compressed_head_and_tail(head, tail)
-    assert _no_consecutive_dupes(out), out
-    # The two user messages were merged into one.
-    assert out[0]["content"] == "[summary of head]\n\nlatest question"
-    assert out[1] == {"role": "assistant", "content": "answer"}
+    assert out == head + tail
 
 
 def test_rejoin_assistant_assistant_seam_merges():

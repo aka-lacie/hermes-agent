@@ -76,6 +76,8 @@ def test_first_tool_group_right_before_the_active_request_still_compacts():
     assert cc._last_compression_made_progress is True
     assert len(result) < len(messages)
     assert sum(1 for m in result if cc._is_context_summary_message(m)) == 1
-    # The active ask survives verbatim (after the summary's end marker) and the rounds after it stay in the tail.
-    assert result[0]["content"].endswith(ask)
-    assert [m.get("content") for m in result[1:]] == [m.get("content") for m in messages[5:]]
+    # The summary is its own user system_event row right before the active ask (the API copy merges
+    # them into one turn); the ask survives verbatim and the rounds after it stay in the tail.
+    assert result[0]["part_kind"] == "compaction" and result[0]["role"] == "user"
+    assert result[1]["content"] == ask
+    assert [m.get("content") for m in result[2:]] == [m.get("content") for m in messages[5:]]
