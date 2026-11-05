@@ -196,6 +196,9 @@ class GatewayTurnPrepareMixin:
                     if ch_runtime_model and not ch.model:
                         model = ch_runtime_model
 
+        # A webhook route's own provider/model pin (sessions.route, platforms/webhook_route_runtime.py).
+        from gateway.platforms.webhook_route_runtime import pinned_runtime
+        model, runtime_kwargs = pinned_runtime(self, source, skey, model, runtime_kwargs)
         if override and skey:
             model, runtime_kwargs = self._apply_session_model_override(skey, model, runtime_kwargs)
 

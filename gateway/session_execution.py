@@ -177,7 +177,7 @@ class GatewaySessionAgentMixin:
             session_db=getattr(runner._session_db, "_db", runner._session_db),
             # Reload from disk — do not reuse the startup snapshot.
             # See #60955.
-            fallback_model=None if api_runtime_locked() else self._runner._refresh_fallback_model(),
+            fallback_model=None if api_runtime_locked() else self._turn_fallback_chain(),
             skip_context_files=skip_context_files,
             # Keep the persona even with minimal context: soul identity is one small file.
             load_soul_identity=not bool(policy and policy.ignore_rules),
@@ -187,6 +187,13 @@ class GatewaySessionAgentMixin:
             # None leaves the agent reading the owner's config, as before.
             run_budget_seconds=policy.run_budget_seconds if policy else None,
         )
+
+    def _turn_fallback_chain(self):
+        """This turn's failover chain, re-read from disk: the profile's ``fallback_providers``, or a webhook
+        session's declared route chain / pin rule (``platforms/webhook_route_runtime.turn_fallback_chain``)."""
+        from gateway.platforms.webhook_route_runtime import turn_fallback_chain
+        return turn_fallback_chain(self._runner, self._ctx.source, self._ctx.session_id,
+                                   self._runner._refresh_fallback_model)
 
     def _resolve_turn_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr):
         """Reuse this session's cached AIAgent (frozen system prompt + tool schemas → prompt cache
@@ -217,7 +224,7 @@ class GatewaySessionAgentMixin:
             with cache_lock:
                 cache.pop(ctx.session_key, None)
         if found.reused and agent is not None:
-            self._runner._apply_fallback_chain_to_agent(agent, None if locked else runner._refresh_fallback_model())
+            self._runner._apply_fallback_chain_to_agent(agent, None if locked else self._turn_fallback_chain())
         if found.evicted is not None:
             self._release_evicted_agent(found.evicted)
         if agent is None:
