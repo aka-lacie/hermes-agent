@@ -163,7 +163,8 @@ def lineage(hermes_home: Path, sid: str) -> list[str]:
 
 
 def is_summary(msg: dict[str, Any]) -> bool:
-    return SUMMARY_TEXT in _text(msg.get("content") or "") or bool(msg.get("_compressed_summary"))
+    return (SUMMARY_TEXT in _text(msg.get("content") or "") or bool(msg.get("_compressed_summary"))
+            or msg.get("part_kind") == "compaction")
 
 
 def assert_rows_exactly_once(hermes_home: Path, sid: str, where: str) -> None:
@@ -197,14 +198,45 @@ def assert_exactly_once(msgs: Iterable[dict[str, Any]], where: str) -> None:
         seen[k] = i
 
 
+def _wire_row_identities(ident: tuple, row_ids: list[tuple]) -> list[tuple]:
+    """The persisted rows one wire message stands for: a user wire turn the API copy merged from a run of
+    consecutive persisted user rows (a person's turn beside a harness notice) is those rows."""
+    if ident[0] != "user":
+        return [ident]
+    for i, start in enumerate(row_ids):
+        run: list[tuple] = []
+        for row in row_ids[i:]:
+            if row[0] != "user":
+                break
+            run.append(row)
+            if len(run) > 1 and "\n\n".join(x[1] for x in run) == ident[1]:
+                return run
+    return [ident]
+
+
 def model_payload(msgs: Iterable[dict[str, Any]]) -> list[tuple]:
-    return [identity(m) for m in msgs if m.get("role") != "system"]
+    """Identities as the model receives them: consecutive user rows (a compaction summary or a harness
+    notice beside a person's turn, Phase 2e) reach the wire as ONE user turn, joined like the API copy."""
+    out: list[tuple] = []
+    for m in msgs:
+        if m.get("role") == "system":
+            continue
+        ident = identity(m)
+        if out and ident[0] == "user" and out[-1][0] == "user" and not (ident[2] or out[-1][2]):
+            prev = out.pop()
+            ident = ("user", "\n\n".join(t for t in (prev[1], ident[1]) if t), None, ident[3])
+        out.append(ident)
+    return out
 
 
 def assert_replay_equals_persisted(request: dict[str, Any], persisted: list[dict], where: str) -> None:
     """(b) The first request of turn N+1 replays exactly the persisted model history + the new user msg."""
     sent = model_payload(request["messages"])
     want = model_payload(persisted)
+    if (sent and want and len(sent) == len(want) and sent[-1][0] == want[-1][0] == "user"
+            and sent[-1][1].startswith(want[-1][1] + "\n\n")):
+        # The new message joined a trailing user group (a failed-turn notice): the wire merges them.
+        sent = [*sent[:-1], want[-1], ("user", sent[-1][1][len(want[-1][1]) + 2:], None, ())]
     assert sent[:-1] == want, (
         f"{where}: history sent to the model != persisted history\n"
         + _list_diff(want, sent[:-1], "persisted", "sent"))
@@ -223,7 +255,9 @@ def prefix_breaks(requests: list[dict[str, Any]], *, tools: bool = True) -> list
     """(C17) Indices i where request i is NOT a byte-identical extension of request i-1.
 
     Byte-stability covers the tools array (unless ``tools=False``), the system prompt and every
-    earlier message.
+    earlier message. One growth is an extension, not a break: the previous request's LAST message,
+    a user turn, continued by rows appended after it (Phase 2e: a failed-turn / interrupt notice and
+    the next request reach the wire merged into that user turn; its bytes are a strict prefix).
     """
     breaks = []
     for i in range(1, len(requests)):
@@ -237,6 +271,11 @@ def prefix_breaks(requests: list[dict[str, Any]], *, tools: bool = True) -> list
             continue
         for j, (a, b) in enumerate(zip(pm, cm)):
             ca, cb = canon(a), canon(b)
+            if (ca != cb and j == len(pm) - 1 and a.get("role") == b.get("role") == "user"
+                    and isinstance(a.get("content"), str) and isinstance(b.get("content"), str)
+                    and b["content"].startswith(a["content"] + "\n\n")
+                    and canon({**b, "content": a["content"]}) == ca):
+                continue
             if ca != cb:
                 breaks.append((i, f"messages[{j}] ({a.get('role')}) changed; {first_divergence(ca, cb)}"))
                 break
@@ -282,8 +321,9 @@ def assert_no_loss(ever_sent: dict[tuple, str], display: list[dict], model: list
 def assert_inputs_shown_once(inputs: list[str], display: list[dict], model: list[dict], where: str) -> None:
     """Every text the user typed is on screen exactly once after a resume, and at most once in
     what the model is fed (compaction may summarize it away, never duplicate or merge-copy it)."""
-    def hits(msgs: list[dict], text: str) -> int:
-        return sum(_text(m.get("content") or "").count(text) for m in msgs if m.get("role") == "user")
+    def hits(msgs: list[dict], text: str) -> int:  # a person's rows: a summary quoting them is not input
+        return sum(_text(m.get("content") or "").count(text) for m in msgs
+                   if m.get("role") == "user" and not is_summary(m))
     for text in inputs:
         shown, fed = hits(display, text), hits(model, text)
         assert shown == 1, f"{where}: user input {text[:60]!r} shown {shown}x in the resumed display history"
@@ -669,15 +709,21 @@ class Ledger:
                     assert_replay_equals_persisted(first, self.model_view, where)
                 sent = model_payload(first["messages"])
                 persisted = model_payload(model)
+                if (sent and len(persisted) >= len(sent) and sent[-1][0] == persisted[len(sent) - 1][0] == "user"
+                        and persisted[len(sent) - 1][1].startswith(sent[-1][1] + "\n\n")):
+                    # Rows appended after the request (a failed-turn or interrupt notice) join its wire turn.
+                    persisted = [*persisted[:len(sent) - 1], sent[-1], *persisted[len(sent):]]
                 assert persisted[:len(sent)] == sent, (
                     f"{where}: the durable model view does not start with what this turn sent\n"
                     + _list_diff(sent, persisted[:len(sent)], "sent", "persisted"))
         elif compaction:
             self.compaction_request_idx.append(len(reqs))
+        row_ids = [identity(m) for m in model if m.get("role") != "system"]
         for r in new:
             for m in r["messages"]:
                 if m.get("role") != "system" and not is_summary(m):
-                    self.ever.setdefault(identity(m), short(identity(m)))
+                    for ident in _wire_row_identities(identity(m), row_ids):
+                        self.ever.setdefault(ident, short(ident))
         for m in model:
             if m.get("role") != "system" and not is_summary(m):
                 self.ever.setdefault(identity(m), short(identity(m)))

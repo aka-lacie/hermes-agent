@@ -2105,7 +2105,7 @@ class TestCronDeliveryMirror:
 
     def test_mirror_writes_user_role_with_label_not_assistant(self):
         """Regression for #2221 / #2313: the cron brief must mirror as a USER
-        turn (with a [Cron delivery: ...] label), NOT assistant — an
+        turn (a typed ``cron`` system_event, Rule 2: no "[Cron delivery: …]" label), NOT assistant — an
         assistant-role mirror lands as assistant->assistant after the agent's
         last turn and breaks strict alternation on non-Anthropic providers."""
         from cron.scheduler_delivery import _maybe_mirror_cron_delivery
@@ -2118,11 +2118,11 @@ class TestCronDeliveryMirror:
         m.assert_called_once()
         args, kwargs = m.call_args
         assert kwargs.get("sender_id") == "cron:j1", "cron mirror is a user-role system_event from the job"
-        # The brief text is prefixed with a human-readable cron-delivery label
-        # so replay (where the mirror metadata is dropped at the SQLite
-        # boundary) still distinguishes it from a genuine user message.
-        assert args[2].startswith("[Cron delivery: Morning Brief]")
-        assert "Market movers today" in args[2]
+        # Provenance is structure (event kind, sender, job meta persisted with the row), never a
+        # bracket label prefixed to the brief text.
+        assert args[2] == "Market movers today"
+        assert (kwargs.get("event_kind"), kwargs.get("sender_kind")) == ("cron", "cron")
+        assert kwargs.get("meta") == {"job_name": "Morning Brief", "job_id": "j1"}
 
     def test_delivery_mirrors_clean_content_not_wrapped(self):
         """When enabled, the mirror receives the CLEAN agent output, not the
