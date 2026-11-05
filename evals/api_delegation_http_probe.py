@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 
 async def probe():
+    from agent.message_parts import MODEL_ORIGIN
     from gateway.config import PlatformConfig
     from gateway.platforms.api_server import APIServerAdapter
     from gateway.session_context import get_session_env
@@ -25,7 +26,7 @@ async def probe():
     db = SessionDB(db_path=Path(os.environ["HERMES_HOME"]) / "state.db")
     db.create_session("parent", source="api_server")
     db.append_message("parent", "user", "request")
-    db.append_message("parent", "assistant", "acknowledged")
+    db.append_message("parent", "assistant", "acknowledged", origin=MODEL_ORIGIN)  # a prior model reply
     db.end_session("parent", "compression")
     db.create_session("child", source="api_server", parent_session_id="parent")
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "fixture-api-key"}))
@@ -77,7 +78,7 @@ async def probe():
         snapshot = [{"role": "user", "content": "caller snapshot"}]
         adapter._response_store.put("resp-seed", {"conversation_history": snapshot, "session_id": "parent"})
         db.create_session("declared", source="api_server", session_key="fixture-key")
-        db.append_message("declared", "assistant", "DECLARED_HISTORY")
+        db.append_message("declared", "assistant", "DECLARED_HISTORY", origin=MODEL_ORIGIN)
         for name, body, extra_headers in (
             ("session", {"session_id": "parent"}, {}),
             ("caller_history", {"session_id": "parent", "conversation_history": snapshot}, {}),
