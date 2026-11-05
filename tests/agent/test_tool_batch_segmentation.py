@@ -595,8 +595,10 @@ class TestSegmentedDispatchIntegration:
 
         large_result_index = next(i for i, call in enumerate(calls) if call.id.endswith("large"))
         _assert_budget_replaced(messages[large_result_index]["content"])
-        steer_messages = [m for m in messages if STEER_MARKER_OPEN in m["content"]]
+        # The steer is its own typed row (human part, delivery=steer) after the tool results.
+        steer_messages = [m for m in messages if m.get("display_kind") == "steer"]
         assert steer_messages == [messages[-1]]
+        assert messages[-1]["_parts"][0]["delivery"] == "steer"
         assert "preserve this steer after budget enforcement" in steer_messages[0]["content"]
 
     def test_steer_survives_turn_budget_after_malformed_arguments(self, agent):
@@ -625,7 +627,7 @@ class TestSegmentedDispatchIntegration:
         _assert_budget_replaced(messages[0]["content"])
         assert STEER_MARKER_OPEN not in messages[0]["content"]   # tool row untouched
         assert messages[1]["role"] == "user"                      # steer = new user msg
-        assert messages[1]["content"].count(STEER_MARKER_OPEN) == 1
+        assert messages[1]["display_kind"] == "steer" and messages[1]["_parts"][0]["delivery"] == "steer"
         assert "preserve malformed-call steer after budget enforcement" in messages[1]["content"]
 
 

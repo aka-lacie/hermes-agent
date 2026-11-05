@@ -233,7 +233,7 @@ class TestBusyHandlerDemotesInterruptForSubagents:
 
         parent.steer.assert_called_once()
         injected = parent.steer.call_args.args[0]
-        assert injected.endswith("course-correct")
-        assert '"chat_id": "123"' in injected
+        assert injected == "course-correct"  # typed steer: raw text + structured origin
+        assert parent.steer.call_args.kwargs["origin"]["channel_id"] == "123"
         parent.interrupt.assert_not_called()
 

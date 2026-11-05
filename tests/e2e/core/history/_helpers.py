@@ -76,9 +76,17 @@ def identity(msg: dict[str, Any]) -> tuple:
     """Logical identity of one conversation message as the MODEL sees it.
 
     User rows replay their ``api_content`` sidecar when present (surface notes, attachments),
-    so that is the text the identity uses.
+    so that is the text the identity uses. A typed row (``_parts``) is sent as the wire renderer's
+    deterministic render of its parts, so that rendering is its identity.
     """
     content = msg.get("api_content") if msg.get("role") == "user" and msg.get("api_content") else msg.get("content")
+    if msg.get("role") == "user" and isinstance(msg.get("_parts"), list):
+        from agent.wire_render import DEFAULT_RENDERER
+
+        rendered = DEFAULT_RENDERER.render([msg])
+        if len(rendered) == 1:
+            content = rendered[0].get("content")
+            content = content.strip() if isinstance(content, str) else content
     return (msg.get("role"), _text(content or ""), msg.get("tool_call_id") or None, _calls(msg.get("tool_calls")))
 
 
