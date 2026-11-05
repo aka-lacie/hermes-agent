@@ -245,11 +245,13 @@ def test_chat_gateways_keep_normal_answers(platform):
 
 
 @pytest.mark.parametrize("platform", CHAT_PLATFORMS)
-def test_chat_gateways_drop_interrupt_sentinel(platform):
-    """The interrupt-while-waiting sentinel is metadata, not a reply (#7921)."""
+def test_chat_gateways_never_match_the_interrupt_sentinel_text(platform):
+    """The interrupt-while-waiting notice is metadata, not a reply (#7921), but it is recognized by the
+    turn result's ``interrupt_notice`` flag (tests/gateway/test_empty_sentinel_rewrite_copy.py), never
+    by its text (Rule 2): a reply that reads like it passes through the sanitizer."""
     sentinel = "Operation interrupted: waiting for model response (1.7s elapsed)."
 
-    assert _sanitize_gateway_final_response(platform, sentinel) == ""
+    assert _sanitize_gateway_final_response(platform, sentinel) == sentinel
     assert _sanitize_gateway_final_response("local", sentinel) == sentinel
 
 

@@ -111,8 +111,8 @@ class GatewayTurnPersistenceMixin:
         post-compression session_id propagation. Returns
         ``(response, _intentional_silence, agent_messages)``."""
         from gateway.run import (
-            _is_gateway_hidden_reasoning_incomplete_turn, _normalize_empty_agent_response,
-            _sanitize_gateway_final_response, _should_clear_resume_pending_after_turn,
+            _gateway_surface_passes_raw_text, _is_gateway_hidden_reasoning_incomplete_turn,
+            _normalize_empty_agent_response, _sanitize_gateway_final_response, _should_clear_resume_pending_after_turn,
         )
         response = agent_result.get("final_response") or ""
         # Hidden-reasoning-only retry exhaustion: the loop's sentinel text doubles as final_response
@@ -184,8 +184,9 @@ class GatewayTurnPersistenceMixin:
             if automatic_notices_allowed(source):
                 response = _normalize_empty_agent_response(agent_result, response, history_len=len(history))
             response = _sanitize_gateway_final_response(source.platform, response)
-            if agent_result.get("interrupt_notice"):
-                # The waiting-for-model interrupt notice is cancellation metadata, not a reply (#7921).
+            if agent_result.get("interrupt_notice") and not _gateway_surface_passes_raw_text(source.platform):
+                # The waiting-for-model interrupt notice is cancellation metadata, not a chat reply (#7921);
+                # flagged by the turn result, never recognized by its text.
                 response = ""
 
         # The agent thread already updated the contextvar; propagate to SessionEntry + _save() only

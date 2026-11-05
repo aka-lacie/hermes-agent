@@ -63,7 +63,7 @@ async def test_discard_closure_failure_keeps_unknown_fence_and_retry_is_exact(ow
     from tests.waiting import async_wait_until
     await async_wait_until(lambda: not mutation_tasks(owner), timeout=5, what='off-loop media collection')
     assert not Path(references[0]['path']).exists()
-    assert owner.db.latest_conversation_role(target) == 'assistant'
+    assert owner.db.latest_conversation_role(target) == 'closed'  # the boundary row carries turn_outcome
     successor = claim_session_input(owner.db, epoch=owner.epoch, session_id='s')
     assert successor['request_id'] == 'next'
     owner.db.append_message(target, 'user', 'FOLLOWER')
@@ -93,4 +93,8 @@ async def test_discard_closes_turn_lost_while_parked_on_a_tool(owner, monkeypatc
     await owner.resolve_unknown(actor, ref, first['admission_id'], claim['generation'])
     history = owner.db.get_messages_as_conversation('s') + [{'role': 'user', 'content': 'FOLLOWER'}]
     repair_message_sequence(None, history)
-    assert [m['content'] for m in history if m['role'] == 'user'] == ['LOST', 'FOLLOWER'], history
+    # The discarded input and the follower stay separate rows with the boundary (a user-side harness
+    # notice, Rule 1) between them: the wire renders it as a system-reminder, never a silent merge.
+    users = [m for m in history if m['role'] == 'user']
+    assert [m['content'] for m in users if not m.get('turn_outcome')] == ['LOST', 'FOLLOWER'], history
+    assert [m.get('display_kind') for m in users] == [None, 'failed_turn', None], history

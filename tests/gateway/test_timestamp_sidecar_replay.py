@@ -63,13 +63,15 @@ def test_discord_note_sidecar_survives_timestamped_rebuild():
     DISCORD_NOTE + "\n\nsome other question",  # note, but a different authored body
     DISCORD_NOTE + "\n\nfirst questionnaire",  # body is only a string prefix of the sent text
 ])
-def test_mismatched_discord_sidecar_is_still_dropped(sidecar_body):
+def test_untyped_row_sidecar_is_authoritative(sidecar_body):
+    """Phase 2e (Rule 2): a kept api_content sidecar is exactly what was sent; replay never re-renders
+    the row and string-matches the sidecar against it (``_sidecar_matches_rendered_user`` is gone)."""
     head = _render("x")[: -len("x")]
     replay, _ = _build_gateway_agent_history(
         [{"role": "user", "content": "first question", "api_content": head + sidecar_body, "timestamp": STAMP}],
         inject_timestamps=True,
     )
-    assert "api_content" not in replay[0]
+    assert replay[0]["api_content"] == head + sidecar_body
     assert replay[0]["content"] == _render("first question")
 
 

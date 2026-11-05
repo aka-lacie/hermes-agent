@@ -31,3 +31,24 @@ async def test_empty_sentinel_rewrite_uses_the_shared_explanation_with_the_model
     )
     assert silent is False
     assert EMPTY_RESPONSE_EXPLANATION.format(model="llama3") in response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, flagged, expected", [
+    ("telegram", True, ""),  # chat surface: cancellation metadata, not a reply (#7921)
+    ("telegram", False, "Operation interrupted: waiting for model response (1.7s elapsed)."),  # never by text
+    ("local", True, "Operation interrupted: waiting for model response (1.7s elapsed)."),  # raw-text surface
+])
+async def test_interrupt_notice_is_suppressed_by_the_result_flag_only(platform, flagged, expected):
+    from gateway.config import Platform
+
+    runner = _Runner()
+    agent_result = {"final_response": "Operation interrupted: waiting for model response (1.7s elapsed).",
+                    "interrupted": True, "interrupt_notice": flagged, "messages": [], "api_calls": 1}
+    source = SimpleNamespace(chat_id="c1", platform=Platform(platform))
+    response, _silent, _messages = await runner._hmwa_shape_agent_response(
+        agent_result, source, history=[], session_entry=SimpleNamespace(session_id="s"), session_key=None,
+        _quick_key=None, run_generation=0, _run_start_session_id="s", _platform_name=platform,
+        _msg_start_time=0.0,
+    )
+    assert response == expected

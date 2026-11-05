@@ -961,8 +961,14 @@ class TestCrossPlatformDeliveryMirror:
                     "deliver_extra": {"chat_id": self._CHAT}}
         result = await adapter._deliver_cross_platform("telegram", "Henderson OUT Wednesday", delivery)
         assert result.success is True
-        assert self._transcript(work_home, "dm-work") == [
-            ("user", "[Webhook delivery: ambush-nfl]\nHenderson OUT Wednesday")]
+        # Typed (Rule 2): the route rides as structure on a webhook system_event, never a bracket prefix.
+        assert self._transcript(work_home, "dm-work") == [("user", "Henderson OUT Wednesday")]
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=work_home / "state.db")
+        row = db._conn.execute("SELECT sender_kind, sender_id, part_kind FROM messages WHERE session_id=?",
+                               ("dm-work",)).fetchone()
+        db.close()
+        assert tuple(row) == ("webhook", "webhook:ambush-nfl", "webhook")
         assert self._transcript(default_home, "dm-default") == []
 
     @pytest.mark.asyncio
