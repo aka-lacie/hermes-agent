@@ -228,6 +228,8 @@ SCHEMA_HISTORY: dict[str, _TableHistory] = {
             ('+', 'root_session_id', 'role'),
             ('+', 'group_id', 'root_session_id'),
         )),
+        # Keyed webhook sessions (dev3 Phase 3): the producer's stable conversation key.
+        ('34 2026-11-05T20:00Z dev3-phase3-webhook', (('+', 'conversation_key', 'group_id'),)),
         ),
     ),
     "messages": _TableHistory(
