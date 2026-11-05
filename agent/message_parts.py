@@ -92,6 +92,8 @@ HARNESS_NOTICE_DISPLAY_KINDS = frozenset({HARNESS_NOTICE_DISPLAY_KIND, FAILED_TU
 HARNESS_NOTICE_SENDER_PREFIX = "system:"
 
 _DB_PERSISTED_MARKER = "_db_persisted"  # agent.context_compressor._DB_PERSISTED_MARKER (import-light here)
+_COMPRESSED_SUMMARY_KEY = "_compressed_summary"  # agent.context_compressor.COMPRESSED_SUMMARY_METADATA_KEY
+COMPACTION_EVENT_KIND = "compaction"
 
 
 # ── constructors ──────────────────────────────────────────────────────────────
@@ -168,6 +170,24 @@ def is_harness_notice(msg: Any) -> bool:
     """A harness notice row (:func:`harness_notice_message`), by its columns."""
     return (isinstance(msg, Mapping) and msg.get("role") == "user" and msg.get("sender_kind") == "system"
             and msg.get("display_kind") in HARNESS_NOTICE_DISPLAY_KINDS)
+
+
+def is_compaction_event(msg: Any) -> bool:
+    """A typed compaction summary row, by its columns and parts (never its text)."""
+    if not isinstance(msg, Mapping):
+        return False
+    if msg.get("part_kind") == COMPACTION_EVENT_KIND and msg.get("sender_kind") == "system":
+        return True
+    return has_parts(msg) and any(
+        part.get("type") == SYSTEM_EVENT and part.get("kind") == COMPACTION_EVENT_KIND for part in msg[MESSAGE_PARTS])
+
+
+def stands_alone(msg: Any) -> bool:
+    """A row that stays its own durable row next to other user rows: a harness notice or a compaction
+    summary. The wire renderer and the API-copy merge join it with its neighbours; the canonical
+    history never folds it into a person's row."""
+    return isinstance(msg, Mapping) and (
+        is_harness_notice(msg) or bool(msg.get(_COMPRESSED_SUMMARY_KEY)) or is_compaction_event(msg))
 
 
 def display_role(msg: Mapping[str, Any]) -> Any:

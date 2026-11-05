@@ -52,7 +52,9 @@ from agent.model_metadata import (
 from agent.context_default_record import last_defaulted_context_length
 from agent.redact import redact_sensitive_text
 from agent.turn_context import drop_stale_api_content
-from agent.message_parts import HUMAN, MESSAGE_PARTS, PLAIN_TEXT_SEPARATOR, SYSTEM_EVENT, has_parts, system_event_message
+from agent.message_parts import (
+    COMPACTION_EVENT_KIND, HUMAN, MESSAGE_PARTS, PLAIN_TEXT_SEPARATOR, has_parts, is_compaction_event,
+    system_event_message)
 from tools.todo_tool import TODO_INJECTION_HEADER
 
 logger = logging.getLogger(__name__)
@@ -5548,20 +5550,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         return joined[:at] + [summary_row] + joined[at:]
 
 
-COMPACTION_EVENT_KIND = "compaction"
 COMPACTION_SENDER_ID = "system:compaction"
-
-
-def is_compaction_event_message(message: Any) -> bool:
-    """A typed compaction summary row, by its columns and parts (never its text)."""
-    if not isinstance(message, dict):
-        return False
-    if message.get("part_kind") == COMPACTION_EVENT_KIND and message.get("sender_kind") == "system":
-        return True
-    return has_parts(message) and any(
-        part.get("type") == SYSTEM_EVENT and part.get("kind") == COMPACTION_EVENT_KIND
-        for part in message[MESSAGE_PARTS])
-
+is_compaction_event_message = is_compaction_event  # by columns and parts, never text
 
 def compaction_summary_row(text: str, *, has_user_turn: bool, meta: Optional[dict] = None, **flags: Any) -> dict:
     """The compaction summary row: ``role="user"``, ``sender_kind="system"``, ``sender_id="system:compaction"``,

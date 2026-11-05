@@ -22,7 +22,7 @@ from agent.message_sanitization import (
 from agent.message_metadata import (
     TOOL_CALL_UIDS, merge_tool_call_uids, per_occurrence_tool_call_uids, record_absorbed_message)
 from agent.interrupt_control import drained_steer_inputs
-from agent.message_parts import MESSAGE_PARTS, RENDERED, merge as merge_parts
+from agent.message_parts import MESSAGE_PARTS, RENDERED, merge as merge_parts, stands_alone
 from agent.cache_bounds import publish_lru
 from agent.prompt_builder import STEER_DISPLAY_KIND, steer_user_row
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
@@ -661,18 +661,6 @@ def _prune_unanswered_tool_calls(messages: list[dict]) -> tuple[list[dict], int]
     return pruned, repairs
 
 
-def _standalone_event_row(msg: Any) -> bool:
-    """A row that stays its own durable row next to other user rows: a harness notice (failed-turn
-    boundary, interrupt, guardrail halt) or a compaction summary. They are role="user" system_event
-    rows (Rule 1); the wire renderer and the API-copy merge join them with their neighbours, so the
-    canonical history never folds them into a person's row."""
-    from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY, is_compaction_event_message
-    from agent.message_parts import is_harness_notice
-
-    return isinstance(msg, dict) and (
-        is_harness_notice(msg) or bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)) or is_compaction_event_message(msg))
-
-
 def _merge_consecutive_users(messages: list[dict]) -> tuple[list[dict], int]:
     """Pass 3: merge consecutive plain-text user messages (no user input lost)."""
     from agent.context_compressor import _DB_PERSISTED_MARKER, split_user_originated_turn
@@ -690,11 +678,9 @@ def _merge_consecutive_users(messages: list[dict]) -> tuple[list[dict], int]:
         if (
             prev is not None and prev.get("role") == "user"
             and isinstance(msg, dict) and msg.get("role") == "user"
-            # A summary carrier followed by a new user row is a deliberate durable shape after
-            # retry/rewind; never mutate the persisted carrier (sanitizers merge copies later).
-            and split_user_originated_turn(prev)[0] is None
-            # Harness notices and compaction summaries are their own rows (the API copy merges them).
-            and not _standalone_event_row(prev) and not _standalone_event_row(msg)
+            # A summary carrier followed by a new user row is a deliberate durable shape after retry/rewind, and
+            # harness notices / summary rows stay their own rows: never mutate them (the API copy merges copies).
+            and split_user_originated_turn(prev)[0] is None and not stands_alone(prev) and not stands_alone(msg)
             # A /steer row that ended the previous run is already persisted; merging the next
             # prompt into it would rewrite it in place and re-break replay parity.
             and prev.get("display_kind") != STEER_DISPLAY_KIND
