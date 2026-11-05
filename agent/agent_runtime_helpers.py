@@ -21,6 +21,7 @@ from agent.message_sanitization import (
 )
 from agent.message_metadata import (
     TOOL_CALL_UIDS, merge_tool_call_uids, per_occurrence_tool_call_uids, record_absorbed_message)
+from agent.interrupt_control import drained_steer_inputs
 from agent.message_parts import MESSAGE_PARTS, RENDERED, merge as merge_parts
 from agent.cache_bounds import publish_lru
 from agent.prompt_builder import STEER_DISPLAY_KIND, steer_user_row
@@ -1237,9 +1238,7 @@ def drop_thinking_only_and_merge_users(
             merged.append(m)
         else:
             merged[-1] = {**prev, "content": content}  # copy so caller dicts are never mutated
-            # Typed rows concatenate parts; untypable content drops them. A rendered adapter-route clone
-            # keeps its joined wire text and concatenated parts (agent.wire_render, native renderers).
-            if not merge_parts(merged[-1], m) and not merged[-1].get(RENDERED):
+            if not merge_parts(merged[-1], m) and not merged[-1].get(RENDERED):  # untypable content drops parts
                 merged[-1].pop(MESSAGE_PARTS, None)
             merges += 1
     if dropped == 0 and merges == 0:
@@ -3725,12 +3724,10 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     tail = range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1)
     target = next((messages[j] for j in tail if isinstance(messages[j], dict) and messages[j].get("role") == "tool"), None)
     if target is None:
-        # No tool result in this batch (e.g. all skipped by interrupt);
-        # requeue so the fallback path delivers it as a normal next-turn
-        # user message (which persists like any other user turn).
+        # No tool result in this batch (e.g. all skipped by interrupt): requeue so the fallback path
+        # delivers it as a normal next-turn user message (which persists like any other user turn).
         _requeue_pending_steer(agent, steer_text)
         return
-    from agent.interrupt_control import drained_steer_inputs
     messages.append(steer_user_row(steer_text, steers=drained_steer_inputs(agent, steer_text)))
     _ra().logger.info(
         "Delivered /steer to agent after tool batch (%d chars) as new user message: %s", len(steer_text),

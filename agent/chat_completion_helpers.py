@@ -44,6 +44,8 @@ from agent.gemini_native_adapter import is_native_gemini_base_url
 from agent.model_metadata import is_local_endpoint
 from agent.message_content import flatten_message_text
 from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, data_use_requirement, stamp_message_timestamp
+from agent.message_parts import MESSAGE_PARTS
+from agent.wire_render import render_messages
 from agent.message_sanitization import (
     _sanitize_messages_surrogates, _sanitize_surrogates, _repair_tool_call_arguments,
     normalize_finish_reason as _normalize_finish_reason, sanitize_outbound_kwargs, strip_images_for_rejecting_model,
@@ -2114,10 +2116,10 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
             continue  # try next in chain
 
 
-# Keys outside the Chat Completions schema that strict gateways (Fireworks-backed OpenCode
-# Go, Mistral, Moonshot/Kimi) reject with 422. The transport's convert_messages() drops them
-# in the main loop; the summary path calls chat.completions.create() directly, so mirror it.
-_SUMMARY_FOREIGN_MESSAGE_KEYS = PERSISTENCE_ONLY_MESSAGE_FIELDS | {"reasoning", "finish_reason", "tool_name",
+# Keys outside the Chat Completions schema that strict gateways (Fireworks-backed OpenCode Go, Mistral,
+# Moonshot/Kimi) reject with 422. The transport's convert_messages() drops them in the main loop; the summary
+# path calls chat.completions.create() directly, so mirror it (``_parts`` is consumed by its render below).
+_SUMMARY_FOREIGN_MESSAGE_KEYS = (PERSISTENCE_ONLY_MESSAGE_FIELDS - {MESSAGE_PARTS}) | {"reasoning", "finish_reason", "tool_name",
     "codex_reasoning_items", "codex_message_items", "platform_message_id"}
 _EMPTY_SUMMARY_RESPONSE = "I reached the iteration limit and couldn't generate a summary."
 
@@ -2135,37 +2137,26 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
         # MoA: agent.model is the virtual preset; use the real aggregator so Gemini keeps thought_signature.
         agg_slot = getattr(getattr(agent, "client", None), "last_aggregator_slot", None)
         sanitize_model = (agg_slot or {}).get("model") or sanitize_model
-    from agent.message_parts import MESSAGE_PARTS
-    from agent.wire_render import render_messages
-
     api_messages = []
     for msg in messages:
         api_msg = msg.copy()
         agent._copy_reasoning_content_for_api(msg, api_msg)
         for key in _SUMMARY_FOREIGN_MESSAGE_KEYS:
-            if key != MESSAGE_PARTS:  # consumed by the render below, before any sweep
-                api_msg.pop(key, None)
+            api_msg.pop(key, None)
         # Mirror of the transport's role-qualified strip: ``name`` is
         # schema-foreign on tool results only (strict providers reject with
         # "contains item with unknown key name"); it stays on user/assistant.
         if api_msg.get("role") == "tool":
             api_msg.pop("name", None)
-        # api_content holds the exact bytes the main loop sent; substituting (not popping)
-        # keeps the summary's prefix identical instead of re-prefilling the largest context.
-        # Strict OpenAI-compatible gateways (Fireworks-backed OpenCode Go, Mistral, Moonshot/Kimi) reject
-        # any message key outside the Chat Completions schema. The main loop drops these via
-        # ChatCompletionsTransport.convert_messages(), but the summary path hand-builds messages and calls
-        # chat.completions.create() directly, bypassing the transport — so mirror that sanitization here:
-        # tool_name (SQLite FTS bookkeeping), the codex_* reasoning carriers, timestamp (preserved on
-        # gateway user replay entries for the stale-confirmation expiry check — #47868 rejection class), and
-        # every Hermes-internal underscore-prefixed scaffolding key.
+        # api_content holds the exact bytes the main loop sent; substituting (not popping) keeps the summary's
+        # prefix identical instead of re-prefilling the largest context. The key sweep above mirrors the
+        # transport's convert_messages() for strict gateways (#47868 rejection class): tool_name (FTS
+        # bookkeeping), the codex_* reasoning carriers, timestamp, every underscore scaffolding key.
         substitute_api_content(api_msg)
         if needs_sanitize:
             agent._sanitize_tool_calls_for_strict_api(api_msg, model=sanitize_model)
         api_messages.append(api_msg)
-    # This path bypasses assemble_api_request, so it renders typed rows itself: the summary request
-    # replays the same wire bytes as the main loop's (agent.wire_render).
-    api_messages = render_messages(agent, api_messages)
+    api_messages = render_messages(agent, api_messages)  # bypasses assembly: render typed rows here
 
     effective_system = agent._cached_system_prompt or ""
     if agent.ephemeral_system_prompt:

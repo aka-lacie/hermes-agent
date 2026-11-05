@@ -258,8 +258,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                 run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
                 inbound_message_id=str(event.message_id) if event.message_id else None,
                 channel_prompt=_turn_channel_prompt, moa_config=getattr(event, "_moa_config", None),
-                title_user_message=prepared.title_user_message,
-                typed_input=prepared.typed_input,
+                title_user_message=prepared.title_user_message, typed_input=prepared.typed_input,
                 persist_user_message=prepared.persist_user_message,
                 persist_user_timestamp=prepared.persist_user_timestamp,
                 persist_user_display_kind=prepared.persist_user_display_kind,
@@ -2146,8 +2145,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         persist_user_display_metadata: Optional[dict] = None,
         reply_expected: Optional[bool] = None,
         scheduled_heartbeat: bool = False,
-        title_user_message: Optional[str] = None,
-        typed_input: Optional[dict] = None,
+        title_user_message: Optional[str] = None, typed_input: Optional[dict] = None,
     ) -> dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 

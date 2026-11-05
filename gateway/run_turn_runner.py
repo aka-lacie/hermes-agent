@@ -92,7 +92,7 @@ def _typed_input_for(ctx, api_message, persist_override) -> tuple[dict, str] | N
     from agent.message_parts import plain_text
     try:
         view = plain_text(typed["input"].get("parts") or [])
-    except Exception:
+    except (TypeError, AttributeError, KeyError):
         return None
     if persist_override is not None and persist_override != view:
         return None

@@ -8,7 +8,7 @@ notification is a ``system_event`` part that can never speak with the human's au
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from types import SimpleNamespace
 
 from agent import message_parts as mp
@@ -20,7 +20,7 @@ from gateway.typed_input import turn_typed_input
 def _discord_event(text="hello there", message_id="1567683734684041408", **kw):
     source = SessionSource(platform=Platform.DISCORD, chat_id="42", chat_type="dm", user_id="268934270939037698")
     return SimpleNamespace(text=text, message_id=message_id, source=source, internal=False, metadata=kw.pop("metadata", {}),
-                           timestamp=datetime(2026, 11, 4, 22, 0, 40, tzinfo=timezone.utc), **kw), source
+                           timestamp=datetime(2026, 11, 4, 22, 0, 40, tzinfo=UTC), **kw), source
 
 
 def test_a_platform_message_is_one_human_part_with_its_origin():

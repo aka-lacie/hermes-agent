@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -73,7 +73,7 @@ def _wire(agent, messages, idx):
 def _discord_event(text, message_id, *, internal=False, metadata=None):
     source = SessionSource(platform=Platform.DISCORD, chat_id="42", chat_type="dm", user_id="268934270939037698")
     return SimpleNamespace(text=text, message_id=message_id, source=source, internal=internal,
-                           metadata=metadata or {}, timestamp=datetime(2026, 11, 4, 23, 35, tzinfo=timezone.utc)), source
+                           metadata=metadata or {}, timestamp=datetime(2026, 11, 4, 23, 35, tzinfo=UTC)), source
 
 
 def _gateway_turn(agent, text, message_id, *, sent_at, internal=False, display_kind=None, metadata=None):

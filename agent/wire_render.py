@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from typing import Any, Mapping, Optional
 
 from agent.message_parts import (
@@ -69,9 +69,10 @@ def format_sent_at(sent_at: Any) -> Optional[str]:
     try:
         from hermes_time import get_timezone
 
-        tz = get_timezone() or timezone.utc
-    except Exception:
-        tz = timezone.utc
+        tz = get_timezone() or UTC
+    except Exception:  # timezone config is best-effort: render in UTC rather than drop the time
+        logger.debug("local timezone unavailable; rendering sent_at in UTC", exc_info=True)
+        tz = UTC
     try:
         return datetime.fromtimestamp(float(sent_at), tz).isoformat(timespec="seconds")
     except (OverflowError, OSError, ValueError):
@@ -153,7 +154,7 @@ class WireRenderer:
             out.extend(self.render_row(msg, window))
         return out
 
-    def render_row(self, msg: dict, window: "_MediaWindow") -> list:
+    def render_row(self, msg: dict, window: _MediaWindow) -> list:
         parts = msg[MESSAGE_PARTS]
         # Row provenance is persistence-only (the parts carry what the wire needs).
         base = {k: v for k, v in msg.items() if k != MESSAGE_PARTS and k not in PROVENANCE_FIELDS}
@@ -192,7 +193,7 @@ class WireRenderer:
             out.append(row)
         return out
 
-    def render_part(self, part: Mapping[str, Any], window: "_MediaWindow") -> Any:
+    def render_part(self, part: Mapping[str, Any], window: _MediaWindow) -> Any:
         ptype = part.get("type")
         if ptype == HUMAN:
             return self.render_human(part)
@@ -223,7 +224,7 @@ class WireRenderer:
     def render_injection(self, part: Mapping[str, Any]) -> str:
         return f"<system-reminder{_attrs([('kind', part.get('kind'))])}>\n{part.get('text') or ''}\n</system-reminder>"
 
-    def render_media(self, part: Mapping[str, Any], window: "_MediaWindow") -> Any:
+    def render_media(self, part: Mapping[str, Any], window: _MediaWindow) -> Any:
         url = window.data_url(part)
         if url:
             return {"type": "image_url", "image_url": {"url": url}}
@@ -248,7 +249,7 @@ class WireRenderer:
         return content
 
     # ── media replay window ────────────────────────────────────────────────
-    def _media_window(self, messages: list, agent: Any) -> "_MediaWindow":
+    def _media_window(self, messages: list, agent: Any) -> _MediaWindow:
         return _MediaWindow.for_request(messages, agent)
 
 
@@ -269,7 +270,7 @@ class _MediaWindow:
         self._allowed = allowed
 
     @classmethod
-    def for_request(cls, messages: list, agent: Any) -> "_MediaWindow":
+    def for_request(cls, messages: list, agent: Any) -> _MediaWindow:
         media = [p for m in messages if isinstance(m, dict) and m.get("role") == "user" and has_parts(m)
                  for p in m[MESSAGE_PARTS] if p.get("type") == MEDIA]
         if not media or agent is None:
@@ -278,7 +279,8 @@ class _MediaWindow:
             from agent.image_replay import _IMAGE_PART_TYPES, _turn_replay_window, replay_frontier
 
             keep = _turn_replay_window(agent)
-        except Exception:
+        except Exception:  # config read / route probe: no window means references, never a failed request
+            logger.debug("image replay window unavailable; media render as references", exc_info=True)
             return cls(set())
         if keep <= 0:
             return cls(set())

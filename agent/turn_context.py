@@ -733,7 +733,7 @@ def _apply_turn_typed_input(user_msg: dict[str, Any], payload: Mapping[str, Any]
         return
     try:
         view = plain_text(parts)
-    except Exception:
+    except (TypeError, AttributeError, KeyError):
         return
     if view != expected or view != user_msg["content"]:
         logger.warning("typed turn input does not match the turn's text; the turn stays untyped")

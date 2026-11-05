@@ -15,9 +15,12 @@ Everything here reads structured event/source fields; nothing parses message tex
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from agent.message_parts import human_turn_input, system_event_input
+
+logger = logging.getLogger(__name__)
 
 # Display kind of a self-injected turn -> the system event kind its typed row carries.
 INTERNAL_EVENT_KINDS = {
@@ -34,8 +37,10 @@ def _redactor(platform: Any, redact_pii: bool):
     try:
         if not _should_redact_pii(platform, bool(redact_pii)):
             return None
-    except Exception:
-        return None
+    except Exception:  # platform registry probe: fail closed to hashed ids when redaction was asked for
+        logger.debug("PII redaction probe failed", exc_info=True)
+        if not redact_pii:
+            return None
     return _hash_id, _hash_chat_id, _hash_sender_id
 
 
@@ -78,7 +83,8 @@ def event_sent_at(event: Any) -> Optional[float]:
         from hermes_time import get_timezone
 
         return coerce_message_timestamp(getattr(event, "timestamp", None), tz=get_timezone())
-    except Exception:
+    except Exception:  # a malformed event time: the origin simply carries none
+        logger.debug("event timestamp unreadable", exc_info=True)
         return None
 
 
