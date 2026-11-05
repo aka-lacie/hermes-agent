@@ -138,7 +138,7 @@ async def test_discard_and_its_transcript_boundary_commit_atomically_on_the_phys
     db.append_message('s-tip', 'user', 'LOST_OPERATION')
     authority._schedule = lambda ref: None
     db._execute_write(lambda c: c.execute("CREATE TRIGGER deny_boundary BEFORE INSERT ON messages "
-                                          "WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT,'boundary failed'); END"))
+                                          "WHEN NEW.display_kind='failed_turn' BEGIN SELECT RAISE(ABORT,'boundary failed'); END"))
     viewer = AuthorityConnection(authority, Peer(), {'user_id': 'human'})
     params = {'session_id': 's', 'admission_id': unknown['admission_id'], 'execution_generation': unknown['generation']}
     try:
@@ -152,8 +152,8 @@ async def test_discard_and_its_transcript_boundary_commit_atomically_on_the_phys
         db._execute_write(lambda c: c.execute('DROP TRIGGER deny_boundary'))
         retried = await viewer.dispatch({'id': 3, 'method': 'prompt.resolve_unknown', 'params': params})
         assert retried['result']['outcome'] == 'interrupted', retried
-        assert db.latest_conversation_role('s-tip') == 'assistant'
-        assert [m['role'] for m in db.get_messages('s') if m['role'] == 'assistant'] == []
+        assert db.latest_conversation_role('s-tip') == 'closed'  # the boundary row carries turn_outcome
+        assert [m for m in db.get_messages('s') if m.get('display_kind') == 'failed_turn'] == []
         assert claim_session_input(db, epoch=authority.epoch, session_id='s')['admission_id'] == follower.admission_id
     finally:
         await viewer.close()
@@ -183,8 +183,9 @@ async def test_discarded_lost_turn_is_closed_and_never_merged_into_the_follower_
         await authority.sessions['s'].task
         rows = [m for m in db.get_messages('s') if m['role'] in ('user', 'assistant')]
         assert [(m['role'], m['content']) for m in rows[:2]] == [
-            ('user', 'HEAD lost in restart'), ('assistant', PARTIAL_FAILED_TURN_NOTICE)]
-        assert rows[1]['display_kind'] == FAILED_TURN_DISPLAY_KIND
+            ('user', 'HEAD lost in restart'), ('user', PARTIAL_FAILED_TURN_NOTICE)]
+        assert rows[1]['display_kind'] == FAILED_TURN_DISPLAY_KIND and rows[1]['turn_outcome'] == 'partial'
+        assert not [m for m in rows if m['role'] == 'assistant' and m.get('display_kind')]  # Rule 1
         # The follower's real provider request, built from the live-replay transcript.
         history = [m for m in store.load_transcript('s') if m.get('content') != 'ACK_FOLLOWER'
                    and m.get('content') != 'FOLLOWER']
@@ -195,8 +196,12 @@ async def test_discarded_lost_turn_is_closed_and_never_merged_into_the_follower_
         await asyncio.to_thread(agent.run_conversation, 'FOLLOWER', conversation_history=history)
         chat = [r for r in provider.requests if 'messages' in r]
         sent = [m for m in chat[0]['messages'] if m['role'] != 'system']
-        assert [m['content'] for m in sent if m['role'] == 'user'] == ['HEAD lost in restart', 'FOLLOWER'], sent
-        assert sent[1] == {'role': 'assistant', 'content': PARTIAL_FAILED_TURN_NOTICE}
+        # One wire user turn: the lost text, then the boundary as a system-reminder, then the follower:
+        # never glued on silently, and never an assistant row the model did not write.
+        assert [m['role'] for m in sent] == ['user'], sent
+        lost, boundary, follower = sent[0]['content'].split('\n\n', 2)
+        assert (lost, follower) == ('HEAD lost in restart', 'FOLLOWER')
+        assert boundary.startswith('<system-reminder kind="error_notice" notice="failed_turn" turn_outcome="partial">')
     finally:
         provider.shutdown()
         await viewer.close()

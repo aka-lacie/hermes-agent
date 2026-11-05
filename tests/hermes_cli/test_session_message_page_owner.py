@@ -49,10 +49,13 @@ def test_message_pages_identify_the_serving_profile(tmp_path, monkeypatch, servi
     ]
 
 
-def test_message_pages_type_untyped_failed_turn_rows(tmp_path, monkeypatch):
-    """Desktop cold-loads and pages through REST, not ``session.resume``: a failed-turn boundary
-    written before the closers typed it must reach it as ``failed_turn``, not model text."""
-    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
+def test_message_pages_project_failed_turn_boundaries_as_agent_chrome(tmp_path, monkeypatch):
+    """Desktop cold-loads and pages through REST, not ``session.resume``: a failed-turn boundary (a
+    role="user" harness notice since Phase 2e) reaches it as ``failed_turn`` in the reply's place
+    (display role assistant). Text is never sniffed: an assistant row quoting the copy stays a reply
+    (legacy untyped boundaries are re-typed by the 2f migration, not by readers)."""
+    from agent.turn_failure_copy import (
+        FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, failed_turn_boundary)
     from hermes_state import SessionDB
 
     home = tmp_path / ".hermes"
@@ -65,11 +68,11 @@ def test_message_pages_type_untyped_failed_turn_rows(tmp_path, monkeypatch):
         db.create_session(session_id="s", source="desktop")
         db.append_messages_batch("s", [
             {"role": "user", "content": "a"},
-            {"role": "assistant", "content": FAILED_TURN_NOTICE},
+            failed_turn_boundary("failed"),
             {"role": "user", "content": "b"},
-            {"role": "assistant", "content": PARTIAL_FAILED_TURN_NOTICE},
+            failed_turn_boundary("partial"),
             {"role": "user", "content": "c"},
-            {"role": "assistant", "content": f"Quoting Hermes: {FAILED_TURN_NOTICE}"},
+            {"role": "assistant", "content": FAILED_TURN_NOTICE},
         ])
     finally:
         db.close()
@@ -84,3 +87,4 @@ def test_message_pages_type_untyped_failed_turn_rows(tmp_path, monkeypatch):
     assert [row.get("display_kind") for row in rows] == [
         None, FAILED_TURN_DISPLAY_KIND, None, FAILED_TURN_DISPLAY_KIND, None, None,
     ]
+    assert [row["role"] for row in rows] == ["user", "assistant", "user", "assistant", "user", "assistant"]

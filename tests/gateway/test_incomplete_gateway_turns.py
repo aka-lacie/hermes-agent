@@ -150,7 +150,7 @@ async def test_incomplete_codex_turn_closes_transcript_without_slack_delivery(mo
         call.args[1]["role"]
         for call in runner.session_store.append_to_transcript.call_args_list
     ]
-    assert transcript_roles == ["session_meta", "user", "assistant"]
+    assert transcript_roles == ["session_meta", "user", "user"]  # the boundary is a user-side notice
     assert runner.session_store.append_to_transcript.call_args_list[1].args[1]["content"] == "hello"
     boundary = runner.session_store.append_to_transcript.call_args_list[2].args[1]["content"]
     assert boundary == FAILED_TURN_NOTICE

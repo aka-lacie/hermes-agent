@@ -99,7 +99,7 @@ def test_failure_owner_follows_only_live_lineage_markers(tmp_path):
             store._transcript_reroutes.clear()
             assert store.has_input_owner(sid, owner) is owned, location
             before = db.message_count()
-            open_tail = store.transcript_tail_role(sid) == "user"
+            open_tail = store.transcript_tail_role(sid) == "user"  # "closed": a boundary already ends it
             reply = await runner._hmwa_agent_error_reply(
                 RuntimeError("controlled post-compaction failure"),
                 MessageEvent(text="same", source=source, message_id=pid),
@@ -111,8 +111,10 @@ def test_failure_owner_follows_only_live_lineage_markers(tmp_path):
             assert store.has_input_owner(sid, owner), location
             assert PARTIAL_FAILED_TURN_NOTICE in reply
             live_messages = db.get_messages(child)
-            assert not live_messages or live_messages[-1]["role"] != "user", location
-            assert sum(m["role"] == "assistant" for m in live_messages) <= 1, location
+            # The live tail is closed: a boundary row (user-side harness notice carrying turn_outcome).
+            assert not live_messages or live_messages[-1]["role"] != "user" or live_messages[-1].get("turn_outcome"), location
+            assert sum(m.get("display_kind") == FAILED_TURN_DISPLAY_KIND for m in live_messages) <= 1, location
+            assert not any(m["role"] == "assistant" for m in live_messages), location  # Rule 1
             if not owned:
                 assert live_messages[-1]["content"] == PARTIAL_FAILED_TURN_NOTICE
                 persisted_user = live_messages[-2]
@@ -233,10 +235,10 @@ def test_fresh_session_agent_flushed_failed_turn_is_closed(tmp_path):
                 is_context_overflow_failure=False,
             )
         rows = [m for m in db.get_messages(sid) if m["role"] != "session_meta"]
-        assert [m["role"] for m in rows] == ["user", "assistant"]
+        assert [m["role"] for m in rows] == ["user", "user"]  # the boundary is a user-side notice (Rule 1)
         # Typed like the core closer's row, or Desktop reads the boundary as the model's reply.
         assert rows[-1]["display_kind"] == FAILED_TURN_DISPLAY_KIND
-        assert store.transcript_tail_role(sid) == "assistant"
+        assert store.transcript_tail_role(sid) == "closed"
         db.close()
 
     asyncio.run(check())
@@ -285,8 +287,9 @@ def test_failed_turn_whose_tail_is_a_tool_row_is_closed(tmp_path):
                 is_context_overflow_failure=False,
             )
         rows = [m for m in db.get_messages(sid) if m["role"] != "session_meta"]
-        assert [m["role"] for m in rows] == ["user", "assistant", "tool", "assistant"]
+        assert [m["role"] for m in rows] == ["user", "assistant", "tool", "user"]
         assert (rows[-1]["content"], rows[-1]["display_kind"]) == (PARTIAL_FAILED_TURN_NOTICE, FAILED_TURN_DISPLAY_KIND)
+        assert rows[-1]["turn_outcome"] == "partial"
         db.close()
 
     asyncio.run(check())

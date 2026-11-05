@@ -231,7 +231,8 @@ def rows():
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT id,role,content,platform_message_id,timestamp,display_metadata,active,compacted FROM messages "
+                "SELECT id,role,content,platform_message_id,timestamp,display_metadata,active,compacted,turn_outcome "
+                "FROM messages "
                 "WHERE session_id=? ORDER BY id",
                 (sid,),
             )
@@ -303,10 +304,10 @@ async def main():
             expected.append(("foreign independent input", None))
         if accepted:
             expected.append((text, pid))
-        actual = [
+        actual = [  # accepted inputs: a failed-turn boundary is a role="user" harness notice carrying turn_outcome
             (r["content"], r["platform_message_id"])
             for r in rows()
-            if r["role"] == "user" and r["active"]
+            if r["role"] == "user" and r["active"] and r["turn_outcome"] is None
         ]
         hit = faults[before_faults:]
         if fault == "history-read":
@@ -344,7 +345,7 @@ async def main():
                 response=response,
             )
         )
-    users = [r for r in rows() if r["role"] == "user" and r["active"]]
+    users = [r for r in rows() if r["role"] == "user" and r["active"] and r["turn_outcome"] is None]
     markers = [json.loads(r["display_metadata"] or "{}").get("gateway_input_owner") for r in users]
     observations.append(dict(
         text="durable marker propagation", reached=bool(users),

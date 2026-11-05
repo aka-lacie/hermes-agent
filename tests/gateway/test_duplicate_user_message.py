@@ -113,7 +113,8 @@ def _assert_user_call_has_skip_db(calls, expected_skip_db: bool):
     for call in calls:
         args = call.args
         if len(args) >= 2 and isinstance(args[1], dict):
-            if args[1].get("role") == "user":
+            # The person's row (a failed-turn boundary is a role="user" harness notice, not their input).
+            if args[1].get("role") == "user" and args[1].get("sender_kind") != "system":
                 user_calls.append(call)
     assert len(user_calls) >= 1, (
         f"Expected at least one user-role append_to_transcript call, "
@@ -162,11 +163,12 @@ async def test_agent_failed_early_skip_db_when_agent_has_session_db(
         for call in runner.session_store.append_to_transcript.call_args_list
         if len(call.args) >= 2 and call.args[1].get("role") in {"user", "assistant"}
     ]
-    assert [row["role"] for row in transcript_rows] == ["user", "assistant"]
+    assert [row["role"] for row in transcript_rows] == ["user", "user"]
     assert transcript_rows[-1]["content"] == FAILED_TURN_NOTICE
+    assert (transcript_rows[-1]["display_kind"], transcript_rows[-1]["turn_outcome"]) == ("failed_turn", "failed")
 
-    # The next unrelated input remains its own turn instead of alternation repair
-    # merging the failed mutating request into it.
+    # The next unrelated input remains its own row instead of alternation repair merging the failed
+    # mutating request into it: the boundary (a harness notice) stays its own row between them.
     from agent.agent_runtime_helpers import repair_message_sequence
 
     replay = [*transcript_rows, {"role": "user", "content": "unrelated question"}]
@@ -178,8 +180,9 @@ async def test_agent_failed_early_skip_db_when_agent_has_session_db(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "tail_role, expected_roles",
-    [("user", ["assistant"]), ("assistant", [])],
-    ids=["agent-flushed-user-row-still-closed", "redelivery-of-closed-turn-adds-nothing"],
+    [("user", ["user"]), ("closed", []), ("assistant", [])],
+    ids=["agent-flushed-user-row-still-closed", "redelivery-of-closed-turn-adds-nothing",
+         "assistant-tail-adds-nothing"],
 )
 async def test_boundary_keyed_on_durable_tail_when_user_row_is_deduped(
     monkeypatch, tmp_path, tail_role, expected_roles
@@ -208,7 +211,7 @@ async def test_boundary_keyed_on_durable_tail_when_user_row_is_deduped(
         if len(call.args) >= 2 and call.args[1].get("role") in {"user", "assistant"}
     ]
     assert [row["role"] for row in rows] == expected_roles
-    assert all(row["content"] == FAILED_TURN_NOTICE for row in rows)
+    assert all(row["content"] == FAILED_TURN_NOTICE and row["display_kind"] == "failed_turn" for row in rows)
 
 
 @pytest.mark.asyncio
@@ -244,13 +247,14 @@ async def test_failed_turn_with_tool_activity_does_not_recommend_blind_retry(
         _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
     )
 
-    assistant_rows = [
+    boundary_rows = [
         call.args[1]
         for call in runner.session_store.append_to_transcript.call_args_list
-        if len(call.args) >= 2 and call.args[1].get("role") == "assistant"
+        if len(call.args) >= 2 and call.args[1].get("display_kind") == "failed_turn"
     ]
-    assert len(assistant_rows) == 1
-    assert assistant_rows[0]["content"] == PARTIAL_FAILED_TURN_NOTICE
+    assert len(boundary_rows) == 1 and boundary_rows[0]["role"] == "user"
+    assert boundary_rows[0]["content"] == PARTIAL_FAILED_TURN_NOTICE
+    assert boundary_rows[0]["turn_outcome"] == "partial"
     assert PARTIAL_FAILED_TURN_NOTICE in response
     assert "not processed" not in response
     assert "Send it again" not in response

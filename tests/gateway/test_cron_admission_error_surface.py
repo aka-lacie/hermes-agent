@@ -79,7 +79,7 @@ async def test_cron_refusal_is_in_the_reopened_transcript(owner, monkeypatch, tm
         reopened.close()
     assert len(history) == 3, 'the refusal is the turn after the job\'s own exchange'
     tail = history[-1]
-    assert (tail['role'], tail['display_kind']) == ('assistant', 'failed_turn')
+    assert (tail['role'], tail['display_kind'], tail['turn_outcome']) == ('user', 'failed_turn', 'failed')
     assert 'scheduled job' in tail['content']
     metadata = tail['display_metadata']
     metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
