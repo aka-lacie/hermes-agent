@@ -183,10 +183,12 @@ class TestFallbackMirrorEndToEnd:
 
 
         def fake_mirror(platform, chat_id, text, source_label="cli",
-                        thread_id=None, user_id=None, session_id=None, *, sender_id):
+                        thread_id=None, user_id=None, session_id=None, *, sender_id, **typing):
+            # ``typing``: event_kind / sender_kind / meta of the typed cron system_event (Rule 2).
             mirror_calls.append({
                 "platform": platform, "chat_id": chat_id,
                 "thread_id": thread_id, "user_id": user_id, "sender_id": sender_id,
+                "event_kind": typing.get("event_kind"),
             })
             return True
 

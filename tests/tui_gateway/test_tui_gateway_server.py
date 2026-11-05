@@ -2683,21 +2683,23 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
 
 def test_history_to_messages_types_the_failed_turn_boundary_for_resume():
     """Desktop keys the failed-turn boundary on ``display_kind`` (a room poller must not post it
-    as the member's reply); rows written before the closer typed it are typed on read."""
-    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
+    as the member's reply). Since Phase 2e the boundary is a role="user" harness notice drawn in the
+    reply's place (display role assistant); text is never sniffed, so an untyped assistant row that
+    reads like the copy stays a reply (legacy rows are re-typed by the 2f migration)."""
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, failed_turn_boundary
 
     history = [
         {"role": "user", "content": "a"},
-        {"role": "assistant", "content": FAILED_TURN_NOTICE, "display_kind": FAILED_TURN_DISPLAY_KIND},
+        failed_turn_boundary("failed"),
         {"role": "user", "content": "b"},
-        {"role": "assistant", "content": PARTIAL_FAILED_TURN_NOTICE},  # legacy untyped row
+        {"role": "assistant", "content": FAILED_TURN_NOTICE},  # untyped: a reply, never typed by its text
         {"role": "user", "content": "c"},
         {"role": "assistant", "content": f"Quoting Hermes: {FAILED_TURN_NOTICE}"},  # a real reply
     ]
 
-    assert [m.get("display_kind") for m in server._history_to_messages(history)] == [
-        None, FAILED_TURN_DISPLAY_KIND, None, FAILED_TURN_DISPLAY_KIND, None, None,
-    ]
+    projected = server._history_to_messages(history)
+    assert [m.get("display_kind") for m in projected] == [None, FAILED_TURN_DISPLAY_KIND, None, None, None, None]
+    assert [m["role"] for m in projected] == ["user", "assistant", "user", "assistant", "user", "assistant"]
 
 
 def test_history_to_messages_drops_pure_compaction_scaffolding():
@@ -2894,10 +2896,10 @@ def test_history_to_messages_renders_multimodal_content():
     ]
 
 
-def test_history_to_messages_strips_legacy_discord_triggering_note():
-    # Rows written before the gateway persisted the authored text carry the model-facing
-    # routing note in user ``content``; this projection heals them for TUI/web resume
-    # (the desktop hydration strip is the same rule). Reply pointer and assistant rows are kept.
+def test_history_to_messages_never_rewrites_a_persons_text():
+    # Phase 2e (Rule 2): the projection no longer regex-strips a legacy Discord routing note from user
+    # ``content`` (the 2f migration types those rows; the gateway never persists the note). Whatever a
+    # row holds is shown as is, so text that looks like an internal note is never edited on read.
     from gateway.run_inbound import discord_triggering_note
 
     note = discord_triggering_note("123")
@@ -2907,7 +2909,7 @@ def test_history_to_messages_strips_legacy_discord_triggering_note():
     ]
 
     assert server._history_to_messages(history) == [
-        {"role": "user", "text": "[Replying to: hi]\nwhat is up"},
+        {"role": "user", "text": f"{note}\n\n[Replying to: hi]\nwhat is up"},
         {"role": "assistant", "text": f"echo: {note}"},
     ]
 
