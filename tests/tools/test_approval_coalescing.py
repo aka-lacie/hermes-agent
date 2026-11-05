@@ -157,4 +157,3 @@ class TestConcurrentApprovalCoalescing:
         t1.join(timeout=5)
         t2.join(timeout=5)
         assert all(r is not None and r["choice"] == "session" for r in results)
-
