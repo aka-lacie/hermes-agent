@@ -3821,8 +3821,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         """Issue the single aux summary call; return validated content text.
         Raises RuntimeError for empty content or a length-truncated (PARTIAL) summary so the failure
         routes through main-model fallback + cooldown instead of wiping the compacted turns."""
-        # call_llm writes the route it actually selected; never pre-resolve a second, stale pair.
-        _aux_route: dict[str, str] = {}
+        # Internal summary prompt: no wire_render.render_messages; _parts were consumed by the serializer.
+        _aux_route: dict[str, str] = {}  # call_llm records the selected route; do not pre-resolve it.
         call_kwargs: dict[str, Any] = {
             "task": "compression",
             "main_runtime": {
