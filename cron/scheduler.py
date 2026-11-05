@@ -45,6 +45,7 @@ from hermes_cli.config import (
     load_config, load_config_readonly)
 from hermes_cli.config_backend import ConfigBackendUnavailable
 from hermes_cli.fallback_config import get_fallback_chain, scoped_fallback_chain
+from cron.scheduler_routes import stamp_cron_session_route as _stamp_cron_session_route
 from hermes_time import now as _hermes_now, safe_strftime
 from agent.interrupt_compat import request_hard_interrupt
 from agent.delegation_context import (
@@ -96,15 +97,13 @@ def _job_route_pinned(job: dict) -> bool:
 
 
 def _job_fallback_chain(job: dict, cfg: Any) -> Optional[list]:
-    """The fallback chain this job may walk, at credential resolution AND mid-run (#100437).
-
-    A pinned job never borrows the global ``fallback_providers`` chain, the same rule a pinned
-    ``delegate_task`` child follows (``scoped_fallback_chain``): a chain entry is a different
-    provider and usually a different model, which is exactly what the pin ruled out. Same-provider
-    credential-pool rotation is not the chain and still applies. Unpinned jobs inherit the chain.
-    """
-    return scoped_fallback_chain(
-        get_fallback_chain(cfg), None, pinned=_job_route_pinned(job), owner="cron job")
+    """The fallback chain this job may walk, at credential resolution AND mid-run (#100437): the job's
+    own declared ``fallback_providers`` ([{provider, model}], ``[]`` = none), else the rule a pinned
+    ``delegate_task`` child follows (``scoped_fallback_chain``): a pinned job never borrows the global
+    chain (an entry is a different provider/model, exactly what the pin ruled out); unpinned jobs
+    inherit it. Same-provider credential-pool rotation is not the chain and still applies."""
+    return scoped_fallback_chain(get_fallback_chain(cfg), job.get("fallback_providers"),
+                                 pinned=_job_route_pinned(job), owner="cron job")
 
 
 def _fallback_chain_phrase(job: Optional[dict] = None) -> str:
@@ -112,7 +111,7 @@ def _fallback_chain_phrase(job: Optional[dict] = None) -> str:
     failed too" vs "none configured" (most installs). Fails open to "the backups failed too" if
     config can't be read — never crash delivery.
     """
-    if job is not None and _job_route_pinned(job):
+    if job is not None and _job_route_pinned(job) and not job.get("fallback_providers"):
         return (
             "This job is pinned to its own provider/model, so it does not fall back to "
             f"`fallback_providers`; `hermes cron edit {job.get('id')} --unpin` lets it follow the "
@@ -2602,8 +2601,8 @@ def run_job(
         # Open state.db only after every early-return gate has passed.
         _session_db = _open_cron_session_db(job)
         agent = _construct_cron_agent(
-            AIAgent, job, _cfg, setup, workdir=scope.workdir, session_id=_cron_session_id,
-            session_db=_session_db)
+            AIAgent, job, _cfg, setup, workdir=scope.workdir, session_id=_cron_session_id, session_db=_session_db)
+        _stamp_cron_session_route(_session_db, _cron_session_id, job, setup)  # sessions.route (credential-free)
         _audit = _FireAudit(job, job_id, model)
 
         result = _run_agent_with_watchdog(
