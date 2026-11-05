@@ -1,0 +1,7 @@
+[
+ {"path": "hermes_state_unified_migration.py", "symbol": "*", "rules": ["literal", "helper", "match"], "reason": "MIGRATION (Phase 2f): the one-shot unified-session migration driver; delete with the module after cutover (Phase 5)."},
+ {"path": "hermes_state_unified_migration_envelopes.py", "symbol": "*", "rules": ["literal", "helper", "match"], "reason": "MIGRATION (Phase 2f): the ONLY legacy envelope parser (Rule 2 exception); delete with the module after cutover (Phase 5)."},
+ {"path": "hermes_state_unified_migration_retag.py", "symbol": "*", "rules": ["literal", "helper", "match"], "reason": "MIGRATION (Phase 2f): §4.7 legacy non-model assistant row classifier; delete with the module after cutover (Phase 5)."},
+ {"path": "gateway/legacy_untyped_replay.py", "symbol": "*", "rules": ["literal", "helper", "match"], "reason": "LEGACY SHIM: replay of untyped gateway user rows (timestamp head, auto-continue notes); typed rows never reach it. Delete in Phase 5."},
+ {"path": "agent/memory_context.py", "symbol": "_INTERNAL_NOTE_RE", "rules": ["literal"], "reason": "EXTERNAL model-output memory leakage protection (streaming scrubber); never input provenance."}
+]

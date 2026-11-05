@@ -1,0 +1,1829 @@
+[
+ {
+  "path": "acp_adapter/gateway_media.py",
+  "symbol": "stage_user_content",
+  "rule": "literal",
+  "detail": "[Image attached:",
+  "count": 1
+ },
+ {
+  "path": "acp_adapter/server.py",
+  "symbol": "_history_summary_meta",
+  "rule": "helper",
+  "detail": "classify_summary_content",
+  "count": 1
+ },
+ {
+  "path": "agent/agent_runtime_helpers_placeholders.py",
+  "symbol": "_INTERRUPTED_PLACEHOLDER",
+  "rule": "literal",
+  "detail": "[interrupt: no assistant output for this turn]",
+  "count": 1
+ },
+ {
+  "path": "agent/agent_runtime_helpers_placeholders.py",
+  "symbol": "_LEGACY_INTERRUPTED_PLACEHOLDER",
+  "rule": "literal",
+  "detail": "[response interrupted]",
+  "count": 1
+ },
+ {
+  "path": "agent/compaction_display.py",
+  "symbol": "project_compaction_message_for_display",
+  "rule": "helper",
+  "detail": "_strip_context_summary_handoff_message",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "<module>",
+  "rule": "helper",
+  "detail": "is_demoted_stub",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "<module>",
+  "rule": "helper",
+  "detail": "without_skill_safety_rule",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "COMPRESSION_CONTINUATION_USER_CONTENT",
+  "rule": "literal",
+  "detail": "Continue from the compressed conversation context above.",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._assemble_head",
+  "rule": "helper",
+  "detail": "_strip_context_summary_handoff_message",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._assemble_tail",
+  "rule": "helper",
+  "detail": "_strip_context_summary_handoff_message",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._build_static_fallback_summary",
+  "rule": "helper",
+  "detail": "_with_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._dedupe_tool_results",
+  "rule": "literal",
+  "detail": "[Duplicate tool output",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._demote_tool_result_at",
+  "rule": "helper",
+  "detail": "_is_summary_stub",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._demote_tool_result_at",
+  "rule": "literal",
+  "detail": "[Duplicate tool output",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._fallback_summary_for_window",
+  "rule": "helper",
+  "detail": "_strip_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._find_context_summaries",
+  "rule": "helper",
+  "detail": "_strip_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._find_inflight_user_task",
+  "rule": "helper",
+  "detail": "_has_merged_inflight_replay",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._generate_summary",
+  "rule": "helper",
+  "detail": "_extract_pruned_skill_names",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._generate_summary",
+  "rule": "helper",
+  "detail": "_with_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._ground_historical_task_snapshot",
+  "rule": "helper",
+  "detail": "_strip_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._has_merged_inflight_replay",
+  "rule": "helper",
+  "detail": "_has_merged_inflight_replay",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._is_context_summary_content",
+  "rule": "helper",
+  "detail": "classify_summary_content",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._is_synthetic_compression_user_turn",
+  "rule": "match",
+  "detail": "} or text.startswith(( _BACKGROUND_PROCESS_NOTIFICATION_PREFIX, TODO_INJECTION_HEADER + \"\\n\", _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX, ))",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._reappend_inflight_user_task",
+  "rule": "helper",
+  "detail": "_has_merged_inflight_replay",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._reappend_inflight_user_task",
+  "rule": "helper",
+  "detail": "_restated_request_text",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._scan_window_handoffs._window_row",
+  "rule": "helper",
+  "detail": "_strip_context_summary_handoff_message",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._starts_with_summary_prefix",
+  "rule": "helper",
+  "detail": "_starts_with_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._starts_with_summary_prefix",
+  "rule": "match",
+  "detail": "return text.startswith((SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX, *_HISTORICAL_SUMMARY_PREFIXES))",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_context_summary_handoff_message",
+  "rule": "helper",
+  "detail": "_strip_context_summary_handoff_message",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_context_summary_handoff_message",
+  "rule": "match",
+  "detail": "elif _SUMMARY_END_MARKER in content:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_context_summary_handoff_message",
+  "rule": "match",
+  "detail": "if isinstance(text, str) and _SUMMARY_END_MARKER in text:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_context_summary_handoff_message",
+  "rule": "match",
+  "detail": "if isinstance(text, str) and text.lstrip().startswith(_MERGED_PRIOR_CONTEXT_HEADER):",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_context_summary_handoff_message",
+  "rule": "match",
+  "detail": "prior = content.split(_SUMMARY_END_MARKER, 1)[1].lstrip()",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_context_summary_handoff_message",
+  "rule": "match",
+  "detail": "remainder = text.split(_SUMMARY_END_MARKER, 1)[1].lstrip()",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_summary_prefix",
+  "rule": "helper",
+  "detail": "_strip_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_summary_prefix",
+  "rule": "match",
+  "detail": "if text.startswith(prefix):",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._strip_summary_prefix",
+  "rule": "match",
+  "detail": "marker_idx = text.find(_SUMMARY_END_MARKER)",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._summary_template_sections",
+  "rule": "literal",
+  "detail": "[SKILL_PRUNED:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._with_summary_prefix",
+  "rule": "helper",
+  "detail": "_strip_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor._with_summary_prefix",
+  "rule": "helper",
+  "detail": "_with_summary_prefix",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor.classify_summary_content",
+  "rule": "helper",
+  "detail": "_starts_with_summary_prefix",
+  "count": 2
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "ContextCompressor.classify_summary_content",
+  "rule": "helper",
+  "detail": "classify_summary_content",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "LEGACY_SUMMARY_PREFIX",
+  "rule": "literal",
+  "detail": "[CONTEXT SUMMARY",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "SKILL_PRUNED_MARKER_PREFIX",
+  "rule": "literal",
+  "detail": "[SKILL_PRUNED:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "SUMMARY_PREFIX",
+  "rule": "literal",
+  "detail": "[CONTEXT COMPACTION",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_BACKGROUND_PROCESS_NOTIFICATION_PREFIX",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_GATEWAY_REPLY_POINTER_RE",
+  "rule": "literal",
+  "detail": "[Replying to",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_GATEWAY_REPLY_POINTER_RE",
+  "rule": "literal",
+  "detail": "[Triggering message id:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_HISTORICAL_SUMMARY_PREFIXES",
+  "rule": "literal",
+  "detail": "[CONTEXT COMPACTION",
+  "count": 5
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_INFLIGHT_TASK_REPLAY_HEADER",
+  "rule": "literal",
+  "detail": "[STILL IN PROGRESS",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT",
+  "rule": "literal",
+  "detail": "Continue from the compressed conversation context above.",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_MERGED_PRIOR_CONTEXT_HEADER",
+  "rule": "literal",
+  "detail": "[PRIOR CONTEXT",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_MERGED_SUMMARY_DELIMITER",
+  "rule": "literal",
+  "detail": "[END OF PRIOR CONTEXT",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_PRUNED_TOOL_PLACEHOLDER",
+  "rule": "literal",
+  "detail": "[Old tool output cleared to save context space]",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_SUMMARY_END_MARKER",
+  "rule": "literal",
+  "detail": "--- END OF CONTEXT SUMMARY",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_SYNTHETIC_USER_ROW_PREFIXES",
+  "rule": "literal",
+  "detail": "Cronjob Response:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_SYNTHETIC_USER_ROW_PREFIXES",
+  "rule": "literal",
+  "detail": "[ASYNC DELEGATION",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_SYNTHETIC_USER_ROW_PREFIXES",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_SYNTHETIC_USER_ROW_PREFIXES",
+  "rule": "literal",
+  "detail": "[PRIOR CONTEXT",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_SYNTHETIC_USER_ROW_PREFIXES",
+  "rule": "literal",
+  "detail": "[Planning state preserved",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_SYNTHETIC_USER_ROW_PREFIXES",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_authored_request_text",
+  "rule": "helper",
+  "detail": "_restated_request_text",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_collect_ghosted_skill_names",
+  "rule": "helper",
+  "detail": "_extract_pruned_skill_names",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_collect_ghosted_skill_names",
+  "rule": "helper",
+  "detail": "is_demoted_stub",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_collect_ghosted_skill_names",
+  "rule": "helper",
+  "detail": "skills_loaded_by_scaffold",
+  "count": 2
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_extract_pruned_skill_names",
+  "rule": "helper",
+  "detail": "_extract_pruned_skill_names",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_handoff_carries_live_user_content",
+  "rule": "helper",
+  "detail": "_strip_context_summary_handoff_message",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_handoff_only_content",
+  "rule": "helper",
+  "detail": "_handoff_only_content",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_is_summary_stub",
+  "rule": "helper",
+  "detail": "_is_summary_stub",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_is_summary_stub",
+  "rule": "helper",
+  "detail": "is_demoted_stub",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_is_summary_stub",
+  "rule": "helper",
+  "detail": "without_skill_safety_rule",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_looks_like_compaction_summary",
+  "rule": "match",
+  "detail": "not content.rstrip().endswith(_SUMMARY_END_MARKER)",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_looks_like_compaction_summary",
+  "rule": "match",
+  "detail": "or content.startswith(_MERGED_PRIOR_CONTEXT_HEADER)",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_reinject_pruned_skill_markers",
+  "rule": "helper",
+  "detail": "_skill_pruned_marker",
+  "count": 2
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_restated_request_text",
+  "rule": "helper",
+  "detail": "_restated_request_text",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_skill_pruned_marker",
+  "rule": "helper",
+  "detail": "_skill_pruned_marker",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_sum_skill_view",
+  "rule": "helper",
+  "detail": "_is_summary_stub",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_sum_skill_view",
+  "rule": "helper",
+  "detail": "_skill_pruned_marker",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_synthetic_user_row",
+  "rule": "match",
+  "detail": "return content.lstrip().startswith(_SYNTHETIC_USER_ROW_PREFIXES)",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "_typed_user_text",
+  "rule": "helper",
+  "detail": "skills_loaded_by_scaffold",
+  "count": 2
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "reference_handoff_would_drive_next_model_call",
+  "rule": "helper",
+  "detail": "classify_summary_content",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "split_user_originated_turn",
+  "rule": "helper",
+  "detail": "_handoff_only_content",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor.py",
+  "symbol": "split_user_originated_turn",
+  "rule": "helper",
+  "detail": "_strip_context_summary_handoff_message",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor_tail.py",
+  "symbol": "_DEMOTED_STUB_RE",
+  "rule": "literal",
+  "detail": " output demoted at compaction — ",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor_tail.py",
+  "symbol": "_lean_recovery_stub",
+  "rule": "literal",
+  "detail": " output demoted at compaction — ",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor_tail.py",
+  "symbol": "demote_stale_tail_tools",
+  "rule": "helper",
+  "detail": "_is_summary_stub",
+  "count": 2
+ },
+ {
+  "path": "agent/context_compressor_tail.py",
+  "symbol": "demote_stale_tail_tools",
+  "rule": "helper",
+  "detail": "_skill_pruned_marker",
+  "count": 2
+ },
+ {
+  "path": "agent/context_compressor_tail.py",
+  "symbol": "elide_keeping_skill_safety_rule",
+  "rule": "helper",
+  "detail": "without_skill_safety_rule",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor_tail.py",
+  "symbol": "is_demoted_stub",
+  "rule": "helper",
+  "detail": "is_demoted_stub",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor_tail.py",
+  "symbol": "with_skill_safety_rule.unruled",
+  "rule": "helper",
+  "detail": "without_skill_safety_rule",
+  "count": 1
+ },
+ {
+  "path": "agent/context_compressor_tail.py",
+  "symbol": "without_skill_safety_rule",
+  "rule": "helper",
+  "detail": "without_skill_safety_rule",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_PRUNED_SKILL_RELOAD_NOTICE_HEADER",
+  "rule": "literal",
+  "detail": "[Skills pruned during compression",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_STEER_FALLBACK_CLOSE",
+  "rule": "literal",
+  "detail": "[/OUT-OF-BAND USER MESSAGE]",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_STEER_FALLBACK_OPEN",
+  "rule": "literal",
+  "detail": "[OUT-OF-BAND USER MESSAGE",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_SYNTHETIC_USER_PREFIXES",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_SYNTHETIC_USER_PREFIXES",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 3
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_SYNTHETIC_USER_PREFIXES",
+  "rule": "literal",
+  "detail": "[Your active task list was preserved",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_compressed_has_busy_steer",
+  "rule": "helper",
+  "detail": "_compressed_has_busy_steer",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_compressed_has_busy_steer",
+  "rule": "helper",
+  "detail": "_message_contains_busy_steer",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_ensure_compressed_has_user_turn",
+  "rule": "helper",
+  "detail": "_compressed_has_busy_steer",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_ensure_compressed_has_user_turn",
+  "rule": "helper",
+  "detail": "_extract_steer_text_from_message",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_ensure_compressed_has_user_turn",
+  "rule": "helper",
+  "detail": "_has_merged_inflight_replay",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_extract_steer_text_from_message",
+  "rule": "helper",
+  "detail": "_extract_steer_text_from_message",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_extract_steer_text_from_message",
+  "rule": "helper",
+  "detail": "_steer_markers",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_extract_steer_text_from_message",
+  "rule": "match",
+  "detail": "end = text.find(close_marker, start)",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_extract_steer_text_from_message",
+  "rule": "match",
+  "detail": "start = text.find(open_marker)",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_fold_todo_snapshot",
+  "rule": "helper",
+  "detail": "_strip_stale_todo_snapshot",
+  "count": 2
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_message_contains_busy_steer",
+  "rule": "helper",
+  "detail": "_message_contains_busy_steer",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_message_contains_busy_steer",
+  "rule": "helper",
+  "detail": "_steer_markers",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_message_contains_busy_steer",
+  "rule": "match",
+  "detail": "return open_marker in text and close_marker in text",
+  "count": 2
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_pruned_skill_reload_notice",
+  "rule": "helper",
+  "detail": "_extract_pruned_skill_names",
+  "count": 2
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_steer_markers",
+  "rule": "helper",
+  "detail": "_steer_markers",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_compression.py",
+  "symbol": "_strip_stale_todo_snapshot",
+  "rule": "helper",
+  "detail": "_strip_stale_todo_snapshot",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "INTERRUPT_WAITING_FOR_MODEL_PREFIX",
+  "rule": "literal",
+  "detail": "Operation interrupted: waiting for model response (",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "RUN_BUDGET_WRAPUP_NOTICE",
+  "rule": "literal",
+  "detail": "[SYSTEM NOTICE",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "_CODEX_ACK_CONTINUATION_NUDGE",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "_CODEX_INCOMPLETE_NUDGE",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "_DEGENERATE_FINAL_NUDGE",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "_LEGACY_LENGTH_CONTINUATION_NETWORK_STUB",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "_LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "_LENGTH_CONTINUATION_NETWORK_STUB",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/conversation_loop.py",
+  "symbol": "_LENGTH_CONTINUATION_OUTPUT_LIMIT",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/gemini_native_adapter.py",
+  "symbol": "_INTERRUPTED_RESPONSE_PLACEHOLDER",
+  "rule": "literal",
+  "detail": "[The previous response was interrupted before it completed.]",
+  "count": 1
+ },
+ {
+  "path": "agent/image_replay.py",
+  "symbol": "_split_rebuilt_row",
+  "rule": "helper",
+  "detail": "_split_rebuilt_row",
+  "count": 1
+ },
+ {
+  "path": "agent/image_replay.py",
+  "symbol": "replay_recent_images",
+  "rule": "helper",
+  "detail": "_split_rebuilt_row",
+  "count": 1
+ },
+ {
+  "path": "agent/image_routing.py",
+  "symbol": "build_native_content_parts",
+  "rule": "literal",
+  "detail": "[Image attached at:",
+  "count": 1
+ },
+ {
+  "path": "agent/image_routing.py",
+  "symbol": "build_native_content_parts",
+  "rule": "literal",
+  "detail": "[Image attached:",
+  "count": 1
+ },
+ {
+  "path": "agent/kanban_stop.py",
+  "symbol": "build_kanban_stop_nudge",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/kanban_turn_recovery.py",
+  "symbol": "build_recovery_nudge",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/memory_context.py",
+  "symbol": "build_memory_context_block",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "agent/memory_manager.py",
+  "symbol": "<module>",
+  "rule": "helper",
+  "detail": "extract_user_instruction_from_skill_message",
+  "count": 1
+ },
+ {
+  "path": "agent/message_metadata.py",
+  "symbol": "PRE_LLM_BLOCK_WITHHELD_PROMPT",
+  "rule": "literal",
+  "detail": "[Message withheld: a pre_llm_call policy hook blocked it.]",
+  "count": 1
+ },
+ {
+  "path": "agent/micro_compaction.py",
+  "symbol": "MicroCompactionMixin._resolve_compact_cursor",
+  "rule": "helper",
+  "detail": "_rolling_summary_from_marker",
+  "count": 1
+ },
+ {
+  "path": "agent/micro_compaction.py",
+  "symbol": "MicroCompactionMixin._rolling_summary_from_marker",
+  "rule": "helper",
+  "detail": "_rolling_summary_from_marker",
+  "count": 1
+ },
+ {
+  "path": "agent/micro_compaction.py",
+  "symbol": "MicroCompactionMixin._rolling_summary_from_marker",
+  "rule": "match",
+  "detail": "end = body.find(cc._SUMMARY_END_MARKER)",
+  "count": 1
+ },
+ {
+  "path": "agent/onboarding.py",
+  "symbol": "PLAIN_INTRO_NOTE",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "agent/onboarding.py",
+  "symbol": "profile_build_directive",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "agent/onboarding_text.py",
+  "symbol": "opening_prompt",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "agent/onboarding_text.py",
+  "symbol": "turn_note",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "agent/prompt_builder.py",
+  "symbol": "STEER_MARKER_CLOSE",
+  "rule": "literal",
+  "detail": "[/OUT-OF-BAND USER MESSAGE]",
+  "count": 1
+ },
+ {
+  "path": "agent/prompt_builder.py",
+  "symbol": "STEER_MARKER_OPEN",
+  "rule": "literal",
+  "detail": "[OUT-OF-BAND USER MESSAGE",
+  "count": 1
+ },
+ {
+  "path": "agent/prompt_builder.py",
+  "symbol": "format_steer_marker",
+  "rule": "helper",
+  "detail": "format_steer_marker",
+  "count": 1
+ },
+ {
+  "path": "agent/prompt_caching.py",
+  "symbol": "_scaffold_parts",
+  "rule": "match",
+  "detail": "prefix = find_stable_prefix(content) if msg.get(\"role\") == \"user\" and isinstance(content, str) else None",
+  "count": 1
+ },
+ {
+  "path": "agent/session_persistence.py",
+  "symbol": "_image_marker",
+  "rule": "literal",
+  "detail": "[screenshot detail=",
+  "count": 1
+ },
+ {
+  "path": "agent/session_persistence.py",
+  "symbol": "_image_marker",
+  "rule": "literal",
+  "detail": "[screenshot]",
+  "count": 1
+ },
+ {
+  "path": "agent/session_persistence.py",
+  "symbol": "_summary_display_kind",
+  "rule": "helper",
+  "detail": "classify_summary_content",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "_AUTO_LOAD_PREFIX",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "_RUNTIME_NOTE",
+  "rule": "literal",
+  "detail": "[Runtime note:",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "_SKILL_INVOCATION_PREFIX",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "_build_skill_message",
+  "rule": "literal",
+  "detail": "[Runtime note:",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "_describe_auto_loaded_skill_turn",
+  "rule": "helper",
+  "detail": "_describe_auto_loaded_skill_turn",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "_scaffold_header",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "build_auto_load_prompt",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "build_preloaded_skills_prompt",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "build_skill_invocation_message",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "describe_skill_invocation",
+  "rule": "helper",
+  "detail": "_describe_auto_loaded_skill_turn",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "describe_skill_invocation",
+  "rule": "helper",
+  "detail": "extract_user_instruction_from_skill_message",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "extract_user_instruction_from_skill_message",
+  "rule": "helper",
+  "detail": "extract_user_instruction_from_skill_message",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "skills_loaded_by_scaffold",
+  "rule": "helper",
+  "detail": "skills_loaded_by_scaffold",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "skills_loaded_by_scaffold",
+  "rule": "match",
+  "detail": "header = content.split(\"\\n\", 1)[0]",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "skills_loaded_by_scaffold",
+  "rule": "match",
+  "detail": "if content.startswith(_AUTO_LOAD_PREFIX):",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "skills_loaded_by_scaffold",
+  "rule": "match",
+  "detail": "if not content.startswith(_SKILL_INVOCATION_PREFIX):",
+  "count": 1
+ },
+ {
+  "path": "agent/skill_commands.py",
+  "symbol": "skills_loaded_by_scaffold",
+  "rule": "match",
+  "detail": "return [m.group(1) for m in _AUTO_LOAD_HEADER_RE.finditer(content)] if _AUTO_LOAD_HEADER_RE.match(content) else []",
+  "count": 2
+ },
+ {
+  "path": "agent/skills_index_delta.py",
+  "symbol": "_NOTE_PREFIX",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/skills_index_delta.py",
+  "symbol": "_announced",
+  "rule": "match",
+  "detail": "if _NOTE_PREFIX in text:",
+  "count": 1
+ },
+ {
+  "path": "agent/skills_index_delta.py",
+  "symbol": "_announced",
+  "rule": "match",
+  "detail": "return _parse(text.rsplit(_NOTE_PREFIX, 1)[1])",
+  "count": 1
+ },
+ {
+  "path": "agent/surface_switch.py",
+  "symbol": "_SURFACE_SWITCH_NOTE_PREFIX",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/surface_switch.py",
+  "symbol": "_last_announced_surface",
+  "rule": "match",
+  "detail": "if _SURFACE_SWITCH_NOTE_PREFIX in text:",
+  "count": 1
+ },
+ {
+  "path": "agent/surface_switch.py",
+  "symbol": "_last_announced_surface",
+  "rule": "match",
+  "detail": "tail = text.rsplit(_SURFACE_SWITCH_NOTE_PREFIX, 1)[1]",
+  "count": 1
+ },
+ {
+  "path": "agent/surface_switch.py",
+  "symbol": "note_inert_pinned_tools",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/title_generator.py",
+  "symbol": "_MACHINE_PREFIXES",
+  "rule": "literal",
+  "detail": "[CONTEXT COMPACTION",
+  "count": 1
+ },
+ {
+  "path": "agent/title_generator.py",
+  "symbol": "_MACHINE_PREFIXES",
+  "rule": "literal",
+  "detail": "[Runtime note:",
+  "count": 1
+ },
+ {
+  "path": "agent/title_generator.py",
+  "symbol": "_MACHINE_PREFIXES",
+  "rule": "literal",
+  "detail": "[SYSTEM]",
+  "count": 1
+ },
+ {
+  "path": "agent/title_generator.py",
+  "symbol": "_MACHINE_PREFIXES",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "agent/title_generator.py",
+  "symbol": "_MACHINE_PREFIXES",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "agent/tool_dispatch_helpers.py",
+  "symbol": "_trajectory_normalize_msg",
+  "rule": "literal",
+  "detail": "[screenshot]",
+  "count": 1
+ },
+ {
+  "path": "agent/tool_executor.py",
+  "symbol": "<module>",
+  "rule": "helper",
+  "detail": "extract_persisted_path",
+  "count": 1
+ },
+ {
+  "path": "agent/turn_context.py",
+  "symbol": "_withhold_blocked_prompt",
+  "rule": "helper",
+  "detail": "_handoff_only_content",
+  "count": 2
+ },
+ {
+  "path": "agent/turn_iteration_prep.py",
+  "symbol": "ITERATION_BUDGET_WARNING_TEMPLATE",
+  "rule": "literal",
+  "detail": "[SYSTEM NOTICE",
+  "count": 1
+ },
+ {
+  "path": "agent/turn_stop_gates.py",
+  "symbol": "_late_lsp_verdicts",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "agent/verification_stop.py",
+  "symbol": "build_verify_on_stop_nudge",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "cron/scheduler_delivery.py",
+  "symbol": "_deliver_result",
+  "rule": "literal",
+  "detail": "Cronjob Response:",
+  "count": 1
+ },
+ {
+  "path": "cron/scheduler_prompt.py",
+  "symbol": "_CRON_HINT",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "cron/scheduler_prompt.py",
+  "symbol": "_load_cron_skill_parts",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 2
+ },
+ {
+  "path": "cron/scheduler_prompt.py",
+  "symbol": "_run_time_line",
+  "rule": "literal",
+  "detail": "[CURRENT RUN TIME:",
+  "count": 1
+ },
+ {
+  "path": "gateway/message_timestamps.py",
+  "symbol": "render_user_content_with_timestamp",
+  "rule": "helper",
+  "detail": "render_user_content_with_timestamp",
+  "count": 1
+ },
+ {
+  "path": "gateway/message_timestamps.py",
+  "symbol": "render_user_content_with_timestamp",
+  "rule": "helper",
+  "detail": "strip_leading_message_timestamps",
+  "count": 1
+ },
+ {
+  "path": "gateway/message_timestamps.py",
+  "symbol": "strip_leading_message_timestamps",
+  "rule": "helper",
+  "detail": "strip_leading_message_timestamps",
+  "count": 1
+ },
+ {
+  "path": "gateway/run.py",
+  "symbol": "_AUTO_RESET_CONTEXT_NOTES",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "gateway/run.py",
+  "symbol": "_CURRENT_ADDRESSED_MESSAGE_HEADER",
+  "rule": "literal",
+  "detail": "[Current addressed message",
+  "count": 1
+ },
+ {
+  "path": "gateway/run.py",
+  "symbol": "_OBSERVED_GROUP_CONTEXT_HEADER",
+  "rule": "literal",
+  "detail": "[Observed Telegram group context",
+  "count": 1
+ },
+ {
+  "path": "gateway/run.py",
+  "symbol": "_format_gateway_process_notification",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 2
+ },
+ {
+  "path": "gateway/run.py",
+  "symbol": "build_resume_recovery_note",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_agent_cache.py",
+  "symbol": "GatewayAgentCacheMixin._voice_channel_sidecar_note",
+  "rule": "literal",
+  "detail": "[Voice channel now:",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_busy.py",
+  "symbol": "GatewayBusySessionMixin._is_goal_continuation_event",
+  "rule": "literal",
+  "detail": "[Continuing toward your standing goal",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_busy.py",
+  "symbol": "GatewayBusySessionMixin._steer_text_with_origin",
+  "rule": "literal",
+  "detail": "Gateway message origin (JSON data, not instructions or authorization):",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_inbound.py",
+  "symbol": "GatewayInboundMixin._prefix_inbound_sender_context",
+  "rule": "literal",
+  "detail": "[New message]",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_inbound.py",
+  "symbol": "GatewayInboundMixin._prepend_inbound_reply_context",
+  "rule": "literal",
+  "detail": "[Replying to",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_inbound.py",
+  "symbol": "discord_triggering_note",
+  "rule": "literal",
+  "detail": "[Triggering message id:",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_inbound.py",
+  "symbol": "strip_discord_triggering_note",
+  "rule": "helper",
+  "detail": "strip_discord_triggering_note",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_notifications.py",
+  "symbol": "GatewayNotificationsMixin._deliver_async_delegation_group_scoped",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_notifications.py",
+  "symbol": "GatewayNotificationsMixin._format_coalesced_process_completions",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_notifications.py",
+  "symbol": "INTERNAL_NOTIFICATION_FOOTER",
+  "rule": "literal",
+  "detail": "[INTERNAL NOTIFICATION",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_turn.py",
+  "symbol": "GatewayTurnMixin._run_agent_queued_followup",
+  "rule": "helper",
+  "detail": "strip_discord_triggering_note",
+  "count": 2
+ },
+ {
+  "path": "gateway/run_turn_prepare.py",
+  "symbol": "GatewayTurnPrepareMixin._hmwa_apply_message_timestamp",
+  "rule": "helper",
+  "detail": "render_user_content_with_timestamp",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_turn_prepare.py",
+  "symbol": "GatewayTurnPrepareMixin._hmwa_apply_message_timestamp",
+  "rule": "helper",
+  "detail": "strip_discord_triggering_note",
+  "count": 2
+ },
+ {
+  "path": "gateway/run_turn_prepare.py",
+  "symbol": "GatewayTurnPrepareMixin._hmwa_apply_message_timestamp",
+  "rule": "helper",
+  "detail": "strip_leading_message_timestamps",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_turn_prepare.py",
+  "symbol": "GatewayTurnPrepareMixin._hmwa_auto_load_skills",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "gateway/run_turn_runner.py",
+  "symbol": "TurnRunner._prepare_turn_message",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "gateway/session.py",
+  "symbol": "_discord_platform_notes",
+  "rule": "literal",
+  "detail": "[Voice channel now:",
+  "count": 1
+ },
+ {
+  "path": "gateway/session.py",
+  "symbol": "build_channel_continuity_note",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "gateway/session_api_media.py",
+  "symbol": "restore_api_images",
+  "rule": "literal",
+  "detail": "[Image attached at:",
+  "count": 1
+ },
+ {
+  "path": "gateway/session_api_media.py",
+  "symbol": "restore_api_images",
+  "rule": "literal",
+  "detail": "[Image attached:",
+  "count": 1
+ },
+ {
+  "path": "gateway/session_automation.py",
+  "symbol": "_FOLD_HEADER",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "gateway/session_automation.py",
+  "symbol": "_FOLD_HEADER_RE",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "gateway/slash_commands.py",
+  "symbol": "GatewaySlashCommandsMixin._handle_reload_skills_command",
+  "rule": "literal",
+  "detail": "[USER INITIATED SKILLS RELOAD:",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/cli_commands_mixin.py",
+  "symbol": "_browser_connect",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/cli_commands_mixin.py",
+  "symbol": "_browser_disconnect",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/cli_info_mixin.py",
+  "symbol": "CLIInfoMixin._reload_skills",
+  "rule": "literal",
+  "detail": "[USER INITIATED SKILLS RELOAD:",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/goals.py",
+  "symbol": "CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE",
+  "rule": "literal",
+  "detail": "[Continuing toward your standing goal",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/goals.py",
+  "symbol": "CONTINUATION_PROMPT_TEMPLATE",
+  "rule": "literal",
+  "detail": "[Continuing toward your standing goal",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/goals.py",
+  "symbol": "CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE",
+  "rule": "literal",
+  "detail": "[Continuing toward your standing goal",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/goals.py",
+  "symbol": "CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE",
+  "rule": "literal",
+  "detail": "[Continuing toward your standing goal",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/plugins_activation_live.py",
+  "symbol": "live_notice",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/web_routers/sessions.py",
+  "symbol": "_is_untyped_scaffold_notice",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "hermes_cli/web_routers/sessions.py",
+  "symbol": "_project_for_display",
+  "rule": "helper",
+  "detail": "_extract_steer_text_from_message",
+  "count": 2
+ },
+ {
+  "path": "hermes_state.py",
+  "symbol": "_is_background_review_harness_message",
+  "rule": "helper",
+  "detail": "_is_background_review_harness_message",
+  "count": 1
+ },
+ {
+  "path": "hermes_state.py",
+  "symbol": "_strip_background_review_harness",
+  "rule": "helper",
+  "detail": "_is_background_review_harness_message",
+  "count": 1
+ },
+ {
+  "path": "hermes_state_coverage.py",
+  "symbol": "SessionCoverageMixin._merged_user_run",
+  "rule": "helper",
+  "detail": "strip_leading_message_timestamps",
+  "count": 2
+ },
+ {
+  "path": "hermes_state_timeline.py",
+  "symbol": "_SYNTHETIC_PROMPT",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "tools/delegate_tool_child_run.py",
+  "symbol": "_build_child_goal_message",
+  "rule": "literal",
+  "detail": "[Image attached at:",
+  "count": 1
+ },
+ {
+  "path": "tools/delegate_tool_child_run.py",
+  "symbol": "_build_child_goal_message",
+  "rule": "literal",
+  "detail": "[Image attached:",
+  "count": 1
+ },
+ {
+  "path": "tools/process_registry_notifications.py",
+  "symbol": "ProcessNotificationBatch.render",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 1
+ },
+ {
+  "path": "tools/process_registry_notifications.py",
+  "symbol": "_format_async_delegation",
+  "rule": "literal",
+  "detail": "[ASYNC DELEGATION",
+  "count": 1
+ },
+ {
+  "path": "tools/process_registry_notifications.py",
+  "symbol": "_format_batch_delegation",
+  "rule": "literal",
+  "detail": "[ASYNC DELEGATION",
+  "count": 1
+ },
+ {
+  "path": "tools/process_registry_notifications.py",
+  "symbol": "_format_task_failure_notice",
+  "rule": "literal",
+  "detail": "[ASYNC DELEGATION",
+  "count": 1
+ },
+ {
+  "path": "tools/process_registry_notifications.py",
+  "symbol": "format_process_notification",
+  "rule": "literal",
+  "detail": "[Background process ",
+  "count": 1
+ },
+ {
+  "path": "tools/process_registry_notifications.py",
+  "symbol": "format_process_notification",
+  "rule": "literal",
+  "detail": "[IMPORTANT:",
+  "count": 3
+ },
+ {
+  "path": "tools/session_search_tool.py",
+  "symbol": "_COMPACTION_PREFIXES",
+  "rule": "literal",
+  "detail": "[CONTEXT COMPACTION",
+  "count": 1
+ },
+ {
+  "path": "tools/session_search_tool.py",
+  "symbol": "_COMPACTION_PREFIXES",
+  "rule": "literal",
+  "detail": "[CONTEXT SUMMARY",
+  "count": 1
+ },
+ {
+  "path": "tools/session_search_tool.py",
+  "symbol": "_is_compaction_summary",
+  "rule": "match",
+  "detail": "return bool(content) and content.lstrip().startswith(_COMPACTION_PREFIXES)",
+  "count": 1
+ },
+ {
+  "path": "tools/todo_tool.py",
+  "symbol": "TODO_INJECTION_HEADER",
+  "rule": "literal",
+  "detail": "[Your active task list was preserved",
+  "count": 1
+ },
+ {
+  "path": "tools/tool_result_storage.py",
+  "symbol": "_PERSISTED_PATH_RE",
+  "rule": "literal",
+  "detail": "Full output saved to:",
+  "count": 1
+ },
+ {
+  "path": "tools/tool_result_storage.py",
+  "symbol": "_build_persisted_message",
+  "rule": "literal",
+  "detail": "Full output saved to:",
+  "count": 1
+ },
+ {
+  "path": "tools/tool_result_storage.py",
+  "symbol": "extract_persisted_path",
+  "rule": "helper",
+  "detail": "extract_persisted_path",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/agent_callbacks.py",
+  "symbol": "_apply_personality_to_session",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 2
+ },
+ {
+  "path": "tui_gateway/server.py",
+  "symbol": "_MODEL_SWITCH_MARKER_PREFIX",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/server.py",
+  "symbol": "_append_model_switch_marker",
+  "rule": "helper",
+  "detail": "_is_model_switch_marker",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/server.py",
+  "symbol": "_is_model_switch_marker",
+  "rule": "helper",
+  "detail": "_is_model_switch_marker",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/server.py",
+  "symbol": "_is_pivot_marker",
+  "rule": "helper",
+  "detail": "_is_model_switch_marker",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_AUTO_CONTINUE_NOTE_PREFIX",
+  "rule": "literal",
+  "detail": "[System note:",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_IMAGE_HINT_RE",
+  "rule": "literal",
+  "detail": "[Image attached at:",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_SCREENSHOT_PLACEHOLDER",
+  "rule": "literal",
+  "detail": "[screenshot]",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_history_to_messages",
+  "rule": "helper",
+  "detail": "_extract_steer_text_from_message",
+  "count": 2
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_history_to_messages",
+  "rule": "helper",
+  "detail": "_legacy_display_kind",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_is_display_hidden_marker",
+  "rule": "literal",
+  "detail": "[System:",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_legacy_display_kind",
+  "rule": "helper",
+  "detail": "_legacy_display_kind",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_legacy_display_kind",
+  "rule": "match",
+  "detail": "return \"auto_continue\" if role == \"user\" and text.lstrip().startswith(_AUTO_CONTINUE_NOTE_PREFIX) else None",
+  "count": 2
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_strip_trailing_screenshot_placeholders",
+  "rule": "helper",
+  "detail": "_strip_trailing_screenshot_placeholders",
+  "count": 1
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_user_image_display_text",
+  "rule": "helper",
+  "detail": "_strip_trailing_screenshot_placeholders",
+  "count": 2
+ },
+ {
+  "path": "tui_gateway/session_history.py",
+  "symbol": "_user_image_display_text",
+  "rule": "literal",
+  "detail": "[Image attached at:",
+  "count": 3
+ }
+]
