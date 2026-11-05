@@ -14,6 +14,16 @@ _callback: ContextVar[tuple | None] = ContextVar('native_ingress_callback', defa
 _relay_callback: ContextVar[tuple | None] = ContextVar('relay_ingress_callback', default=None)
 
 
+class TransportRetired(RuntimeStoreError):
+    """``not_found`` for an event whose receiving adapter the runner has since unregistered (a
+    reconnect retired it, or is mid-replacement). Nothing was bound or committed: the runner's
+    message handler holds the event for the replacement adapter (``gateway.platforms.retired_inbound``)
+    instead of dropping it; every other caller sees the same ``not_found`` as before."""
+
+    def __init__(self):
+        super().__init__('not_found', field='transport', detail='receiving adapter was replaced (reconnect)')
+
+
 @contextmanager
 def relay_callback(transport, event):
     # Only the authenticated WS reader installs this; wire fields cannot mint it.
@@ -204,6 +214,11 @@ def capture_provenance(runner, event):
     context = _callback.get()
     if context is None or context[0] is not runner or context[1] is not event:
         return None
+    from gateway.platforms.retired_inbound import retired_receiver
+    if retired_receiver(runner, event.source) is not None:
+        # The owner check below could only refuse it (``_transport_owner`` is None for an unregistered
+        # receiver); the type tells the runner it is a reconnect gap, not a foreign source.
+        raise TransportRetired()
     adapter, home, _, provenance = _binding(runner, event.source, context[3])
     if event.source.delivered_via_upstream_relay:
         delivery = _relay_callback.get()

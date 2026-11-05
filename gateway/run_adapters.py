@@ -33,6 +33,7 @@ from gateway.run_adapters_recovery import (
 )
 from gateway.run_shutdown import _log_suppressed
 from gateway.session import SessionSource
+from gateway.session_ingress_context import TransportRetired
 from hermes_cli.observability.shared_metrics_gateway import record_platform_connect, record_platform_disconnect
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -1533,13 +1534,20 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
         register_transport_home(self, profile_name, transport_home)
 
         async def _handler(_runner, event):
+            if self._hold_retired_inbound(event):
+                return None
             identity = self._canonicalize(getattr(event, "source", None), transport_profile=profile_name)
             if transport_home is not None:
                 event.source._authorization_profile_home = transport_home
-            with native_callback(self, event, transport_home, profile_name):
-                async with self._async_scope_or_null(
-                        _async_profile_runtime_scope, self._routed_runtime_home(identity, profile_home)):
-                    return await self._handle_message(event)
+            try:
+                with native_callback(self, event, transport_home, profile_name):
+                    async with self._async_scope_or_null(
+                            _async_profile_runtime_scope, self._routed_runtime_home(identity, profile_home)):
+                        return await self._handle_message(event)
+            except TransportRetired:
+                if self._hold_retired_inbound(event):
+                    return None
+                raise
 
         return _handler.__get__(self)
 
@@ -1575,14 +1583,35 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
         register_transport_home(self, None, default_home)
 
         async def _handler(_runner, event):
+            if self._hold_retired_inbound(event):
+                return None
             # A rejected route still enters ``_handle_message``, whose ingress gate drops it fail-closed.
             profile_home = self._admit_primary_source(event.source, default_home) or default_home
             from gateway.session_ingress_context import native_callback
-            with native_callback(self, event, default_home):
-                async with _async_profile_runtime_scope(profile_home):
-                    return await self._handle_message(event)
+            try:
+                with native_callback(self, event, default_home):
+                    async with _async_profile_runtime_scope(profile_home):
+                        return await self._handle_message(event)
+            except TransportRetired:
+                if self._hold_retired_inbound(event):
+                    return None
+                raise
 
         return _handler.__get__(self)
+
+    def _hold_retired_inbound(self, event) -> bool:
+        """True when *event*'s receiving adapter is no longer registered (a reconnect retired it or is
+        replacing it, e.g. a debounced batch that flushed after the disconnect): the event is held for
+        the replacement adapter, which admits it through its own live binding, rather than refused
+        ``not_found`` and lost. Checked before the ingress gate (whose intake lookups would otherwise
+        read a missing transport) and again on the admission's own ``TransportRetired`` for an adapter
+        unregistered mid-handler; both precede any commit, so nothing is admitted twice."""
+        from gateway.platforms.retired_inbound import hold, retired_receiver
+        adapter = retired_receiver(self, getattr(event, "source", None))
+        if adapter is None:
+            return False
+        hold(self, adapter, event)
+        return True
 
     def _make_default_profile_busy_session_handler(self):
         """Busy-path twin of ``_make_default_profile_message_handler``: busy callbacks bypass the message

@@ -85,10 +85,16 @@ def hand_over_held_inbound(source: Any, target: Any) -> None:
 
     The runner calls it at publish time (retired instance -> replacement) and after disposing a
     failed reconnect candidate (candidate -> retained predecessor): a candidate that fails connect
-    can hold acked updates and salvage pending batches in disconnect(), which must not die with it."""
+    can hold acked updates and salvage pending batches in disconnect(), which must not die with it.
+
+    Every adapter also carries the runner-side hold for inbound its retired instance still
+    dispatched after being unregistered (``gateway.platforms.retired_inbound``)."""
     adopt = getattr(target, "adopt_held_inbound", None)
     if source is not None and callable(adopt):
         adopt(source)
+    if source is not None and target is not None:
+        from gateway.platforms.retired_inbound import adopt as adopt_retired
+        adopt_retired(source, target)
 
 
 # Worker-thread handoff used by the off-loop persist paths.  A module attribute

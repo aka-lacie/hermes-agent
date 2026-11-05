@@ -4563,7 +4563,8 @@ class BasePlatformAdapter(ABC):
             raise
         except BaseException as e:
             await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
-            logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
+            logger.error("[%s] Error handling message %s (chat %s): %s", self.name,
+                         getattr(event, "message_id", None) or "-", event.source.chat_id, e, exc_info=True)
             await self._notify_turn_error(event, e)
             from hermes_cli.config_backend import ConfigBackendUnavailable as _outage  # this turn only
             if isinstance(e, (SystemExit, KeyboardInterrupt)) and not isinstance(e, _outage):  # rest contained
