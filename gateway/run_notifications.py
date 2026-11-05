@@ -110,6 +110,15 @@ def _mark_internal_notification(text: str) -> str:
     return text + "\n\n" + INTERNAL_NOTIFICATION_FOOTER
 
 
+def _notification_stays_untyped(source) -> bool:
+    """Whether a pushed notification turn on *source* runs untyped and so needs the in-text footer.
+
+    Messaging platforms type a self-injected notification turn as a ``system_event`` row
+    (``gateway.typed_input``): its provenance is structural and the wire renderer frames it, so the
+    footer would only be a banner in its plain text. Local surfaces keep the untyped row."""
+    return getattr(source, "platform", None) == Platform.LOCAL
+
+
 def _held_reason(source, platform: str, multiplexed: bool) -> str:
     """Why a completion has no transport, naming what is actually missing: the saved receiving bot
     is down, or the route never saved one (a row older than the column), which no reconnect fixes."""
@@ -975,7 +984,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             raw_sid = str(evt.get("origin_session_id") or "").strip() or str(source.chat_id or "")
             return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
         try:
-            synth_text = _mark_internal_notification(synth_text)
+            if _notification_stays_untyped(source):
+                synth_text = _mark_internal_notification(synth_text)
             metadata = _watch_notification_metadata(evt, source)
             # The queued event's ``message_id`` is the message that STARTED the process, and the
             # persisted origin carries the same stale id. A synthetic completion is not a reply to

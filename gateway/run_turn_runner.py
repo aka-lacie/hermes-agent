@@ -76,6 +76,29 @@ def _finite_viewer_turn() -> bool:
     return finite_turn_required() is True
 
 
+def _typed_input_for(ctx, api_message, persist_override) -> tuple[dict, str] | None:
+    """``(typed_input, plain view)`` when this turn reaches the agent undecorated, else None.
+
+    A turn the runner decorated on the way in (an API-only recovery or model-switch note, observed
+    group context, native image parts, a CLI voice prefix) keeps the untyped row it always had: those
+    notes are not part of what the sender wrote, and dropping them would change what the model sees.
+    The check compares the message with the gateway's own untyped text for this turn (two copies of
+    one value, never a parse of it); the typed turn then sends the plain view instead."""
+    typed = getattr(ctx, "typed_input", None)
+    if not isinstance(typed, dict) or not isinstance(typed.get("input"), dict) or not isinstance(api_message, str):
+        return None
+    if api_message != typed.get("untyped_message"):
+        return None
+    from agent.message_parts import plain_text
+    try:
+        view = plain_text(typed["input"].get("parts") or [])
+    except Exception:
+        return None
+    if persist_override is not None and persist_override != view:
+        return None
+    return typed["input"], view
+
+
 def _persisted_turn(agent, agent_history, result, compressions) -> dict | None:
     """``message.complete.persisted_turn`` for this turn, the receipt the TUI gateway's own turns
     publish: clients bind the streamed reply to its stored row instead of comparing words. The
@@ -992,6 +1015,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                                                "is_bot": bool(getattr(ctx.source, "is_bot", False))})
             if ctx.title_user_message is not None:
                 kwargs["title_user_message"] = ctx.title_user_message
+            typed = _typed_input_for(ctx, api_message, persist_user_message_override)
+            if typed is not None and _accepts_keyword(agent.run_conversation, "typed_input"):
+                kwargs["typed_input"], api_message = typed
             if persist_user_message_override is not None:
                 kwargs["persist_user_message"] = persist_user_message_override
             elif observed_group_context:

@@ -679,10 +679,16 @@ def _stage_turn_user_message(
     persist_user_timestamp: Optional[float], persist_user_platform_id: Optional[str],
     persist_user_display_kind: Optional[str],
     persist_user_display_metadata: Optional[dict[str, Any]],
+    typed_input: Optional[Mapping[str, Any]] = None,
 ) -> tuple[dict[str, Any], Any]:
     """Build this turn's user dict, reusing CLI-staged input only when its clean text
     matches this turn (a stale handoff must not replace later input; voice turns
-    compare the clean override). Returns ``(user_msg, pending_cli_message)``."""
+    compare the clean override). Returns ``(user_msg, pending_cli_message)``.
+
+    ``typed_input`` (``agent.message_parts.typed_input``) types the dict: its parts and provenance
+    ride on it, ``content`` is their plain view. Applied only when that plain view is the text this
+    turn persists (the producer passes it as ``user_message``); a caller that decorated the text on
+    the way in keeps the untyped row it always had."""
     pending_cli_message = getattr(agent, "_pending_cli_user_message", None)
     expected_persist_content = (
         persist_user_message if persist_user_message is not None else user_message
@@ -713,7 +719,26 @@ def _stage_turn_user_message(
     # recovery dedups via ``has_platform_message_id`` against this row.
     if persist_user_platform_id is not None:
         user_msg["platform_message_id"] = persist_user_platform_id
+    if typed_input is not None:
+        _apply_turn_typed_input(user_msg, typed_input, expected_persist_content)
     return user_msg, pending_cli_message
+
+
+def _apply_turn_typed_input(user_msg: dict[str, Any], payload: Mapping[str, Any], expected: Any) -> None:
+    """Type this turn's user dict from the producer's parts (see ``_stage_turn_user_message``)."""
+    from agent.message_parts import apply_typed_input, plain_text
+
+    parts = payload.get("parts") if isinstance(payload, Mapping) else None
+    if not isinstance(parts, list) or not isinstance(user_msg.get("content"), str):
+        return
+    try:
+        view = plain_text(parts)
+    except Exception:
+        return
+    if view != expected or view != user_msg["content"]:
+        logger.warning("typed turn input does not match the turn's text; the turn stays untyped")
+        return
+    apply_typed_input(user_msg, payload)
 
 
 def _hydrate_from_history(agent: Any, conversation_history: Optional[list[Any]]) -> None:
@@ -1103,7 +1128,7 @@ def build_turn_context(
     restore_or_build_system_prompt,
     install_safe_stdio, sanitize_surrogates, summarize_user_message_for_log, set_session_context,
     set_current_write_origin, ra, moa_active: bool=False,
-    title_user_message: Optional[str]=None,
+    title_user_message: Optional[str]=None, typed_input: Optional[Mapping[str, Any]]=None,
 ) -> TurnContext:
     """Run the once-per-turn setup and return the loop's input context.
 
@@ -1177,6 +1202,7 @@ def build_turn_context(
     user_msg, pending_cli_message = _stage_turn_user_message(
         agent, user_message, persist_user_message, persist_user_timestamp,
         persist_user_platform_id, persist_user_display_kind, persist_user_display_metadata,
+        typed_input=typed_input,
     )
     _hydrate_from_history(agent, conversation_history)
     # Every estimator this turn prices images at the cost learned from this model's real usage.

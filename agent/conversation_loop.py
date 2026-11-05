@@ -1656,6 +1656,7 @@ def _run_conversation_turn(
     moa_config: Optional[dict[str, Any]] = None,
     title_user_message: Optional[str] = None,
     prelude: Optional[Prelude] = None,
+    typed_input: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Run a complete conversation with tool calling until completion; returns the result dict.
 
@@ -1666,7 +1667,9 @@ def _run_conversation_turn(
     model-facing message; an empty string suppresses titling for this turn).
     ``persist_user_display_*``:
     display-only event rendering; the model still receives the message unchanged.
-    ``prelude``: scripted tool calls played before the first model call (``agent/turn_scripted_prelude.py``)."""
+    ``prelude``: scripted tool calls played before the first model call (``agent/turn_scripted_prelude.py``).
+    ``typed_input``: the turn's typed parts and row provenance (``agent.message_parts.typed_input``) from a
+    producer that knows who wrote it; ``user_message`` is then their plain view."""
     if moa_config is None:
         user_message, moa_config, persist_user_message = _decode_inline_moa_turn(
             user_message, persist_user_message
@@ -1711,6 +1714,7 @@ def _run_conversation_turn(
             # user message, so no byte-stable api_content sidecar can be stamped.
             moa_active=bool(moa_config),
             title_user_message=title_user_message,
+            typed_input=typed_input,
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
@@ -1818,6 +1822,7 @@ def run_conversation(
     turn_author: Optional[dict[str, Any]] = None,
     title_user_message: Optional[str] = None,
     prelude: Optional[Prelude] = None,
+    typed_input: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Run one turn (see ``_run_conversation_turn``) and export the current-turn boundary.
 
@@ -1853,6 +1858,7 @@ def run_conversation(
                 turn_author=turn_author,
                 title_user_message=title_user_message,
                 prelude=prelude,
+                typed_input=typed_input,
             )
         finally:
             end_voice_turn_route(agent)

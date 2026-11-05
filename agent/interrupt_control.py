@@ -108,6 +108,22 @@ def _steer_fates(agent) -> dict:
     return vars(agent).setdefault("_steer_ticket_fates", {})
 
 
+def _steer_origins(agent) -> dict:
+    """``{steer text: origin}`` for buffered steers a surface admitted with a structured origin
+    (``steer(origin=...)``). Read when the steer row is built (``drained_steer_inputs``)."""
+    return vars(agent).setdefault("_pending_steer_origins", {})
+
+
+def drained_steer_inputs(agent, steer_text: str) -> list:
+    """``[(text, origin or None), ...]`` for the steers the last drain returned as *steer_text*, in
+    arrival order: one typed part each. A text no drain produced is one origin-less steer."""
+    with _ic_lock(agent, "_pending_steer_lock"):
+        drained, parts = vars(agent).get("_steer_last_drain", (None, None))
+        texts = [text for _, text in parts] if drained == steer_text and parts else [steer_text]
+        origins = _steer_origins(agent)
+        return [(text, origins.pop(text, None)) for text in texts]
+
+
 def requeue_drained_steer(agent, steer_text: str) -> None:
     """Put drained steer text back (nothing took it). When it is the last drain's text, its parts go back
     with their tickets, so a transfer in it reads unconsumed again."""
@@ -305,17 +321,22 @@ class InterruptControlMixin:
                     if ticket is not None:
                         _steer_fates(self)[ticket] = False
                 _set_steer_parts(self, [])
+                _steer_origins(self).clear()
         return True
 
-    def steer(self, text: str, *, ticket=None) -> bool:
+    def steer(self, text: str, *, ticket=None, origin: Optional[dict] = None) -> bool:
         """Queue user text for delivery as its own user row after the current tool batch finishes (no
         interrupt); multiple calls concatenate with newlines. Returns False for empty text. ``ticket``
-        names the submission, so ``withdraw_steer`` can settle exactly it, whatever text others carry."""
+        names the submission, so ``withdraw_steer`` can settle exactly it, whatever text others carry.
+        ``origin`` (platform, message_id, channel_id, sent_at) rides the typed steer part, so no surface
+        formats it into the text."""
         if not text or not text.strip():
             return False
         cleaned = text.strip()
         with _ic_lock(self, "_pending_steer_lock"):
             _set_steer_parts(self, _steer_parts(self) + [(ticket, cleaned)])
+            if isinstance(origin, dict) and origin:
+                _steer_origins(self)[cleaned] = dict(origin)
         # The turn no longer ran on its own (first-task-done detection reads this off the result).
         self._turn_user_intervened = True
         return True

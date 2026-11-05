@@ -489,8 +489,10 @@ class TestSteerInjection:
         assert messages[2]["content"] == "ls output A"
         assert messages[3]["content"] == "ls output B"
         assert messages[-1]["role"] == "user"
-        assert STEER_MARKER_OPEN in messages[-1]["content"]
-        assert "please also check auth.log" in messages[-1]["content"]
+        # Typed steer row: the raw text is the plain view; the renderer owns the <steer/> header.
+        assert STEER_MARKER_OPEN not in messages[-1]["content"]
+        assert messages[-1]["content"] == "please also check auth.log"
+        assert [(p["type"], p["delivery"]) for p in messages[-1]["_parts"]] == [("human", "steer")]
         # Role-alternation pattern: assistant(tool_calls) → tool → user is
         # the documented legal "user jumped in mid-run" shape.
         # And pending_steer is consumed.
@@ -752,8 +754,8 @@ class TestPreApiCallSteerDrain:
         assert tool_row == before
         assert messages[-2] is tool_row
         assert messages[-1]["role"] == "user"
-        assert STEER_MARKER_OPEN in messages[-1]["content"]
-        assert "focus on error handling" in messages[-1]["content"]
+        assert messages[-1]["content"] == "focus on error handling"
+        assert messages[-1]["_parts"][0]["delivery"] == "steer"
         assert agent._pending_steer is None
 
 

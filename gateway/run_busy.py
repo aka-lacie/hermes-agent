@@ -200,7 +200,8 @@ class GatewayBusySessionMixin:
         if leftover_steer:
             steer_prompt, steer_source = self._pinned_channel_inputs(session_key, None, source, internal=True)
             self._session_state(session_key).conversation.queued_events.insert(0, pending_event)
-            pending_event = MessageEvent(text=leftover_steer, source=steer_source, channel_prompt=steer_prompt)
+            pending_event = MessageEvent(text=leftover_steer, source=steer_source, channel_prompt=steer_prompt,
+                                         metadata={"delivery": "steer"})  # typed: a turn-start steer
         adapter._pending_messages[session_key] = pending_event
         logger.info("Deferring queued follow-up for session %s until after its compression-exhausted reset", session_key)
 
@@ -247,6 +248,7 @@ class GatewayBusySessionMixin:
                 )
                 steer_event = MessageEvent(
                     text=leftover_steer, source=steer_source, channel_prompt=steer_prompt,
+                    metadata={"delivery": "steer"},  # typed: a human steer delivered at a turn start
                 )
                 if session_key:
                     self._enqueue_fifo(session_key, steer_event, adapter)
@@ -565,6 +567,33 @@ class GatewayBusySessionMixin:
         )
         return (enriched_text or text).strip() if successful_transcripts else text
 
+    def _typed_steer_origin(self, event: Optional[MessageEvent]) -> Optional[dict]:
+        """The structured origin a typed steer carries (``gateway.typed_input.steer_origin``), or None
+        where the steer stays untyped (local surfaces, internal events, no event)."""
+        source = getattr(event, "source", None)
+        if event is None or source is None or getattr(event, "internal", False) or source.platform == Platform.LOCAL:
+            return None
+        from gateway.run import _load_gateway_config
+        from gateway.typed_input import steer_origin
+
+        with self._profile_scope_for_source(source):
+            redact_pii = bool((_load_gateway_config().get("privacy") or {}).get("redact_pii", False))
+        return steer_origin(event, redact_pii=redact_pii)
+
+    def _steer_for_event(self, running_agent: Any, text: str, event: Optional[MessageEvent]) -> bool:
+        """Steer *text* from *event* into the running agent. An agent that takes typed steers gets the
+        raw text plus its structured origin (rendered as one ``<steer/>`` header line; the system prompt
+        says once how to use it); any other agent gets the legacy origin-prefixed text."""
+        from agent.interrupt_compat import _accepts_keyword
+
+        origin = self._typed_steer_origin(event)
+        steer = getattr(running_agent, "steer", None)
+        if origin is not None and callable(steer) and _accepts_keyword(steer, "origin"):
+            accepted = bool(steer(text, origin=origin))
+            return bool(self._steer_active_subagents(running_agent, text)) or accepted
+        return self._steer_running_agent(
+            running_agent, self._steer_text_with_origin(text, event) if event is not None else text)
+
     def _steer_text_with_origin(self, text: str, event: MessageEvent) -> str:
         """Keep event origin in this injection, never in the cached system prompt."""
         if not text.strip():
@@ -772,9 +801,9 @@ class GatewayBusySessionMixin:
     ) -> bool:
         """Call ``running_agent.<verb>(text)`` (steer/redirect); False + warning on failure."""
         try:
-            call_text = self._steer_text_with_origin(text, event) if event else text
             if verb == "steer":
-                return self._steer_running_agent(running_agent, call_text)
+                return self._steer_for_event(running_agent, text, event)
+            call_text = self._steer_text_with_origin(text, event) if event else text
             return bool(getattr(running_agent, verb)(call_text))
         except Exception as exc:
             logger.warning("Gateway %s failed for session %s: %s", verb, session_key, exc)
@@ -1250,7 +1279,7 @@ class GatewayBusySessionMixin:
         if not running_agent or not hasattr(running_agent, "steer"):
             return await _queue_fallback(t("gateway.steer.queued_no_agent"))
         try:
-            accepted = self._steer_running_agent(running_agent, self._steer_text_with_origin(steer_text, event))
+            accepted = self._steer_for_event(running_agent, steer_text, event)
         except Exception as exc:
             logger.warning("Steer failed for session %s: %s", quick_key, exc)
             return t("gateway.steer.failed", error=exc)

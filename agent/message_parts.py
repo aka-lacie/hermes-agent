@@ -45,9 +45,16 @@ SYSTEM_EVENT = "system_event"
 INJECTION = "injection"
 MEDIA = "media"
 PART_TYPES = frozenset({HUMAN, SYSTEM_EVENT, INJECTION, MEDIA})
-# Parts whose ``text`` makes up the plain view, in message order. Media contributes nothing: its bytes
-# (or a one-line reference outside the replay window) are the renderer's business.
-_TEXT_PART_TYPES = frozenset({HUMAN, SYSTEM_EVENT, INJECTION})
+# Parts whose ``text`` makes up the plain view, in message order: what the row's sender actually wrote
+# (a human's words, an event's evidence). Injections are harness context riding with the turn, never
+# the sender's words, so ``content`` (FTS, UI, re-anchoring, legacy readers) never carries them; only the
+# wire renderer shows them. Media contributes nothing: its bytes (or a one-line reference outside the
+# replay window) are the renderer's business.
+_TEXT_PART_TYPES = frozenset({HUMAN, SYSTEM_EVENT})
+# Set by the wire renderer on a per-call clone whose ``content`` is already the rendered wire text and
+# whose ``_parts`` stay on for a provider adapter (``agent.wire_render``): a merge then concatenates the
+# parts and leaves the caller's join of the rendered text alone.
+RENDERED = "_wire_rendered"
 _PART_KEYS = {
     HUMAN: frozenset({"type", "v", "text", "delivery", "origin"}),
     SYSTEM_EVENT: frozenset({"type", "v", "kind", "text", "meta"}),
@@ -205,8 +212,8 @@ def validate_parts(parts: Any) -> list:
 
 
 def plain_text(parts: Iterable[Mapping[str, Any]]) -> str:
-    """The derived ``content`` view: the non-empty ``text`` of every human / system_event / injection
-    part, in order, joined by :data:`PLAIN_TEXT_SEPARATOR`. Media parts contribute nothing."""
+    """The derived ``content`` view: the non-empty ``text`` of every human / system_event part, in
+    order, joined by :data:`PLAIN_TEXT_SEPARATOR`. Injection and media parts contribute nothing."""
     return PLAIN_TEXT_SEPARATOR.join(
         p["text"] for p in parts if p.get("type") in _TEXT_PART_TYPES and p.get("text"))
 
@@ -269,6 +276,13 @@ def merge(prev: MutableMapping[str, Any], msg: Mapping[str, Any]) -> bool:
     The persisted stamp is the caller's to manage (the merge keeps its own durable-row bookkeeping).
     """
     if not (has_parts(prev) or has_parts(msg)):
+        return False
+    if prev.get(RENDERED) or msg.get(RENDERED):
+        # A rendered wire clone (adapter-owned route): content is already wire text, so the caller's text
+        # join stands; the adapter still sees every part, in order.
+        prev[MESSAGE_PARTS] = [*copy.deepcopy(prev.get(MESSAGE_PARTS) or []),
+                               *copy.deepcopy(msg.get(MESSAGE_PARTS) or [])]
+        prev[RENDERED] = True
         return False
     left, right = _parts_or_legacy(prev), _parts_or_legacy(msg)
     if left is None or right is None:
@@ -362,3 +376,67 @@ def current_turn_inputs(messages: Any, index: Optional[int]) -> list:
         return []
     msg = messages[index]
     return copy.deepcopy(msg[MESSAGE_PARTS]) if has_parts(msg) else []
+
+
+# ── typed live input (``run_conversation(typed_input=...)``) ─────────────────
+#
+# A producer that knows who wrote a turn's input (the gateway for a platform message, the
+# notification paths for an internal event) hands the agent loop the turn's parts and row provenance
+# instead of a pre-flattened string. The loop builds the turn's user dict from it; ``content`` is the
+# parts' plain view, so the producer passes that same plain view as ``user_message``.
+
+
+def typed_input(parts: list, *, sender_kind: str, sender_id: Optional[str] = None,
+                sent_at: Optional[float] = None, source_event_id: Optional[str] = None,
+                intent: Optional[str] = None, part_kind: Optional[str] = None) -> dict:
+    """A validated ``typed_input`` payload: ``{"parts": [...], <provenance fields that hold a value>}``."""
+    if sender_kind not in SENDER_KINDS or sender_kind == "tool_result":
+        raise ValueError(f"typed input needs a sender kind from {sorted(SENDER_KINDS)}, got {sender_kind!r}")
+    payload: dict = {"parts": copy.deepcopy(validate_parts(list(parts))), "sender_kind": sender_kind}
+    for key, value in (("sender_id", sender_id), ("source_event_id", source_event_id), ("intent", intent),
+                       ("part_kind", part_kind)):
+        if value is not None:
+            payload[key] = str(value)
+    if sent_at is not None:
+        payload["sent_at"] = float(sent_at)
+    return payload
+
+
+def human_turn_input(text: str, *, delivery: str = "turn", origin: Optional[Mapping[str, Any]] = None,
+                     sender_id: Optional[str] = None) -> dict:
+    """``typed_input`` for one human message; row ``sent_at`` / ``source_event_id`` mirror its origin."""
+    part = human_message(text, delivery=delivery, origin=origin)
+    return typed_input([part], sender_kind="human", sender_id=sender_id,
+                       sent_at=part["origin"].get("sent_at"), source_event_id=part["origin"].get("message_id"),
+                       intent="steer" if delivery == "steer" else None)
+
+
+def system_event_input(kind: str, text: str, *, sender_kind: str = "system", sender_id: str,
+                       meta: Optional[Mapping[str, Any]] = None, sent_at: Optional[float] = None,
+                       source_event_id: Optional[str] = None) -> dict:
+    """``typed_input`` for one event turn (a notification, a completion): never human authority."""
+    if sender_kind == "human":
+        raise ValueError("system events need a non-human sender_kind")
+    return typed_input([system_event(kind, text, meta=meta)], sender_kind=sender_kind, sender_id=sender_id,
+                       sent_at=sent_at, source_event_id=source_event_id, part_kind=kind)
+
+
+def apply_typed_input(msg: MutableMapping[str, Any], payload: Any) -> bool:
+    """Type the user dict *msg* from a ``typed_input`` payload (parts + provenance); True when applied.
+    A malformed payload leaves *msg* untouched (logged): the turn then runs as the untyped text it is."""
+    if not isinstance(payload, Mapping):
+        return False
+    try:
+        parts = validate_parts(copy.deepcopy(list(payload.get("parts") or [])))
+        if not parts:
+            raise ValueError("typed input carries no parts")
+        if payload.get("sender_kind") not in SENDER_KINDS:
+            raise ValueError(f"unknown sender kind {payload.get('sender_kind')!r}")
+    except (TypeError, ValueError) as exc:
+        logger.warning("Ignoring malformed typed turn input: %s", exc)
+        return False
+    for key in PROVENANCE_FIELDS:
+        if payload.get(key) is not None:
+            msg[key] = payload[key]
+    set_parts(msg, parts)
+    return True

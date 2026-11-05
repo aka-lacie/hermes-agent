@@ -642,6 +642,9 @@ class GatewayTurnPrepareMixin:
         persistence_session_id: Optional[str] = None
         persistence_owner: Optional[str] = None
         title_user_message: Optional[str] = None
+        # ``{"input": <typed_input payload>, "untyped_message": <the untyped model-facing text>}``
+        # (gateway.typed_input), or None for an untyped turn.
+        typed_input: Optional[dict] = None
 
     async def _hmwa_prepare_turn(self, event, source, session_entry, session_key, _quick_key, run_generation):
         """Everything between session resolution and the agent run: session open, task-local env,
@@ -730,6 +733,16 @@ class GatewayTurnPrepareMixin:
         message_text, persist_user_message, persist_user_timestamp = (
             self._hmwa_apply_message_timestamp(event, message_text)
         )
+        # Typed turn: the parts carry who wrote it and when (origin). When the turn reaches the agent
+        # undecorated, the model-facing text becomes the persisted text itself (no triggering-message
+        # note, no timestamp head); the renderer and the system prompt's conventions section present
+        # the origin. ``message_text`` stays the untyped text for a turn the runner decorates.
+        from gateway.typed_input import turn_typed_input
+        typed_input = turn_typed_input(
+            event, source, persist_user_message, persist_user_timestamp, persist_user_display_kind,
+            redact_pii=_redact_pii)
+        if typed_input is not None:
+            typed_input = {"input": typed_input, "untyped_message": message_text}
 
         # Stage the notes (one-shot; consumed in run_sync) AFTER the early-out so an aborted turn
         # cannot leak them into the next turn.
@@ -749,5 +762,5 @@ class GatewayTurnPrepareMixin:
         return self._PreparedTurn(
             history, context_prompt, message_text, persist_user_message, persist_user_timestamp,
             persist_user_display_kind, session_entry.session_id, owner,
-            title_user_message=title_user_message,
+            title_user_message=title_user_message, typed_input=typed_input,
         ), _session_env_tokens

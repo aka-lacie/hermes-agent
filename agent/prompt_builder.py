@@ -615,13 +615,33 @@ def format_steer_marker(steer_text: str) -> str:
 STEER_DISPLAY_KIND = "steer"
 
 
-def steer_user_row(steer_text: str) -> dict[str, Any]:
+def steer_user_row(steer_text: str, *, steers: Optional[list] = None) -> dict[str, Any]:
     """The standalone ``role:user`` row a mid-turn /steer is delivered as (after the newest tool
     result). Its own row — never smeared onto the already-persisted tool row, which append-only
-    persistence would leave divergent from the live request — and typed so the alternation repair
-    never merges the next real prompt into it and history renderers can label it."""
-    return {"role": "user", "content": format_steer_marker(steer_text).lstrip(),
-            "display_kind": STEER_DISPLAY_KIND}
+    persistence would leave divergent from the live request — and display-typed so the alternation
+    repair never merges the next real prompt into it and history renderers can label it.
+
+    The row carries typed parts (``agent.message_parts``): one ``human`` part with ``delivery="steer"``
+    per buffered steer, each with the structured origin its surface admitted (``steers`` =
+    ``[(text, origin or None), ...]`` from ``agent.interrupt_control.drained_steer_inputs``; default one
+    origin-less steer). ``content`` is the raw text; the wire renderer adds the one-line ``<steer/>``
+    header and the system prompt's conventions section says once what it means, so no banner, origin
+    prose or instruction is ever formatted into the row."""
+    from agent.message_parts import human_message, set_parts
+
+    parts = [human_message(text, delivery="steer", origin=origin)
+             for text, origin in (steers or [(steer_text, None)]) if isinstance(text, str) and text.strip()]
+    if not parts:
+        parts = [human_message(steer_text, delivery="steer")]
+    row: dict[str, Any] = {"role": "user", "display_kind": STEER_DISPLAY_KIND, "sender_kind": "human",
+                           "intent": "steer"}
+    first_origin = parts[0]["origin"]
+    if first_origin.get("message_id"):
+        row["source_event_id"] = first_origin["message_id"]
+    if first_origin.get("sent_at") is not None:
+        row["sent_at"] = first_origin["sent_at"]
+    set_parts(row, parts)
+    return row
 
 
 STEER_CHANNEL_NOTE = (

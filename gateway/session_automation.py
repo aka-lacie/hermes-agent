@@ -165,8 +165,10 @@ def _fold_completion(event, waiting, identity):
         text = text.rstrip().removesuffix(INTERNAL_NOTIFICATION_FOOTER).rstrip()
         folded = _FOLD_HEADER_RE.match(text)
         return text[folded.end():] if folded else text
-    event.text = _mark_internal_notification('\n\n'.join((
-        _FOLD_HEADER.format(count=len(identities)), body(waiting['payload']['text']), body(event.text))))
+    from gateway.run_notifications import _notification_stays_untyped
+    folded = '\n\n'.join((
+        _FOLD_HEADER.format(count=len(identities)), body(waiting['payload']['text']), body(event.text)))
+    event.text = _mark_internal_notification(folded) if _notification_stays_untyped(event.source) else folded
     event.metadata['automation_identities'] = identities
     if 'display_text' in event.metadata:
         event.metadata['display_text'] = process_completion_display_text([{}] * len(identities))

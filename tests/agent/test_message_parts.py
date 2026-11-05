@@ -46,9 +46,10 @@ def test_validate_rejects_malformed_parts(part):
 
 
 def test_plain_text_is_the_deterministic_text_projection():
+    # What the row's senders wrote: harness injections and media never reach ``content``.
     parts = [mp.human_message("one"), mp.system_event("cron", ""), mp.media_ref("b" * 64, "image/png", "p"),
              mp.turn_injection("hint", "two"), mp.system_event("webhook", "three")]
-    assert mp.plain_text(parts) == "one\n\ntwo\n\nthree"
+    assert mp.plain_text(parts) == "one\n\nthree"
     assert mp.plain_text([]) == ""
 
 
@@ -75,7 +76,7 @@ def test_append_parts_types_an_untyped_turn_as_it_was_rendered():
     msg = {"role": "user", "content": "the human's words"}
     mp.append_parts(msg, [mp.turn_injection("hint", "context")])
     assert [p["type"] for p in msg["_parts"]] == ["human", "injection"]
-    assert msg["content"] == "the human's words\n\ncontext"
+    assert msg["content"] == "the human's words"  # the injection rides the parts, not the plain view
     with pytest.raises(ValueError):
         mp.append_parts({"role": "user", "content": [{"type": "text", "text": "x"}]}, [mp.human_message("y")])
 

@@ -373,9 +373,10 @@ async def test_inject_watch_notification_drops_stale_trigger_reply_anchor(monkey
     assert _reply_anchor_for_event(synth_event) is None
     # The original id survives for debugging only.
     assert synth_event.metadata["original_trigger_message_id"] == "777"
-    # Unambiguous machine provenance: SYSTEM prefix still leads, footer appended, origin tagged.
+    # Machine provenance is structural on a messaging platform: the turn is typed as a system_event row
+    # (gateway.typed_input), so no footer banner is appended to its text; origin still tagged.
     assert synth_event.text.startswith("[SYSTEM: ")
-    assert synth_event.text.rstrip().endswith(INTERNAL_NOTIFICATION_FOOTER)
+    assert not synth_event.text.rstrip().endswith(INTERNAL_NOTIFICATION_FOOTER)
     assert synth_event.metadata["notification_origin"] == "process_registry_synthetic"
 
 
