@@ -215,6 +215,19 @@ SCHEMA_HISTORY: dict[str, _TableHistory] = {
         )),
         # GW-18 (package 10, #140968): write-side revision a transcript-derived cache keys on.
         ('32 2026-10-18T10:11Z 1fc1999769', (('+', 'transcript_revision', 'tool_names'),)),
+        # Unified session model (dev3 Phase 2a): topology, routing and lifecycle columns.
+        ('33 2026-11-05T11:00Z dev3-phase2a', (
+            ('+', 'lineage_kind', 'transcript_revision'),
+            ('+', 'depth', 'lineage_kind'),
+            ('+', 'delivery_target', 'depth'),
+            ('+', 'route', 'delivery_target'),
+            ('+', 'status', 'route'),
+            ('+', 'workspace', 'status'),
+            ('+', 'fork_origin', 'workspace'),
+            ('+', 'role', 'fork_origin'),
+            ('+', 'root_session_id', 'role'),
+            ('+', 'group_id', 'root_session_id'),
+        )),
         ),
     ),
     "messages": _TableHistory(
@@ -253,6 +266,17 @@ SCHEMA_HISTORY: dict[str, _TableHistory] = {
             ('+', 'absorbed_message_uids', 'message_uid'),
             ('+', 'tool_call_uids', 'absorbed_message_uids'),
             ('+', 'tool_call_uid', 'tool_call_uids'),
+        )),
+        # Message provenance and typed parts (dev3 Phase 2a).
+        ('17 2026-11-05T11:00Z dev3-phase2a', (
+            ('+', 'sender_kind', 'tool_call_uid'),
+            ('+', 'sender_id', 'sender_kind'),
+            ('+', 'sent_at', 'sender_id'),
+            ('+', 'source_event_id', 'sent_at'),
+            ('+', 'intent', 'source_event_id'),
+            ('+', 'part_kind', 'intent'),
+            ('+', 'parts_json', 'part_kind'),
+            ('+', 'turn_outcome', 'parts_json'),
         )),
         ),
     ),

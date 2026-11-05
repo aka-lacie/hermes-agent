@@ -524,6 +524,19 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_read_at REAL,
     tool_names TEXT,
     transcript_revision INTEGER NOT NULL DEFAULT 0,
+    -- Unified session model (additive, no version bump). root_session_id/depth are stamped on insert by
+    -- the sessions_topology_* triggers (DEFERRED_INDEX_SQL); rows that predate them stay NULL until the
+    -- one-shot lineage migration backfills them. JSON columns hold credential-free objects.
+    lineage_kind TEXT,
+    depth INTEGER,
+    delivery_target TEXT,
+    route TEXT,
+    status TEXT,
+    workspace TEXT,
+    fork_origin TEXT,
+    role TEXT,
+    root_session_id TEXT,
+    group_id TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id),
     FOREIGN KEY (system_prompt_hash) REFERENCES system_prompts(hash)
 );
@@ -558,7 +571,19 @@ CREATE TABLE IF NOT EXISTS messages (
     message_uid TEXT,
     absorbed_message_uids TEXT,
     tool_call_uids TEXT,
-    tool_call_uid TEXT
+    tool_call_uid TEXT,
+    -- First-class provenance (agent/message_parts.py). sent_at is the original event's epoch seconds
+    -- (REAL, same clock as ``timestamp``), not the insert time. parts_json is the row's ordered typed
+    -- parts; ``content`` is their plain-text view. turn_outcome closes a user turn without a synthetic
+    -- assistant row (completed | failed | partial | interrupted).
+    sender_kind TEXT,
+    sender_id TEXT,
+    sent_at REAL,
+    source_event_id TEXT,
+    intent TEXT,
+    part_kind TEXT,
+    parts_json TEXT,
+    turn_outcome TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_model_usage (
@@ -602,6 +627,9 @@ CREATE TABLE IF NOT EXISTS session_admissions (
     outcome TEXT,
     owner_epoch INTEGER,
     generation INTEGER,
+    -- NULL = immediate (the drain claims it on its own); batch_with_next_user_turn holds it for the next
+    -- human admission on the same session.
+    wake_policy TEXT,
     UNIQUE (principal_id, target_session_id, request_id),
     CHECK (status != 'started' OR (owner_epoch IS NOT NULL AND generation IS NOT NULL))
 );
@@ -769,6 +797,16 @@ CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
 """
 
+# The delegation-tree topology a new sessions row is stamped with (sessions_topology_* triggers below),
+# written against the trigger's ``new`` row.
+_SESSION_TOPOLOGY_ROOT_SQL = (
+    "CASE WHEN new.parent_session_id IS NULL THEN new.id ELSE (SELECT p.root_session_id FROM sessions p "
+    "WHERE p.id = new.parent_session_id) END")
+_SESSION_TOPOLOGY_DEPTH_SQL = (
+    "CASE WHEN new.parent_session_id IS NULL THEN 0 ELSE (SELECT p.depth + CASE WHEN "
+    + _sql_json_extract("new.model_config", "$._delegate_from")
+    + " = new.parent_session_id THEN 1 ELSE 0 END FROM sessions p WHERE p.id = new.parent_session_id) END")
+
 # Indexes on later-added columns must run AFTER _reconcile_columns(), or executescript fails on legacy DBs.
 # sessions_runtime_ledger_delete_guard: every delete path in this release retires a session's ledger rows
 # (session_admissions / worker_executions, ON DELETE RESTRICT) first, so only a release that predates the
@@ -907,6 +945,38 @@ CREATE INDEX IF NOT EXISTS idx_sessions_effective_activity
 CREATE INDEX IF NOT EXISTS idx_sessions_local_created_started
     ON sessions(created_source, started_at DESC)
     WHERE source = 'local';
+""" + """
+CREATE INDEX IF NOT EXISTS idx_sessions_root_session
+    ON sessions(root_session_id) WHERE root_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_group
+    ON sessions(group_id) WHERE group_id IS NOT NULL;
+DROP TRIGGER IF EXISTS sessions_topology_insert;
+CREATE TRIGGER IF NOT EXISTS sessions_topology_insert
+AFTER INSERT ON sessions WHEN new.root_session_id IS NULL OR new.depth IS NULL
+BEGIN
+    -- Every new row learns its delegation tree once, whoever inserted it. A root is its own root at
+    -- depth 0; a child takes its parent's root. Only a delegate child (its _delegate_from marker names
+    -- THIS parent) goes one level deeper: a compression/branch/reset continuation is the same depth.
+    -- A parent that predates these columns has NULLs, so its child stays NULL for the lineage migration.
+    UPDATE sessions SET
+        root_session_id = COALESCE(new.root_session_id, """ + _SESSION_TOPOLOGY_ROOT_SQL + """),
+        depth = COALESCE(new.depth, """ + _SESSION_TOPOLOGY_DEPTH_SQL + """)
+    WHERE id = new.id;
+END;
+DROP TRIGGER IF EXISTS sessions_topology_reparent;
+CREATE TRIGGER IF NOT EXISTS sessions_topology_reparent
+AFTER UPDATE OF parent_session_id, model_config ON sessions
+WHEN new.parent_session_id IS NOT old.parent_session_id
+  OR """ + _sql_json_extract("new.model_config", "$._delegate_from") + """
+     IS NOT """ + _sql_json_extract("old.model_config", "$._delegate_from") + """
+BEGIN
+    -- The upsert fills a bare row's parent (or its delegate marker) after the insert: re-derive this
+    -- row only. Descendants created before the move keep the root they were stamped with.
+    UPDATE sessions SET
+        root_session_id = """ + _SESSION_TOPOLOGY_ROOT_SQL + """,
+        depth = """ + _SESSION_TOPOLOGY_DEPTH_SQL + """
+    WHERE id = new.id;
+END;
 """
 
 
