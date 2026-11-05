@@ -12,6 +12,7 @@ from agent.context_compressor import _DB_PERSISTED_MARKER
 from agent.message_metadata import (
     ABSORBED_MESSAGE_UIDS, CANONICAL_ROW, DB_ROW_SNAPSHOT, MESSAGE_UID, RESTORED_FROM_STORE, TOOL_CALL_UIDS,
     copy_identity_fields, message_uid_or_none)
+from agent.message_parts import MESSAGE_PARTS
 from hermes_state_common import _id_chunks, _placeholders
 from hermes_state_identity import _fill_missing_tool_call_uids, _restore_row_identity
 from hermes_state_messages import _MESSAGE_WRITE_COLUMNS, SessionMessagesMixin
@@ -22,14 +23,19 @@ from hermes_state_messages import _MESSAGE_WRITE_COLUMNS, SessionMessagesMixin
 # and a result row's ``tool_call_uid`` are identity too: a rewrite changes the message's content, never
 # which logical message (or which call occurrence) the row is. ``tool_call_uids`` IS payload: it follows
 # ``tool_calls`` (an assistant merge unions both), so it is rewritten with the row.
+# Row provenance (who sent it, when, through which event) is identity as well: a rewrite changes what the
+# message says, never who said it. ``parts_json`` IS payload: ``content`` is its plain view.
 _NON_PAYLOAD_COLUMNS = frozenset(
-    {"session_id", "role", "timestamp", "active", "display_identity", MESSAGE_UID, "tool_call_uid"})
+    {"session_id", "role", "timestamp", "active", "display_identity", MESSAGE_UID, "tool_call_uid",
+     "sender_kind", "sender_id", "sent_at", "source_event_id", "intent", "part_kind"})
 _REPAIR_COLUMNS = tuple(c for c in _MESSAGE_WRITE_COLUMNS if c not in _NON_PAYLOAD_COLUMNS)
 # Columns same-process writers update after our flush (reactions / display-kind stamps, api_content
-# backfill, codex reasoning backfill + checkpoint pruning, platform message ids). They are not part of the
-# ownership version: a metadata write must never make our own row look like a foreign winner.
+# backfill, codex reasoning backfill + checkpoint pruning, platform message ids, a turn's closing outcome).
+# They are not part of the ownership version: a metadata write must never make our own row look like a
+# foreign winner.
 _METADATA_COLUMNS = frozenset(
-    {"display_kind", "display_metadata", "api_content", "codex_reasoning_items", "platform_message_id"}
+    {"display_kind", "display_metadata", "api_content", "codex_reasoning_items", "platform_message_id",
+     "turn_outcome"}
 )
 # The ownership version: what we last committed for the payload the sanitizer / live edits change.
 _OWNED_COLUMNS = tuple(c for c in _REPAIR_COLUMNS if c not in _METADATA_COLUMNS)
@@ -156,7 +162,8 @@ def _active_uid_dedupe(
 # False, so falsy is the absent case); a dict that carries a value is compared as usual.
 _RESTORE_MAY_OMIT = (
     ("token_count", "token_count"), ("_compressed_summary", "_compressed_summary"),
-    ("tool_call_uids", TOOL_CALL_UIDS), ("absorbed_message_uids", ABSORBED_MESSAGE_UIDS))
+    ("tool_call_uids", TOOL_CALL_UIDS), ("absorbed_message_uids", ABSORBED_MESSAGE_UIDS),
+    ("parts_json", MESSAGE_PARTS))
 
 
 def _same_as_stored(

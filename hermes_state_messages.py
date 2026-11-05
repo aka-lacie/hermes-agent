@@ -24,9 +24,12 @@ from hermes_state_common import (
     _json_or, _legacy_reset_child_sql, _placeholders, _sql_json_extract)
 from hermes_state_compaction_display import later_tool_copy_ids, not_a_later_tool_copy_sql
 from hermes_state_detached_results import SessionDetachedResultsMixin
+from hermes_state_reactions import SessionReactionsMixin
 from hermes_state_todo import SessionTodoResultMixin
 from hermes_state_identity import (
     _absorbed_uids_json, _restore_identity_columns, _stable_tool_key, _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
+from agent.message_parts import set_parts
+from hermes_state_provenance import provenance_row_params, restore_provenance_columns
 
 logger = logging.getLogger("hermes_state")  # caplog tests pin the origin module's name
 
@@ -36,8 +39,10 @@ _INSERT_MESSAGE_SQL = """INSERT INTO messages (session_id, role, content, tool_c
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
                    codex_message_items, platform_message_id, observed, _compressed_summary, active, api_content, display_kind,
                    display_metadata, display_identity, message_uid, absorbed_message_uids, tool_call_uids,
-                   tool_call_uid)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                   tool_call_uid, sender_kind, sender_id, sent_at, source_event_id, intent, part_kind, parts_json,
+                   turn_outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?, ?)"""
 # Every column this module knows how to read: the ones it writes plus the three SQLite/compaction
 # owns. `_row_to_message_dict` drops raw bytes ONLY outside this set — a schema column keeps its
 # key (and its typed decoder) even when a row holds a BLOB, so no reader ever loses msg["content"].
@@ -120,7 +125,7 @@ def _stale_holder(row, now: float) -> bool:
     return float(row["expires_at"]) <= now or _compression_lock_holder_process_is_dead(row["holder"])
 
 
-class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
+class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, SessionReactionsMixin):
     """Message append/replace/rewind, reactions, resume conversations, replay dedupe (detached results: the base)."""
 
     def _bump_conversation_generation(self, conn, session_id: str, end_reason: str) -> None:
@@ -299,7 +304,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             _str_or_none(msg.get("api_content")), _str_or_none(msg.get("display_kind")),
             display_metadata, self._display_identity(self._display_dedupe_key(identity_row)),
             message_uid_or_none(msg), _absorbed_uids_json(msg),
-            _tool_call_uids_json(msg), _tool_call_uid_or_none(msg))
+            _tool_call_uids_json(msg), _tool_call_uid_or_none(msg), *provenance_row_params(msg))
 
     @staticmethod
     def _stamp_tool_call_uids(msg: dict[str, Any], tool_calls: Any, batch_index: dict[str, str]) -> None:
@@ -361,6 +366,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         if row["_compressed_summary"]:
             msg["_compressed_summary"] = True
         _restore_identity_columns(row, msg)
+        restore_provenance_columns(row, msg)
         if row["api_content"] is not None:
             msg["api_content"] = row["api_content"]
         if row["display_kind"] is not None:
@@ -402,15 +408,22 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         api_content: Optional[str] = None, display_kind: Optional[str] = None,
         display_metadata: Optional[dict[str, Any]] = None, compression_lock_holder: Optional[str] = None,
         turn_lease_holder: Optional[str] = None, turn_lease_ttl_seconds: float = 300.0,
-        message_uid: Optional[str] = None) -> int:
+        message_uid: Optional[str] = None, *, origin: Optional[str] = None, parts: Optional[list] = None,
+        sender_kind: Optional[str] = None, sender_id: Optional[str] = None, sent_at: Optional[float] = None,
+        source_event_id: Optional[str] = None, intent: Optional[str] = None, part_kind: Optional[str] = None,
+        turn_outcome: Optional[str] = None) -> int:
         """Append one message; returns the row id and bumps the session counters. ``platform_message_id``:
         the platform's own id. ``api_content``: byte-fidelity sidecar, the exact string sent to the API when
         it differed from ``content``, stored as sent except lone surrogates. ``message_uid``: the id a caller
         that keeps the message as a live dict already stamped on it (``stamp_message_uid``); minted when
-        absent, but then only the row carries it."""
+        absent, but then only the row carries it. Provenance (``parts``, ``sender_*``, ...): see
+        ``agent.message_parts``."""
         msg = dict(locals())  # every keyword above is a message-dict field of the same name
+        if msg.pop("parts") is not None:
+            set_parts(msg, parts)  # content becomes the parts' plain view
+        role = msg["role"]
         # Encode outside the write txn (display metadata first: log-order parity).
-        msg["display_metadata"] = self._encode_display_metadata(display_metadata)
+        msg["display_metadata"] = self._encode_display_metadata(msg["display_metadata"])
         tool_calls = _parse_tool_calls(tool_calls)
         message_timestamp = _coerce_timestamp(timestamp, time.time())
         stamp_message_uid(msg)  # a fresh occurrence: mint its durable id
@@ -432,7 +445,8 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         turn_lease_holder: Optional[str] = None, chunk_rows: Optional[int] = None,
         turn_lease_ttl_seconds: float = 300.0) -> int:
         """Append *messages* in ONE write txn (all rows land or none, guards run once); returns the inserted
-        count. ``chunk_rows`` bounds txn size for LARGE copies (branch seeds; FTS triggers run per row)."""
+        count. ``chunk_rows`` bounds txn size for LARGE copies (branch seeds; FTS triggers run per row).
+"""
         if not messages:
             return 0
         if chunk_rows is not None and len(messages) > chunk_rows:
@@ -513,86 +527,6 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             conn.execute("UPDATE messages SET display_kind = ?, display_metadata = ? WHERE id = ?",
                 (_scrub_surrogates(display_kind), self._encode_display_metadata(display_metadata), row[0]))
             return True
-        return self._execute_write(_do)
-
-    def _reaction_list(self, meta: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Well-formed (dict) reactions stored under ``REACTIONS_METADATA_KEY``."""
-        reactions = (meta or {}).get(self.REACTIONS_METADATA_KEY)
-        return [r for r in reactions if isinstance(r, dict)] if isinstance(reactions, list) else []
-
-    def set_message_reaction(self, session_id: str, message_row_id: int, emoji: Optional[str], *,
-                             author: str = "user") -> Optional[list[dict[str, Any]]]:
-        """Set (``emoji=None``: clear) *author*'s reaction. Tapback semantics: one per author per message;
-        the same emoji again clears, a different one replaces. Returns the list after the write, or
-        ``None`` for a row outside the session's visible resume lineage (see ``_reaction_row_query``)."""
-        if not session_id or message_row_id is None:
-            return None
-        sql, params = self._reaction_row_query(session_id, message_row_id)
-        def _do(conn):
-            row = conn.execute(sql, params).fetchone()
-            if row is None:
-                return None
-            meta = self._decode_display_metadata(row[0]) or {}
-            existing = self._reaction_list(meta)
-            reactions = [r for r in existing if r.get("author") != author]
-            previous = next((r for r in existing if r.get("author") == author), None)
-            if emoji and (previous is None or previous.get("emoji") != emoji):
-                reactions.append({"emoji": _scrub_surrogates(emoji), "author": author, "at": time.time()})
-            if reactions:
-                meta[self.REACTIONS_METADATA_KEY] = reactions
-            else:
-                meta.pop(self.REACTIONS_METADATA_KEY, None)
-            conn.execute(_SET_DISPLAY_META_SQL, (self._encode_display_metadata(meta) if meta else None, message_row_id))
-            return reactions
-        return self._execute_write(_do)
-
-    def get_message_reactions(self, session_id: str, message_row_id: int) -> list[dict[str, Any]]:
-        """Reaction list persisted on one message row (never ``None``)."""
-        if not session_id or message_row_id is None:
-            return []
-        row = self._read_one(*self._reaction_row_query(session_id, message_row_id))
-        return self._reaction_list(self._decode_display_metadata(row[0])) if row is not None else []
-
-    def _reaction_row_query(self, session_id: str, message_row_id: int) -> tuple[str, tuple]:
-        """A reaction addresses a row the client can SEE, and a display resume materializes the whole
-        compression lineage (active + compacted rows, with row ids) — so a row is "in this session" when
-        its owner is any lineage segment, not only the tip, and a rewound row is not. Explicit ``/branch``
-        copies keep their own rows (``_resume_lineage_ids``)."""
-        lineage = self._resume_lineage_ids(session_id)
-        return _DISPLAY_META_ROW_SQL.format(ids=_placeholders(lineage)), (message_row_id, *lineage)
-
-    def take_unseen_reactions(self, session_id: str, *, author: str = "user") -> list[dict[str, Any]]:
-        """Return *author*'s not-yet-surfaced reactions and mark them seen. Reactions are announced on the
-        NEXT user turn (never by rewriting the reacted message: cache-safe); ``seen`` makes it exactly once.
-        Include compaction-archived history that remains visible, but exclude rewound/superseded rows."""
-        if not session_id:
-            return []
-        lineage = self._resume_lineage_ids(session_id)
-        def _do(conn):
-            pending = []
-            # Only reaction-bearing rows cross into Python: display_metadata also carries delivery /
-            # attachment markers on most rows, and the lineage scan grows with the session's age.
-            for row in conn.execute("SELECT id, role, content, display_metadata FROM messages "
-                    f"WHERE session_id IN ({_placeholders(lineage)}){_DISPLAY_ACTIVE_CLAUSE} "
-                    f"AND {_sql_json_extract('display_metadata', '$.' + self.REACTIONS_METADATA_KEY)} IS NOT NULL "
-                    "ORDER BY id", tuple(lineage)).fetchall():
-                meta = self._decode_display_metadata(row["display_metadata"])
-                reactions = meta.get(self.REACTIONS_METADATA_KEY) if meta else None
-                if not isinstance(reactions, list):
-                    continue
-                changed = False
-                for reaction in reactions:
-                    if not isinstance(reaction, dict) or reaction.get("author") != author or reaction.get("seen"):
-                        continue
-                    reaction["seen"] = True
-                    changed = True
-                    content = self._decode_content(row["content"])
-                    pending.append({
-                        "row_id": row["id"], "role": row["role"], "emoji": reaction.get("emoji") or "",
-                        "text": content if isinstance(content, str) else ""})
-                if changed:
-                    conn.execute(_SET_DISPLAY_META_SQL, (self._encode_display_metadata(meta), row["id"]))
-            return pending
         return self._execute_write(_do)
 
     def latest_message_row_id(self, session_id: str, *, role: str = "user", offset: int = 0,
@@ -1608,6 +1542,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             # The durable identity is part of the message, like ``timestamp``: restored on EVERY projection
             # (ACP, gateway, CLI, TUI, compression adoption), never opt-in like ``_row_id``.
             _restore_identity_columns(row, msg)
+            restore_provenance_columns(row, msg)
             msg.update((col, row[col]) for col in ("api_content", "display_kind") if row[col])
             if row["display_metadata"] and (decoded := self._decode_display_metadata(row["display_metadata"])) is not None:
                 msg["display_metadata"] = decoded

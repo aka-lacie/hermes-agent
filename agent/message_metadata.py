@@ -8,6 +8,7 @@ from uuid import uuid4
 from typing import Any, List, Mapping, MutableMapping, Optional, TypeVar
 
 from agent.conversation_compression_archive import MERGED_DURABLE_ROWS, RETIRED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS
+from agent.message_parts import ASSISTANT_ORIGIN, MESSAGE_PARTS, PROVENANCE_FIELDS, copy_row_fields
 
 
 # These fields describe Hermes' durable record and timeline display, not
@@ -50,7 +51,11 @@ PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
     {"timestamp", "display_kind", "display_metadata", "_row_id", "_submit_row_session_id",
      MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID,
      # The alternation repair's row counts: an in-place compaction reads them off the live dict.
-     MERGED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS, RETIRED_DURABLE_ROWS}
+     MERGED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS, RETIRED_DURABLE_ROWS,
+     # Provenance (agent/message_parts.py). ``content`` is the parts' plain view, so the request
+     # carries the same text without them and the estimator never prices it twice. TODO(2c): the wire
+     # renderer reads ``_parts`` off the canonical dict before this pop, never off the outgoing copy.
+     MESSAGE_PARTS, ASSISTANT_ORIGIN, *PROVENANCE_FIELDS}
 ) | REPAIR_BOOKKEEPING_FIELDS
 
 
@@ -216,14 +221,16 @@ def message_identity(msg: MutableMapping[str, Any], *, with_tool_uids: bool = Fa
     """The identity fields a new row copied from *msg* must carry, minting *msg*'s uid first when it has none:
     a branch/seed copy writes fresh rows from the live dicts the new session keeps using, and a row without
     them would restore with a different uid than the live dict carries. ``with_tool_uids`` only for a copy
-    that also carries ``tool_calls`` / ``tool_call_id``; a uid map on a row without its calls pairs nothing."""
+    that also carries ``tool_calls`` / ``tool_call_id``; a uid map on a row without its calls pairs nothing.
+    The copy carries the message's typing too, and an assistant copy names its Rule 1 origin
+    (``agent.message_parts.copy_row_fields``)."""
     stamp_message_uid(msg)
     identity: dict = {}
     copy_identity_fields(msg, identity)
     if not with_tool_uids:
         identity.pop(TOOL_CALL_UIDS, None)
         identity.pop(TOOL_CALL_UID, None)
-    return identity
+    return {**identity, **copy_row_fields(msg)}
 
 
 def record_absorbed_message(
