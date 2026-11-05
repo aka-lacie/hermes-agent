@@ -451,7 +451,11 @@ def test_restart_notice_replaces_the_core_failed_turn_boundary_of_the_same_turn(
         commit_and_publish(authority, live, ref, row, '', 'interrupted', {'result': result}, {})
         expected = RESTART_INTERRUPT_NOTICE if principal == 'person' else AUTOMATION_INTERRUPTED_NOTICE
         assert _notices(db) == [expected]
-        assert [m['role'] for m in db.get_messages('s')] == ['user', 'assistant']
+        # The boundary is a user-side harness notice (Rule 1) whose typed part was replaced with its text.
+        rows = db.get_messages_as_conversation('s')
+        assert [m['role'] for m in rows] == ['user', 'user']
+        assert rows[-1]['_parts'][0]['text'] == expected
+        assert rows[-1]['turn_outcome'] == 'interrupted'
 
 
 def test_an_earlier_turns_failed_boundary_is_kept_and_the_restart_notice_appended(tmp_path, monkeypatch):
