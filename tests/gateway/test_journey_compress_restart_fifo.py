@@ -33,7 +33,8 @@ class CompactingModel(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         messages = body.get('messages', [])
         wire = json.dumps(messages)
-        text = next((m.get('content', '') for m in reversed(messages) if m['role'] == 'user'), '')
+        from tests.gateway._wire_inputs import latest_input
+        text = latest_input(messages)  # the person's newest text, past any harness block (summary, notice)
         if messages:
             self.server.requests.append({'model': body.get('model'), 'text': str(text), 'wire': wire})
         if body.get('model') == 'original' and len(wire) > 50000:

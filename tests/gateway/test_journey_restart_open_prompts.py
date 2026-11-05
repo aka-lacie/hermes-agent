@@ -41,10 +41,11 @@ class PromptModel(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         messages = body.get('messages', [])
         last = messages[-1] if messages else {}
-        text = next((m.get('content', '') for m in reversed(messages) if m['role'] == 'user'), '')
+        from tests.gateway._wire_inputs import all_inputs, latest_input
+        text = latest_input(messages)  # the person's newest text, past any harness block (a failed-turn notice)
         if messages:
             self.server.requests.append({'text': str(text), 'after_tool': last.get('role') == 'tool',
-                                         'users': [m.get('content') for m in messages if m['role'] == 'user']})
+                                         'users': all_inputs(messages)})
         message = {'role': 'assistant', 'content': 'ACK_' + str(text)}
         if last.get('role') == 'user' and text in ASK.values():
             name, args = ('terminal', {'command': self.server.command}) if text == ASK['approval'] else (

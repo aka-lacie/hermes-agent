@@ -60,10 +60,11 @@ def test_new_session_never_absorbs_or_drops_earlier_queued_work(tmp_path, restar
     def user_turns(session_id):
         with closing(sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True)) as db:
             return [r[0] for r in db.execute("SELECT content FROM messages WHERE session_id=? AND role='user' "
-                                              'ORDER BY id', (session_id,))]
+                                              'AND turn_outcome IS NULL ORDER BY id', (session_id,))]
 
-    def requests():
-        return [[m.get('content') for m in r['messages'] if m['role'] == 'user'] for r in peer.requests]
+    def requests():  # the person's inputs per request (harness blocks the API copy merged in dropped)
+        from tests.gateway._wire_inputs import all_inputs
+        return [all_inputs(r['messages']) for r in peer.requests]
 
     async def until(predicate, timeout=30):
         await async_wait_until(predicate, timeout=timeout, interval=.03)

@@ -25,7 +25,8 @@ class Model(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if body.get('messages'):
             self.server.requests.append(body)
-        text = next((m.get('content', '') for m in reversed(body.get('messages', [])) if m['role'] == 'user'), '')
+        from tests.gateway._wire_inputs import latest_input
+        text = latest_input(body.get('messages', []))  # the person's newest text, past any harness block
         if text == 'BLOCK_STARTED':
             self.server.blocked.set()
             self.server.release.wait(60)
