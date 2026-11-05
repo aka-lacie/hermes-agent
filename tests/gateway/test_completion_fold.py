@@ -69,7 +69,8 @@ async def test_completions_queued_behind_a_turn_fold_into_one_turn(tmp_path, mon
         assert text.startswith('[IMPORTANT: 3 background process results arrived')
         assert text.count('background process results arrived') == 1  # re-folding replaces the header
         assert all(f'{name} finished' in text for name in ('proc_a', 'proc_b', 'proc_c'))
-        assert text.count('INTERNAL NOTIFICATION') == 1
+        # A messaging session types the folded turn as a system_event row: no in-text footer banner.
+        assert text.count('INTERNAL NOTIFICATION') == 0
         assert len(rows[-1]['payload']['native_text_v1']['automation']['identities']) == 3
         # Each replaced row keeps only its own identity (the batch carries text and identities):
         # storage grows with N, not N^2.

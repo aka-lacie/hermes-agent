@@ -226,9 +226,10 @@ class TestBusySessionAck:
 
         # VERIFY: Agent was steered, NOT interrupted
         agent.steer.assert_called_once()
+        # Typed steer: the raw text plus a structured origin (rendered once as a <steer/> header).
         injected = agent.steer.call_args.args[0]
-        assert injected.endswith("also check the tests")
-        assert '"chat_id": "123"' in injected
+        assert injected == "also check the tests"
+        assert agent.steer.call_args.kwargs["origin"]["channel_id"] == "123"
         agent.interrupt.assert_not_called()
 
         # VERIFY: No queueing — successful steer must NOT replay as next turn
@@ -274,8 +275,8 @@ class TestBusySessionAck:
         )
         agent.steer.assert_called_once()
         injected = agent.steer.call_args.args[0]
-        assert injected.endswith('"yönü teknik mimariye çevir"')
-        assert '"chat_id": "123"' in injected
+        assert injected == '"yönü teknik mimariye çevir"'
+        assert agent.steer.call_args.kwargs["origin"]["channel_id"] == "123"
         agent.interrupt.assert_not_called()
         assert sk not in adapter._pending_messages
         content = adapter._send_with_retry.call_args.kwargs["content"]

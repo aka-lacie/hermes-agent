@@ -138,9 +138,10 @@ async def test_secondary_profile_busy_mode_controls_live_busy_behavior(
         agent.interrupt.assert_not_called()
     elif expected_action == "steer":
         agent.steer.assert_called_once()
+        # Typed steer: raw text + structured origin (no origin prose in the text).
         injected = agent.steer.call_args.args[0]
-        assert injected.endswith("follow up")
-        assert '"chat_id": "chat-1"' in injected
+        assert injected == "follow up"
+        assert agent.steer.call_args.kwargs["origin"]["channel_id"] == "chat-1"
         agent.interrupt.assert_not_called()
     else:
         agent.steer.assert_not_called()
@@ -177,9 +178,10 @@ async def test_secondary_profile_busy_mode_controls_priority_path(
         assert adapter._pending_messages[session_key] is event
     else:
         agent.steer.assert_called_once()
+        # Typed steer: raw text + structured origin (no origin prose in the text).
         injected = agent.steer.call_args.args[0]
-        assert injected.endswith("follow up")
-        assert '"chat_id": "chat-1"' in injected
+        assert injected == "follow up"
+        assert agent.steer.call_args.kwargs["origin"]["channel_id"] == "chat-1"
         assert session_key not in adapter._pending_messages
 
 
@@ -327,8 +329,8 @@ async def test_secondary_adapter_busy_guard_stamps_profile_before_resolving_mode
     assert event.source.profile == "research"
     agent.steer.assert_called_once()
     injected = agent.steer.call_args.args[0]
-    assert injected.endswith("follow up")
-    assert '"chat_id": "chat-1"' in injected
+    assert injected == "follow up"
+    assert agent.steer.call_args.kwargs["origin"]["channel_id"] == "chat-1"
     agent.interrupt.assert_not_called()
 
 
@@ -503,8 +505,16 @@ async def test_primary_adapter_busy_origin_uses_routed_privacy(
     apply_pending_steer_to_tool_results(agent, messages, 1)
     output = messages[-1]["content"]
     assert "follow up" in output
-    for value in (event.source.chat_id, event.source.user_id, event.message_id, "research"):
-        assert (value not in output) is secondary_privacy
+    if mode == "steer":
+        # Typed steer: the origin rides the parts and reaches the model through the renderer, with the
+        # routed profile's privacy applied to its ids (user id / profile are not part of an origin).
+        from agent.wire_render import DEFAULT_RENDERER
+        (wire,) = DEFAULT_RENDERER.render([messages[-1]])
+        for value in (event.source.chat_id, event.message_id):
+            assert (value not in wire["content"]) is secondary_privacy
+    else:
+        for value in (event.source.chat_id, event.source.user_id, event.message_id, "research"):
+            assert (value not in output) is secondary_privacy
     assert asdict(event.source) == original
     assert get_hermes_home_override() == ambient
     assert key not in adapter._pending_messages

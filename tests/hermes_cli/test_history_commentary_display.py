@@ -67,10 +67,11 @@ def test_rest_history_shows_a_steer_as_the_users_own_words():
     row = steer_user_row("fix the header too")
     projected = _project_for_display([row])[0]
 
-    # Same words session.resume shows; the model-facing marker stays in the source.
+    # Same words session.resume shows. A typed steer row's content is those words already (the wire
+    # renderer adds the one-line <steer/> header), so no marker is ever stored.
     assert projected["display_content"] == "fix the header too"
     assert _history_to_messages([row])[0]["text"] == "fix the header too"
-    assert row["content"].startswith("[OUT-OF-BAND USER MESSAGE")
+    assert row["content"] == "fix the header too" and row["_parts"][0]["delivery"] == "steer"
 
 
 def test_history_applies_live_stripping_and_redaction_without_changing_raw_items(

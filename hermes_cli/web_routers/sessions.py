@@ -685,6 +685,7 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
     from agent.conversation_compression import _extract_steer_text_from_message
     from agent.history_commentary import project_history_commentary
     from agent.message_metadata import withheld_prompt_text
+    from agent.message_parts import has_parts
     from agent.prompt_builder import STEER_DISPLAY_KIND
     from agent.turn_failure_copy import untyped_failed_turn_display_kind
 
@@ -716,8 +717,9 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
             projected_messages.append(projected)
             continue
         # Mid-turn steer: the user's own words, not the model-facing marker (same as session.resume).
-        if message.get("role") == "user" and message.get("display_kind") == STEER_DISPLAY_KIND and (
-                steer_text := _extract_steer_text_from_message(message)):
+        # A typed steer row's content already is the human's words (agent.message_parts plain view).
+        if message.get("role") == "user" and message.get("display_kind") == STEER_DISPLAY_KIND and (steer_text := (
+                message.get("content") if has_parts(message) else _extract_steer_text_from_message(message))):
             message = {**message, "display_content": steer_text}
         # A pre_llm_call veto stores a placeholder; the transcript shows what the user typed.
         if message.get("role") == "user" and (typed := withheld_prompt_text(message)) is not None:
