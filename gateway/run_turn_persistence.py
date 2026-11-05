@@ -500,6 +500,15 @@ class GatewayTurnPersistenceMixin:
             _user_entry["display_metadata"] = display_metadata
         if getattr(event, "message_id", None):
             _user_entry["message_id"] = str(event.message_id)
+        # A typed turn keeps its parts + provenance on this row too (key-preservation rule 1).
+        _typed = getattr(prepared, "typed_input", None)
+        _typed = _typed.get("input") if isinstance(_typed, dict) else None
+        if isinstance(_typed, dict):
+            from agent.message_parts import MESSAGE_PARTS, PROVENANCE_FIELDS, plain_text
+            if plain_text(_typed.get("parts") or []) == _user_entry["content"]:
+                import copy as _copy
+                _user_entry[MESSAGE_PARTS] = _copy.deepcopy(_typed["parts"])
+                _user_entry.update({k: _typed[k] for k in PROVENANCE_FIELDS if _typed.get(k) is not None})
         return _user_entry
 
     async def _hmwa_persist_turn_transcript(
