@@ -29,7 +29,7 @@ from hermes_state_todo import SessionTodoResultMixin
 from hermes_state_identity import (
     _absorbed_uids_json, _restore_identity_columns, _stable_tool_key, _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
 from agent.message_parts import set_parts
-from hermes_state_provenance import provenance_row_params, restore_provenance_columns
+from hermes_state_provenance import gate_assistant_write, provenance_row_params, restore_provenance_columns
 
 logger = logging.getLogger("hermes_state")  # caplog tests pin the origin module's name
 
@@ -417,10 +417,11 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         it differed from ``content``, stored as sent except lone surrogates. ``message_uid``: the id a caller
         that keeps the message as a live dict already stamped on it (``stamp_message_uid``); minted when
         absent, but then only the row carries it. Provenance (``parts``, ``sender_*``, ...): see
-        ``agent.message_parts``."""
+        ``agent.message_parts``. ``role="assistant"`` needs a Rule 1 ``origin`` (``hermes_state_provenance``)."""
         msg = dict(locals())  # every keyword above is a message-dict field of the same name
         if msg.pop("parts") is not None:
             set_parts(msg, parts)  # content becomes the parts' plain view
+        gate_assistant_write(msg, origin)
         role = msg["role"]
         # Encode outside the write txn (display metadata first: log-order parity).
         msg["display_metadata"] = self._encode_display_metadata(msg["display_metadata"])
@@ -446,7 +447,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         turn_lease_ttl_seconds: float = 300.0) -> int:
         """Append *messages* in ONE write txn (all rows land or none, guards run once); returns the inserted
         count. ``chunk_rows`` bounds txn size for LARGE copies (branch seeds; FTS triggers run per row).
-"""
+        Each new assistant row names its Rule 1 origin in ``_assistant_origin`` (``hermes_state_provenance``)."""
         if not messages:
             return 0
         if chunk_rows is not None and len(messages) > chunk_rows:
@@ -478,6 +479,8 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
             ),
             decode_row_fn=self._decoded_repair_row,
         )
+        for msg in inserted_rows:  # Rule 1: fresh rows only (a row-addressed rewrite keeps its role)
+            gate_assistant_write(msg)
         inserted, tool_calls_total = self._insert_message_rows(conn, session_id, inserted_rows)
         self._bump_session_counters(conn, session_id, inserted, tool_calls_total, unit=False)
         return inserted

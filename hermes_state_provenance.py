@@ -1,21 +1,51 @@
-"""Message provenance for SessionDB: bind/restore of the ``messages`` provenance columns.
+"""Message provenance for SessionDB: bind/restore of the ``messages`` provenance columns and the Rule 1
+assistant-origin write gate.
 
 Bind/restore pair with ``agent.message_parts``: the in-memory keys are the column names, except
 ``_parts`` <-> ``parts_json``. ``parts_json`` is written only while ``content`` is still the plain view
 of the parts; a row whose content was rewritten around its parts is stored untyped (content wins), so
 stored parts can never disagree with what FTS, the UI and legacy readers see.
+
+**Rule 1.** A new ``role="assistant"`` row holds only tokens this session's model generated. The append
+paths (``append_message`` and the inserts of ``append_messages_batch``) admit one only when the write
+names an origin from ``agent.message_parts.ASSISTANT_ORIGINS`` (the ``origin=`` argument, or the dict's
+``_assistant_origin``). Anything else is a non-model writer: under pytest it raises
+:class:`AssistantOriginError` (rows written directly by test code are fixtures and pass), in production
+it is logged and rewritten to a ``role="user"``, ``sender_kind="system"`` row holding one system_event
+part. Row re-issues inside the store (replace, compaction, import, rewind) are not appends and are not
+gated: they copy rows that were admitted when first written.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import os
+import sys
+from pathlib import PurePath
 from typing import Any, Mapping, MutableMapping, Optional
 
-from agent.message_parts import MESSAGE_PARTS, PROVENANCE_FIELDS, decode_parts_json, encode_parts_json, has_parts, \
-    parts_consistent
+from agent.message_parts import (
+    ASSISTANT_ORIGIN, ASSISTANT_ORIGINS, MESSAGE_PARTS, PROVENANCE_FIELDS, encode_parts_json, decode_parts_json,
+    has_parts, parts_consistent, set_parts, system_event)
 
 logger = logging.getLogger("hermes_state")
+
+# None: strict under pytest, reroute otherwise. Tests of the production behaviour set False.
+ASSISTANT_GATE_STRICT: Optional[bool] = None
+UNATTRIBUTED_ASSISTANT_KIND = "unattributed_assistant_write"
+UNATTRIBUTED_ASSISTANT_SENDER = "system:unattributed_assistant_write"
+# Pass-through writer APIs: they forward the caller's dict, so the caller (a production producer, or test code
+# seeding a fixture) is who wrote it. The gateway transcript store is SessionDB's per-message front door.
+_PASS_THROUGH_MODULES = frozenset({"hermes_state", __name__, "gateway.session", "gateway.session_transcript"})
+# Assistant-only columns a rerouted row must not keep (a user row never carries model reasoning).
+_ASSISTANT_ONLY_FIELDS = ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items",
+                          "codex_message_items", "finish_reason")
+
+
+class AssistantOriginError(ValueError):
+    """An assistant row was appended without a model/copy origin (Rule 1)."""
+
 
 # ── column bind / restore ─────────────────────────────────────────────────────
 
@@ -65,3 +95,65 @@ def restore_provenance_columns(row: Any, msg: MutableMapping[str, Any]) -> None:
         parts = decode_parts_json(row["parts_json"])
         if parts is not None:
             msg[MESSAGE_PARTS] = parts
+
+
+# ── Rule 1 gate ───────────────────────────────────────────────────────────────
+
+
+def _strict() -> bool:
+    if ASSISTANT_GATE_STRICT is not None:
+        return ASSISTANT_GATE_STRICT
+    return "PYTEST_CURRENT_TEST" in os.environ
+
+
+def _is_test_file(filename: str) -> bool:
+    if filename in ("<string>", "<stdin>"):
+        return True  # strict mode only runs under pytest: code passed inline (``-c``) is a test's helper process
+    path = PurePath(filename)
+    return "tests" in path.parts[:-1] or path.name.startswith(("test_", "conftest"))
+
+
+def _written_by_test_code() -> bool:
+    """The nearest caller outside the store and its pass-through writer APIs is test code (a fixture row),
+    not a production writer."""
+    frame = sys._getframe(2)
+    while frame is not None:
+        module = frame.f_globals.get("__name__", "")
+        if not (module in _PASS_THROUGH_MODULES or module.startswith("hermes_state_")):
+            return _is_test_file(frame.f_code.co_filename)
+        frame = frame.f_back
+    return False
+
+
+def _reroute_to_system_event(msg: MutableMapping[str, Any]) -> None:
+    content = msg.get("content")
+    if isinstance(content, list):
+        text = "\n".join(p.get("text", "") for p in content if isinstance(p, dict) and isinstance(p.get("text"), str))
+    else:
+        text = content if isinstance(content, str) else ("" if content is None else str(content))
+    for key in _ASSISTANT_ONLY_FIELDS + (ASSISTANT_ORIGIN,):
+        msg.pop(key, None)
+    msg["role"] = "user"
+    msg.update(sender_kind="system", sender_id=UNATTRIBUTED_ASSISTANT_SENDER, part_kind=UNATTRIBUTED_ASSISTANT_KIND)
+    set_parts(msg, [system_event(UNATTRIBUTED_ASSISTANT_KIND, text, meta={"rerouted_role": "assistant"})])
+
+
+def gate_assistant_write(msg: MutableMapping[str, Any], origin: Optional[str] = None) -> None:
+    """Admit or reroute one row about to be appended (mutates *msg* when rerouting)."""
+    if msg.get("role") != "assistant":
+        return
+    effective = msg.get(ASSISTANT_ORIGIN) or origin
+    if effective in ASSISTANT_ORIGINS:
+        return
+    if _strict():
+        if _written_by_test_code():
+            return
+        raise AssistantOriginError(
+            f"assistant row appended with origin {effective!r}; only {sorted(ASSISTANT_ORIGINS)} may write "
+            "role='assistant' (non-model text is a role='user' system_event)")
+    if msg.get("tool_calls"):
+        # Rewriting a call-bearing row would orphan its tool results; a model path is missing its origin.
+        logger.error("assistant row with tool calls appended without an origin; kept as assistant (Rule 1)")
+        return
+    logger.warning("non-model assistant write (origin %r) rerouted to a system_event user row (Rule 1)", effective)
+    _reroute_to_system_event(msg)
