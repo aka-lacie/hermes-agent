@@ -265,5 +265,7 @@ def test_invalid_tool_exhaustion_closes_tool_tail(agent_env):
     assert msgs, "expected persisted conversation messages"
     assert msgs[-1].get("role") == "user" and msgs[-1].get("sender_kind") == "system"
     assert msgs[-1].get("turn_outcome") == "partial"
-    assert "invalid tool call" in (msgs[-1].get("content") or "").lower()
+    from agent.message_parts import project_harness_notice_for_display
+    assert "invalid tool call" in project_harness_notice_for_display(msgs[-1])["content"].lower()
+    assert msgs[-1]["content"] == "The turn ended before delivering a response."
 
