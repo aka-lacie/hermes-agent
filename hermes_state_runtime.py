@@ -129,7 +129,7 @@ ADMISSION_QUEUE_MAX = 32
 
 def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
                         request_id: str, payload: dict, intent: str = 'queue',
-                        _authorize_write=None, _replay_guard=None) -> dict:
+                        _authorize_write=None, _replay_guard=None, wake_policy: str | None = None) -> dict:
     """Admit input; the trusted private guard raises to refuse a NEW write.
 
     The guard receives the owning transaction connection, must not commit it or
@@ -137,11 +137,15 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
     and terminal replays bypass it: they cannot create or change accepted work.
     ``_replay_guard(conn)`` runs on the exact live replay instead, inside the same
     transaction (a replacement's binding to the admission it retired).
+    ``wake_policy`` ``batch_with_next_user_turn`` holds the row for the next user turn
+    (``hermes_state_wake``); None/``immediate`` is an ordinary FIFO entry.
     """
     for value in (principal_id, session_id, request_id):
         _text(value)
     if intent not in ('queue', 'steer', 'redirect'):
         raise RuntimeStoreError('invalid_params')
+    from hermes_state_wake import stored_wake_policy
+    wake = stored_wake_policy(wake_policy)
     encoded = _json(payload)
     from hermes_state_terminal import retry_terminal_admission
     retired = retry_terminal_admission(db, epoch=epoch, principal_id=principal_id, session_id=session_id,
@@ -170,9 +174,10 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
             _authorize_write(conn)
         admission_id = uuid.uuid4().hex
         conn.execute('''INSERT INTO session_admissions(admission_id,request_id,principal_id,
-            target_session_id,lineage_json,payload_json,payload_digest,intent,status,owner_epoch)
-            VALUES(?,?,?,?,?,?,?,?,'queued',?)''',
-            (admission_id, request_id, principal_id, session_id, json.dumps([session_id]), encoded, digest, intent, epoch))
+            target_session_id,lineage_json,payload_json,payload_digest,intent,status,owner_epoch,wake_policy)
+            VALUES(?,?,?,?,?,?,?,?,'queued',?,?)''',
+            (admission_id, request_id, principal_id, session_id, json.dumps([session_id]), encoded, digest, intent,
+             epoch, wake))
         return _row(_admission(conn, admission_id))
     return db._execute_write(write)
 
@@ -223,7 +228,10 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
             raise RuntimeStoreError('unknown_execution')
         if blocked or workers:
             return None
-        row = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' ORDER BY seq LIMIT 1", (session_id,)).fetchone()
+        from hermes_state_wake import CLAIMABLE_SQL, hand_held_to_claim, is_user_turn
+        # A notice held for the next user turn is never a head on its own (hermes_state_wake).
+        row = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' AND "
+                           + CLAIMABLE_SQL + " ORDER BY seq LIMIT 1", (session_id,)).fetchone()
         if head is not _ANY_HEAD and (row['admission_id'] if row is not None else None) != head:
             return False
         if row is None:
@@ -234,6 +242,10 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
         if changed.rowcount != 1:
             raise RuntimeStoreError('stale_generation')
         claimed = _row(_admission(conn, row['admission_id']))
+        if is_user_turn(row['principal_id'], claimed['payload']):
+            held = hand_held_to_claim(conn, session_id=session_id, epoch=epoch, generation=generation)
+            if held:
+                claimed['held'] = held
         # The transcript high-water mark at the claim (``messages.id`` is AUTOINCREMENT across every
         # session): a row above it on this conversation was written by this turn, so settlement can
         # tell this turn's own failed-turn boundary from an earlier turn's (#134889 GW-21).
@@ -269,6 +281,8 @@ def settle_session_input(db, *, epoch: int, admission_id: str, generation: int, 
                          (RESULT_PREFIX + admission_id, encoded))
         conn.execute("UPDATE session_admissions SET status='terminal',outcome=? WHERE admission_id=?", (outcome, admission_id))
         settle_steer_transfers(conn, epoch=epoch, generation=generation, transfers=_transfers, outcome=outcome)
+        from hermes_state_wake import requeue_unacked_held
+        requeue_unacked_held(conn, epoch=epoch, generation=generation)
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
         return _row(_admission(conn, admission_id))
     return db._execute_write(write)
