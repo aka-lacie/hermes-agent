@@ -22,6 +22,10 @@ _owners = {}
 def bind_owner(authority):
     home = Path(authority.db.db_path).resolve().parent
     _owners[home] = (os.getpid(), authority, asyncio.get_running_loop())
+    # Delivered events (cron/webhook results, a parent's message to a webhook session) addressed to a chat
+    # this owner serves are admitted through its producer path (gateway/delivery_owner_sink.py).
+    from gateway.delivery_owner_sink import register
+    register()
 
 
 def unbind_owner(authority):

@@ -430,7 +430,38 @@ def automation_display_metadata(metadata):
 # proof at execution from the target the pre-claim check validated, and the turn's resolver reads it.
 _AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
     'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category',
-    'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick'})
+    'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick',
+    'typed_sender', 'wake_policy'})
+_SENDER_KINDS = frozenset({'child', 'cron', 'webhook', 'peer', 'parent'})
+
+
+def automation_sender_metadata(metadata):
+    """A producer's typed provenance (gateway/delivery_targets.py): the row it becomes is a system event
+    from ``sender_kind``/``sender_id`` (a child session, ``cron:<job>``), never ``system`` or human. Stored
+    on the descriptor as ``sender``; validated so a malformed producer cannot widen it."""
+    sender = metadata.get('typed_sender', metadata.get('sender'))
+    if sender is None:
+        return {}
+    if (not isinstance(sender, dict) or set(sender) - {'sender_kind', 'sender_id', 'kind', 'meta'}
+            or sender.get('sender_kind') not in _SENDER_KINDS
+            or not isinstance(sender.get('sender_id'), str) or not 0 < len(sender['sender_id']) <= 256
+            or not isinstance(sender.get('kind'), str) or not 0 < len(sender['kind']) <= 64
+            or not isinstance(sender.get('meta', {}), dict)):
+        raise RuntimeStoreError('invalid_params')
+    meta = sender.get('meta') or {}
+    try:
+        if len(json.dumps(meta)) > 4096:
+            raise RuntimeStoreError('invalid_params')
+    except (TypeError, ValueError) as exc:
+        raise RuntimeStoreError('invalid_params') from exc
+    return {'sender': {'sender_kind': sender['sender_kind'], 'sender_id': sender['sender_id'],
+                       'kind': sender['kind'], 'meta': deepcopy(meta)}}
+
+
+def restore_sender_metadata(descriptor):
+    """The event metadata of a stored descriptor's typed provenance (``{}`` when none)."""
+    sender = automation_sender_metadata(descriptor)
+    return {'typed_sender': sender['sender']} if sender else {}
 
 
 def admission_display(payload):
@@ -468,7 +499,7 @@ def snapshot_automation(authority, adapter, event, identity):
             or set(event.metadata) - _AUTOMATION_METADATA):
         raise RuntimeStoreError('invalid_params')
     notification = (automation_notification_metadata(event.metadata) | automation_display_metadata(event.metadata)
-                    | _tick_metadata(event.metadata))
+                    | _tick_metadata(event.metadata) | automation_sender_metadata(event.metadata))
     entry = _owner(runner, event, authority)
     from gateway.session_detached import detached_route_of
     if event.source.platform == Platform.LOCAL or detached_route_of(event.source):
@@ -555,6 +586,7 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
     descriptor.update(automation_notification_metadata(event.metadata))
     descriptor.update(automation_display_metadata(event.metadata))
     descriptor.update(_tick_metadata(event.metadata))
+    descriptor.update(automation_sender_metadata(event.metadata))
     if event.metadata.get('turn_author') is not None:
         from agent.turn_author import parse_turn_author
         descriptor['turn_author'] = parse_turn_author(event.metadata['turn_author'])
@@ -597,6 +629,7 @@ def restore_local_automation(authority, ref, row):
             'gateway_session_id': entry.session_id})
     event.metadata.update(automation_notification_metadata(descriptor))
     event.metadata.update(automation_display_metadata(descriptor))
+    event.metadata.update(restore_sender_metadata(descriptor))
     if descriptor.get('turn_author') is not None:
         event.metadata['turn_author'] = deepcopy(descriptor['turn_author'])
     if descriptor.get('heartbeat'):
@@ -610,6 +643,8 @@ async def admit_automation(authority, adapter, event, identity, replaces=None, f
     own transaction, so neither lands without the other. ``fold``: ``replaces`` is a completion this
     batch absorbs (``_fold_queued``), given the tick admission ids it may sit behind."""
     authority._require_admission_open()
+    # A producer's wake policy is the admission's column, not part of its stored descriptor.
+    wake_policy = event.metadata.pop('wake_policy', None)
     payload, entry = snapshot_automation(authority, adapter, event, identity)
     from gateway.session_authority import LiveSession
     sid = (payload.get('local_automation_v1') or payload['native_text_v1']['automation'])['owner']
@@ -631,7 +666,7 @@ async def admit_automation(authority, adapter, event, identity, replaces=None, f
             return admitted(row)
     return await tracked_write(authority, partial(
         admit_session_input, authority.db, epoch=authority.epoch, principal_id='automation:' + entry.session_key,
-        session_id=ref.session_id, request_id=identity, payload=deepcopy(payload),
+        session_id=ref.session_id, request_id=identity, payload=deepcopy(payload), wake_policy=wake_policy,
         _authorize_write=authority._admission_gate(replaces and (
             _replace_queued(replaces, ref.session_id, replaced) if fold is None
             else _fold_queued(replaces, ref.session_id, replaced, fold)))),

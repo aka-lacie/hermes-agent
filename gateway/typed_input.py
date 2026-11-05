@@ -103,11 +103,18 @@ def turn_typed_input(
         return None
     metadata = getattr(event, "metadata", None) or {}
     if getattr(event, "internal", False):
-        kind = INTERNAL_EVENT_KINDS.get(display_kind or "")
+        sender = metadata.get("typed_sender")
+        kind = sender["kind"] if isinstance(sender, dict) else INTERNAL_EVENT_KINDS.get(display_kind or "")
         if kind is None:
             return None
         meta = {"category": "diagnostic"} if metadata.get("notification_category") == "diagnostic" else {}
         message_id = getattr(event, "message_id", None)
+        if isinstance(sender, dict):
+            # A delivery target's producer (a child session, a cron job): its own provenance (BRIEF3 / §4.4).
+            meta.update(sender.get("meta") or {})
+            return system_event_input(
+                kind, text, sender_kind=sender["sender_kind"], sender_id=sender["sender_id"], meta=meta,
+                sent_at=sent_at, source_event_id=str(message_id) if message_id not in (None, "") else None)
         return system_event_input(
             kind, text, sender_kind="system", sender_id=f"system:{kind}", meta=meta, sent_at=sent_at,
             source_event_id=str(message_id) if message_id not in (None, "") else None)

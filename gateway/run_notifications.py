@@ -191,6 +191,13 @@ def _watch_notification_metadata(evt: dict, source) -> dict[str, Any]:
         metadata["gateway_proven_session_id"] = proven_session_id
     if completion_ids := evt.get("completion_ids"):
         metadata["gateway_completion_ids"] = list(completion_ids)
+    delivery = evt.get("delivery")
+    if isinstance(delivery, dict) and delivery.get("sender_kind") and delivery.get("sender_id"):
+        # The child's delivery_target named this session: the row is the child's typed event.
+        metadata["typed_sender"] = {key: delivery[key] for key in ("sender_kind", "sender_id", "kind", "meta")
+                                    if key in delivery}
+        if delivery.get("wake_policy"):
+            metadata["wake_policy"] = delivery["wake_policy"]
     return metadata
 
 
@@ -1534,6 +1541,12 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from gateway.run import _parse_session_key
         if evt.get("platform"):
             return  # already enriched
+        delivery = evt.get("delivery") if isinstance(evt.get("delivery"), dict) else {}
+        if not evt.get("session_key") and delivery.get("target_session_key"):
+            # A unit with no dispatch origin (a queued resume the delegate drain ran): the child's own
+            # delivery_target names the session, never a guess (gateway/delivery_targets.py).
+            evt["session_key"] = delivery["target_session_key"]
+            evt.setdefault("parent_session_id", delivery.get("target_session_id"))
         parsed = _parse_session_key(evt.get("session_key", "") or "")
         if not parsed:
             return

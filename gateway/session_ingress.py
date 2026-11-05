@@ -291,6 +291,11 @@ async def execute_admission(authority, ref, row):
     if policy is not None:
         return await admit_managed(authority, ref, row, policy)
     live = authority.sessions[ref.session_id]
+    if row.get('held'):
+        # Notices held for this user turn (hermes_state_wake) land in the transcript just before it, as their
+        # own typed rows (gateway/delivery_targets.py); the turn's history load reads them.
+        from gateway.delivery_targets import write_held_events
+        await asyncio.to_thread(write_held_events, authority.db, authority.physical_target(ref), row)
     # The key the turn registers its post-delivery slot under; a rebind mid-turn must not move the take.
     route = live.route
     native = row['admission_id'] in authority.native_waiters
