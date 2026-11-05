@@ -243,7 +243,7 @@ def _recover_final_from_stream(agent, final_response, interrupted, failed) -> tu
 HARNESS_REPLY_EXITS = {
     "guardrail_halt": ("error_notice", "tool_guardrail_halt", "partial"),
     "ollama_runtime_context_too_small": ("error_notice", "preflight_context_error", "failed"),
-    "blocked_by_plugin_pre_llm_call": ("error_notice", "pre_llm_call_blocked", "failed"),
+    "blocked_by_plugin_pre_llm_call": ("error_notice", "pre_llm_call_blocked", "completed"),
     # The synthesized "No reply: the turn stopped while a tool result was still pending" close.
     "pending_tool_result": ("error_notice", "pending_tool_result", "failed"),
 }

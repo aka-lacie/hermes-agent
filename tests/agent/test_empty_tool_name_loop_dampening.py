@@ -250,8 +250,9 @@ def test_invalid_tool_exhaustion_closes_tool_tail(agent_env):
 
     Retries <3 append assistant+error tool rows, so the transcript already ends
     on ``tool`` before the exhaustion early-return. That return must close the
-    sequence (same contract as interrupt aborts) so the next user turn is not
-    ``tool → user`` for strict providers.
+    sequence (same contract as interrupt aborts) with a visible harness notice
+    (Phase 2e, Rule 1: a role="user" system_event carrying turn_outcome, never
+    an assistant row), so the next user turn follows the notice.
     """
     agent, handler = agent_env
     for _ in range(3):
@@ -262,6 +263,7 @@ def test_invalid_tool_exhaustion_closes_tool_tail(agent_env):
     assert result.get("partial", False)
     msgs = result.get("messages") or []
     assert msgs, "expected persisted conversation messages"
-    assert msgs[-1].get("role") == "assistant"
+    assert msgs[-1].get("role") == "user" and msgs[-1].get("sender_kind") == "system"
+    assert msgs[-1].get("turn_outcome") == "partial"
     assert "invalid tool call" in (msgs[-1].get("content") or "").lower()
 

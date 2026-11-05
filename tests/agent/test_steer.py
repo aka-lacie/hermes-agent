@@ -256,9 +256,9 @@ class TestActiveTurnRedirect:
 
 class TestActiveTurnRedirectCheckpoint:
     def test_repetition_dominated_partial_is_not_replayed(self):
-        """A looped partial must not seed the correction's next API request (#112764): neither
-        the replayed correction nor the alternation placeholder carries the bytes; the model
-        is told the reply degenerated instead."""
+        """A looped partial must not seed the correction's next API request (#112764): the
+        replayed correction does not carry the bytes and no assistant row is synthesized for them
+        (Phase 2e, Rule 1: no alternation placeholder); the model is told the reply degenerated."""
         from agent.conversation_loop import _apply_active_turn_redirect
         from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED
 
@@ -269,15 +269,12 @@ class TestActiveTurnRedirectCheckpoint:
 
         _apply_active_turn_redirect(agent, messages, "Change course.")
 
-        placeholder, correction = messages[-2], messages[-1]
+        assert [m["role"] for m in messages] == ["user", "user"]
+        correction = messages[-1]
         replayed = correction["api_content"]
         assert repeated not in replayed
         assert "Visible response before the interruption:" not in replayed
         assert REPETITION_LOOP_INTERRUPTED in replayed
-        assert placeholder["role"] == "assistant"
-        assert placeholder["display_kind"] == "hidden"
-        assert repeated not in (placeholder.get("content") or "")
-        assert repeated not in (placeholder.get("api_content") or "")
 
     def test_ordinary_partial_remains_replayable(self):
         """Useful interrupted text remains available to the corrected request."""
@@ -424,7 +421,9 @@ class TestEmptyHiddenAssistantRehealRegression:
     historical API projection fills ``content`` and the sanitizer stops
     touching the row — while the durable transcript stays hidden and empty."""
 
-    def test_active_turn_redirect_hidden_placeholder_has_provider_replay_payload(self):
+    def test_active_turn_redirect_without_output_synthesizes_no_assistant_row(self):
+        """Phase 2e (Rule 1): with nothing streamed the redirect appends only the correction; the
+        wire renderer merges it with the user tail, so no hidden assistant placeholder is needed."""
         from agent.conversation_loop import _apply_active_turn_redirect
 
         agent = _bare_agent()
@@ -433,12 +432,10 @@ class TestEmptyHiddenAssistantRehealRegression:
 
         _apply_active_turn_redirect(agent, messages, "Use Postgres instead.")
 
+        assert [m["role"] for m in messages] == ["user", "user"]
         placeholder = messages[-2]
         correction = messages[-1]
-        assert placeholder["role"] == "assistant"
-        assert placeholder["content"] == ""
-        assert placeholder["display_kind"] == "hidden"
-        assert placeholder["api_content"] == _INTERRUPTED_PLACEHOLDER
+        assert placeholder == {"role": "user", "content": "start"}
         # The user correction keeps clean text in content and the interruption
         # context only in its own api_content sidecar.
         assert correction["role"] == "user"

@@ -15,6 +15,10 @@ The fix re-appends the in-flight user task after the handoff so the prefix's
 "latest user message" pointer resolves to the job prompt again. The
 #80622 contract is unchanged: an idle session with no in-flight task must
 still be left with nothing to act on.
+
+Phase 2e: the handoff is a typed role="user" compaction row that is never rewritten as text, so
+when only exempt tool flow would follow it the restatement is its own row directly after the
+handoff (the API copy merges consecutive user rows into one turn; ``_wire_roles`` replays that).
 """
 
 from typing import Any, Dict, List
@@ -93,6 +97,19 @@ def _compress(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return compressor.compress(messages, current_tokens=200_000, force=True)
 
 
+def _wire_roles(rows: list[dict[str, Any]]) -> list[str]:
+    """Template-visible roles after the API copy's consecutive-user merge."""
+    roles: list[str] = []
+    for m in rows:
+        role = m.get("role")
+        if role == "tool" or (role == "assistant" and m.get("tool_calls")):
+            continue
+        if roles and role == "user" and roles[-1] == "user" and rows[rows.index(m) - 1].get("role") == "user":
+            continue
+        roles.append(role)
+    return roles
+
+
 def _handoff_idx(compressed: list[dict[str, Any]]) -> int:
     """Index of the handoff row (standalone summary or merged carrier)."""
     for idx in range(len(compressed) - 1, -1, -1):
@@ -148,14 +165,7 @@ def test_role_alternation_and_head_are_preserved():
     compressed = _compress([dict(m) for m in messages])
 
     assert compressed[0]["role"] == "system"
-    visible = [
-        m.get("role")
-        for m in compressed
-        if not (
-            m.get("role") == "tool"
-            or (m.get("role") == "assistant" and m.get("tool_calls"))
-        )
-    ]
+    visible = _wire_roles(compressed)
     for previous, current in itertools.pairwise(visible):
         assert not (previous == current == "user"), (
             f"consecutive user rows in compressed transcript: {visible}"
@@ -238,7 +248,9 @@ def test_pending_trailing_tool_call_survives_the_replay():
         i for i, m in enumerate(out)
         if m.get("role") == "user" and JOB_SENTINEL in str(m.get("content"))
     )
-    assert replay_idx > out.index(pending[0])
+    # The restatement follows the handoff; the in-flight call is still the transcript's last call.
+    assert replay_idx > _handoff_idx(out)
+    assert pending[0] is [m for m in out if m.get("tool_calls")][-1]
 
 
 def _compress_with(protect_first_n: int, compression_count: int, messages):
@@ -270,19 +282,19 @@ def _job_copies(messages) -> int:
     )
 
 
-def test_merged_restatement_is_not_anchored_twice():
+def test_restatement_after_a_typed_carrier_is_not_anchored_twice():
     """Later cycle: protect_first_n has decayed, the prompt is summarised away
-    and the summary is pinned to role=user followed by an exempt tool tail, so
-    the restatement is MERGED onto the carrier. The later
-    _ensure_compressed_has_user_turn pass must see intent as present instead
-    of inserting a second copy of the job prompt."""
+    and the role=user summary is followed by an exempt tool tail, so the
+    restatement is its own row directly after the (untouched, typed) carrier.
+    The later _ensure_compressed_has_user_turn pass must see intent as present
+    instead of inserting a second copy of the job prompt."""
     from agent.conversation_compression import _ensure_compressed_has_user_turn
 
     original = [{"role": "user", "content": JOB_SENTINEL}, *_tool_pairs(40)]
     out = _compress_with(2, 1, original)
-    assert any(
-        ContextCompressor._has_merged_inflight_replay(m) for m in out
-    ), "expected merge layout"
+    assert not any(ContextCompressor._has_merged_inflight_replay(m) for m in out), "typed carrier rewritten"
+    handoff = _handoff_idx(out)
+    assert out[handoff]["part_kind"] == "compaction" and JOB_SENTINEL in _text(out[handoff + 1])
     assert _job_copies(out) == 1
     assert _ensure_compressed_has_user_turn(original, out) == "already_present"
     assert _job_copies(out) == 1
@@ -399,10 +411,10 @@ def test_replay_replaces_surviving_user_row_with_same_message_uid():
     # Raw role: _template_visible_role skips a leading assistant(tool_calls)
     # row, which native Gemini rejects as the first turn.
     assert compressed[1]["role"] == "user", [m["role"] for m in compressed]
-    visible = [r for r in map(_template_visible_role, compressed[1:]) if r is not None]
+    visible = _wire_roles(compressed[1:])
     assert visible[0] == "user", visible
     assert all(a != b for a, b in itertools.pairwise(visible)), visible
-    assert JOB_SENTINEL in _text(compressed[_handoff_idx(compressed)]).split(_SUMMARY_END_MARKER)[-1]
+    assert JOB_SENTINEL in _text(compressed[_handoff_idx(compressed) + 1])
 
     # Visible assistant text in the tail makes the summary merge into tail[0],
     # an assistant(tool_calls) row: it must stay adjacent to its tool results.

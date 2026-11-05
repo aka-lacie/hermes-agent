@@ -4932,15 +4932,16 @@ Write only the summary body. Do not include any preamble or prefix."""
                 carrier["role"] = "user"
                 last_visible_role = _last_template_visible_role(compressed)
 
+        if last_visible_role == "user" and is_compaction_event(carrier):
+            # Alternation is judged on template-visible rows only (tool flow is exempt), so a user summary
+            # followed by a tool tail still "ends on user" (#58753). A typed carrier is never rewritten as
+            # text: the restated request goes directly after it, where the API copy merges the two into
+            # one user turn ahead of the tool flow (so a pending trailing tool_call stays the tail).
+            compressed.insert(compressed.index(carrier) + 1, replay)
+            return compressed
         if last_visible_role == "user":
-            # Alternation is judged on template-visible rows only (tool_calls /
-            # tool rows are exempt), so a user-pinned summary followed by a
-            # tool tail still "ends on user": a standalone user row would break
-            # the Mistral-style pre-flight check (#58753). Merge onto the
-            # carrier instead — its own metadata marks it synthetic, and the
-            # header after its end marker lets _has_merged_inflight_replay
-            # (used by _ensure_compressed_has_user_turn) see intent as present
-            # instead of inserting a second copy of the same request.
+            # LEGACY untyped carrier: merge onto it after its end marker, where _has_merged_inflight_replay
+            # (used by _ensure_compressed_has_user_turn) sees intent as present.
             carrier["content"] = _append_text_to_content(
                 carrier.get("content"),
                 "\n\n" + _INFLIGHT_TASK_REPLAY_HEADER + "\n" + task_text,

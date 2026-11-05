@@ -76,7 +76,7 @@ def _blocked_session(provider_url, db):
 
 def test_blocked_turn_never_reaches_the_provider_and_stores_only_the_placeholder(provider_url, tmp_path, monkeypatch):
     """Turn 1 is vetoed: zero chat requests, the block message is the reply and closes the
-    transcript pair. The stored row's content is the placeholder (what session_search and every
+    turn as a harness notice (Phase 2e, Rule 1: a role="user" system_event, never an assistant row). The stored row's content is the placeholder (what session_search and every
     other content reader sees); the typed text is display-only metadata the transcript renders.
     Turn 2 (a fresh agent reloading the session) replays the placeholder, never the prompt."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -93,7 +93,9 @@ def test_blocked_turn_never_reaches_the_provider_and_stores_only_the_placeholder
 
         history = db.get_messages_as_conversation("s-block")
         assert [(m["role"], m["content"]) for m in history] == [
-            ("user", PRE_LLM_BLOCK_WITHHELD_PROMPT), ("assistant", BLOCK_MSG)]
+            ("user", PRE_LLM_BLOCK_WITHHELD_PROMPT), ("user", BLOCK_MSG)]
+        assert (history[1]["sender_kind"], history[1]["part_kind"], history[1]["turn_outcome"]) == (
+            "system", "error_notice", "completed")
         assert withheld_prompt_text(history[0]) == f"look up {SECRET}"
         assert SECRET not in session_search(query="CUSTOMER", db=db, current_session_id="other")
 

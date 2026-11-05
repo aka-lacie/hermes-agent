@@ -100,5 +100,6 @@ def test_a_card_closed_by_a_message_ends_the_turn_without_another_model_call(tmp
     assert len(calls) == 1
     tool = next(m for m in result["messages"] if m["role"] == "tool")
     assert json.loads(tool["content"])["wrote_instead"] is True
-    # The tool tail is closed, so the user's message that follows alternates roles.
-    assert result["interrupted"] is True and result["messages"][-1]["role"] == "assistant"
+    # The tool tail is closed by a hidden interrupt notice (a user-side system_event, Rule 1).
+    closing = result["messages"][-1]
+    assert result["interrupted"] is True and closing["role"] == "user" and closing["turn_outcome"] == "interrupted"
