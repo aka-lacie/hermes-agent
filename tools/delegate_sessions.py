@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import sqlite3
 import threading
 import time
 import weakref
@@ -40,8 +41,9 @@ _draining: set[tuple[str, str]] = set()
 
 
 def _real_store(db) -> bool:
-    from agent.runtime_session_store import RuntimeSessionStore
-    return db is not None and not isinstance(db, RuntimeSessionStore) and callable(getattr(db, "_execute_write", None))
+    """The profile's own SessionDB (not a worker's scoped RPC store or a test double)."""
+    from hermes_state import SessionDB
+    return isinstance(getattr(db, "_db", db), SessionDB)
 
 
 def _store(parent):
@@ -77,7 +79,11 @@ def _launch_for(admission_id: str):
 def bind_child(parent, child, task, resume=None, *, extension, options, routing_cfg, retain=False, task_index=0):
     """Reserve a persisted conversation before dispatch, including queued children."""
     if not (resume is not None or retain or options.get("retain", False)):
-        child._delegate_unretained = True
+        db = getattr(child, "_session_db", None)
+        if _real_store(db) and isinstance(getattr(db, "db_path", None), (str, Path)):
+            # Still an ordinary sessions row: stamped closed (never resumable) once it ends.
+            child._delegate_unretained = True
+            child._delegate_store_path = str(Path(db.db_path).resolve())
         return
     if getattr(child, "_delegate_profile_home", None) is not None:
         raise ValueError("Retained delegation cannot yet resume a profile route; choose a model/provider route.")
@@ -205,19 +211,24 @@ def release_child(child):
 def _stamp_unretained(child) -> None:
     """A non-retained child is still an ordinary sessions row: closed, never in its parent's default list
     unless running, and never resumable."""
-    db = getattr(child, "_session_db", None)
-    parent = getattr(child, "_delegate_parent_session_id", None) or getattr(child, "_parent_session_id", None)
-    if not _real_store(db) or not getattr(child, "session_id", None):
+    parent = getattr(child, "_parent_session_id", None)
+    path = getattr(child, "_delegate_store_path", None)
+    if not path or not getattr(child, "session_id", None) or not parent:
         return
+    from hermes_state_registry import acquire, release
+    from gateway.delivery_targets import delegate_target, encode_delivery_target
+    db = acquire(Path(path))  # the child's own handle is already released by its close()
     try:
-        from gateway.delivery_targets import delegate_target, encode_delivery_target
-        target = encode_delivery_target(delegate_target(parent)) if parent else None
         db._write_rowcount(
             "UPDATE sessions SET lineage_kind = COALESCE(lineage_kind, 'delegate'), status = 'closed', "
             "role = COALESCE(role, ?), delivery_target = COALESCE(delivery_target, ?) WHERE id = ? AND "
-            "parent_session_id IS NOT NULL", (getattr(child, "_delegate_role", None), target, child.session_id))
-    except Exception:
-        logger.debug("could not stamp a finished child's session row", exc_info=True)
+            "parent_session_id = ?", (getattr(child, "_delegate_role", None),
+                                      encode_delivery_target(delegate_target(parent)), child.session_id, parent))
+    except sqlite3.Error:
+        logger.warning("could not stamp finished child %s as a closed delegate session", child.session_id,
+                       exc_info=True)
+    finally:
+        release(db)
 
 
 def assignment_message(child, message):

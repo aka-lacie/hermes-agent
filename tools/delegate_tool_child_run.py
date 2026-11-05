@@ -118,7 +118,7 @@ def _close_child(child: Any, log_message: str) -> None:
         close = getattr(child, "close", None)
         if callable(close):
             close()
-    if getattr(child, "_delegate_resumable", False) is True:
+    if getattr(child, "_delegate_resumable", False) is True or getattr(child, "_delegate_unretained", False) is True:
         with _quiet("Could not release delegated session", exc_info=True):
             from tools.delegate_sessions import release_child
             release_child(child)

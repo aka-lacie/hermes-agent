@@ -653,3 +653,16 @@ def test_sessions_api_admits_typed_events_within_the_acl_only(state):
     with pytest.raises(LookupError):  # siblings are not reachable under the default ACL
         api.admit("a", "b", "hi")
     assert [r["session_id"] for r in api.list("parent")] and api.observe("parent", "a")["session"]["session_id"] == "a"
+
+
+def test_a_non_retained_child_is_a_closed_delegate_row_outside_the_default_list(harness):
+    from tools.delegate_tool import delegate_task
+    make_parent, db, _, _ = harness
+    parent = make_parent()
+    result = json.loads(delegate_task(tasks=[{"goal": "One-off lookup"}], parent_agent=parent))
+    assert result["results"][0]["status"] == "completed", result
+    rows = db._read_all("SELECT * FROM sessions WHERE parent_session_id = ?", (parent.session_id,))
+    assert [(r["lineage_kind"], r["status"]) for r in rows] == [("delegate", "closed")]
+    assert json.loads(rows[0]["delivery_target"])["session_id"] == parent.session_id
+    assert json.loads(delegate_task(action="list", parent_agent=parent))["subagents"] == []
+    parent.close()
