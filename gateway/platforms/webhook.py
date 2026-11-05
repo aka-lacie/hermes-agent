@@ -1067,7 +1067,7 @@ class WebhookAdapter(BasePlatformAdapter):
         try:
             from gateway.mirror import mirror_to_session
             ok = mirror_to_session(platform_name, chat_id, f"[Webhook delivery: {route}]\n{content}",
-                                   source_label="webhook", thread_id=thread_id, role="user")
+                                   source_label="webhook", thread_id=thread_id, sender_id=f"webhook:{route}")
             logger.log(logging.INFO if ok else logging.DEBUG,
                        "[webhook] Route '%s' delivery %smirrored into %s:%s session", route, "" if ok else "not ",
                        platform_name, chat_id)

@@ -103,6 +103,7 @@ class TestMirrorToSession:
                 "Hello group!",
                 source_label="cli",
                 user_id="alice",
+                sender_id="session:sender",
             )
 
         assert result is True
@@ -114,7 +115,7 @@ class TestMirrorToSession:
 
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file):
-            result = mirror_to_session("telegram", "99999", "Hello!")
+            result = mirror_to_session("telegram", "99999", "Hello!", sender_id="session:sender")
 
         assert result is False
 
@@ -136,7 +137,7 @@ class TestMirrorToSession:
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
              patch("hermes_state_registry.acquire", return_value=broken_db), \
              patch("hermes_state_registry.release_or_close"):
-            result = mirror_to_session("telegram", "123", "Hello!")
+            result = mirror_to_session("telegram", "123", "Hello!", sender_id="session:sender")
 
         assert result is False
         broken_db.append_message.assert_called_once()
@@ -146,6 +147,7 @@ class TestAppendToSqlite:
     def test_connection_is_released_after_use(self, tmp_path):
         """Verify _append_to_sqlite returns the shared SessionDB reference."""
         from gateway.mirror import _append_to_sqlite
+        from agent.message_parts import system_event_message
         mock_db = MagicMock()
         released = []
 
@@ -154,7 +156,7 @@ class TestAppendToSqlite:
                  "hermes_state_registry.release_or_close",
                  side_effect=lambda db: released.append(db),
              ):
-            _append_to_sqlite("sess_1", {"role": "assistant", "content": "hello"})
+            _append_to_sqlite("sess_1", system_event_message("delivery_mirror", "hello", sender_id="cron:j"))
 
         mock_db.append_message.assert_called_once()
         assert released == [mock_db], (

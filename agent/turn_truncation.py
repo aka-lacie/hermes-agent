@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.error_classifier import FailoverReason
 from agent.message_metadata import append_message
+from agent.message_parts import system_event_message
 from agent.message_sanitization import close_interrupted_tool_sequence
 from agent.repetition_guard import is_repetition_dominated
 from agent.turn_api_call import stop_thinking_spinner
@@ -30,6 +31,7 @@ logger = logging.getLogger("agent.conversation_loop")
 # max_output_tokens (turn_response_check.py::_derive_finish_reason); text truncation stays on
 # the Codex incomplete continuation, so the text branch below never double-continues it.
 _CONTINUABLE_MODES = {"chat_completions", "bedrock_converse", "anthropic_messages", "codex_responses"}
+CONTINUATION_NUDGE_KIND = "continuation_nudge"
 _THINK_TAG_RE = re.compile(r'<(?:think|thinking|reasoning|REASONING_SCRATCHPAD)[^>]*>', re.IGNORECASE)
 _TRUNCATED_FINAL = site_copy("truncated")
 _FIRST_TRUNCATED_FINAL = _TRUNCATED_FINAL
@@ -341,10 +343,10 @@ def _continue_text(st: _Trunc, _retry: TurnRetryState, assistant_message: Any) -
             agent._vprint(f"{agent.log_prefix}↻ Stream interrupted — requesting continuation ({n}/4)...", diagnostic=True)
         else:
             agent._vprint(f"{agent.log_prefix}↻ Requesting continuation ({n}/4)...", diagnostic=True)
-        append_message(messages, {
-            "role": "user", "content": _get_continuation_prompt(st.is_stub, _dropped_tools),
-            "_length_continuation_nudge": True,
-        })
+        # A harness request, not the human: a typed system_event user row (same text on the wire).
+        nudge = system_event_message(CONTINUATION_NUDGE_KIND, _get_continuation_prompt(st.is_stub, _dropped_tools),
+                                     sender_id="system:" + CONTINUATION_NUDGE_KIND)
+        append_message(messages, {**nudge, "_length_continuation_nudge": True})
         agent._session_messages = messages
         _retry.restart_with_length_continuation = True
         return st.done("break")

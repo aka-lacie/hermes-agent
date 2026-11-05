@@ -3,18 +3,23 @@
 When a message is sent to a platform (send_message or cron delivery), append a
 "delivery-mirror" record to the target session's transcript so the receiving-side
 agent knows what was sent.  Standalone: works from CLI, cron and gateway contexts.
+
+A mirror is never the target session's model speaking, so it is always a ``role="user"``
+row holding one ``system_event`` part (Rule 1: assistant rows are model output only), with
+the producer named in ``sender_id`` (``cron:<job>``, ``webhook:<route>``, ``session:<id>``).
 """
 
 import json
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from agent.message_parts import MESSAGE_PARTS, PROVENANCE_FIELDS, system_event_message
 from hermes_cli.config import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
+MIRROR_EVENT_KIND = "delivery_mirror"
 _SESSIONS_DIR = get_hermes_home() / "sessions"
 _SESSIONS_INDEX = _SESSIONS_DIR / "sessions.json"
 _SESSIONS_INDEX_AT_IMPORT = _SESSIONS_INDEX
@@ -35,22 +40,20 @@ def _origin_user_id(entry: dict) -> str:
 
 def mirror_to_session(
     platform: str, chat_id: str, message_text: str, source_label: str = "cli", thread_id: Optional[str] = None,
-    user_id: Optional[str] = None, role: str = "assistant", session_id: Optional[str] = None,
+    user_id: Optional[str] = None, session_id: Optional[str] = None, *, sender_id: str,
+    exclude_session_id: Optional[str] = None,
 ) -> bool:
-    """Append a delivery-mirror message to the target session's SQLite transcript.
+    """Append a delivery-mirror notice to the target session's SQLite transcript.
 
     Pass ``session_id`` when the caller already holds the exact session (e.g. the
     cron in_channel seed) to skip the origin scan, which refuses to guess on a
     populated chat (flat + N thread sessions per chat_id) and would drop the mirror.
-    Text that is NOT the agent speaking (e.g. a cron brief) must pass
-    ``role="user"``: ``mirror`` metadata is dropped at the SQLite boundary, so an
-    assistant-role mirror replays as a real turn and yields assistant→assistant
-    pairs that break strict-alternation providers, while a user-role mirror
-    collapses safely via the consecutive-user merge.
+    The row is ``role="user"``, ``sender_kind="system"``, ``sender_id=sender_id`` with one
+    ``system_event`` part: it collapses safely into the next user turn via the
+    consecutive-user merge and never teaches the model a reply it did not write.
+    ``exclude_session_id``: the sending session itself; a send into its own chat is already
+    on record as its tool call, so nothing is mirrored there.
     Returns True if mirrored, False if no matching session or error. Never raises.
-
-    ``role`` defaults to ``"assistant"`` — correct for the interactive ``send_message`` mirror, where the
-    mirrored text is the agent's own outgoing reply (a genuine assistant turn). See #2221.
     """
     try:
         if not session_id:
@@ -61,10 +64,12 @@ def mirror_to_session(
                 platform, chat_id, thread_id, user_id,
             )
             return False
-        _append_to_sqlite(session_id, {
-            "role": role, "content": message_text, "timestamp": datetime.now().isoformat(),
-            "mirror": True, "mirror_source": source_label,
-        })
+        if exclude_session_id and session_id == exclude_session_id:
+            logger.debug("Mirror: skipped, %s sent into its own session", session_id)
+            return False
+        _append_to_sqlite(session_id, system_event_message(
+            MIRROR_EVENT_KIND, message_text, sender_id=sender_id,
+            meta={"source": source_label, "platform": platform}))
         logger.debug("Mirror: wrote to session %s (from %s)", session_id, source_label)
         return True
     except Exception as e:
@@ -136,6 +141,8 @@ def _append_to_sqlite(session_id: str, message: dict) -> None:
 
     db = acquire()
     try:
-        db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
+        db.append_message(
+            session_id=session_id, role="user", parts=message[MESSAGE_PARTS],
+            **{key: message[key] for key in PROVENANCE_FIELDS if message.get(key) is not None})
     finally:
         release_or_close(db)

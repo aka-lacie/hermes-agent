@@ -191,6 +191,11 @@ def _cron_mirror_message(job: dict, text: str) -> str:
     return f"[Cron delivery: {_cron_display_name(job)}]\n{text}"
 
 
+def _cron_sender_id(job: dict) -> str:
+    """The mirror row's ``sender_id``: the job that produced the delivery."""
+    return f"cron:{job.get('id') or _cron_display_name(job)}"
+
+
 def _maybe_mirror_cron_delivery(
     job: dict, platform_name: str, chat_id: str, mirror_text: str, thread_id: Optional[str] = None,
     user_id: Optional[str] = None, *, enabled: bool = False,
@@ -216,7 +221,7 @@ def _maybe_mirror_cron_delivery(
         # SQLite mirror metadata would otherwise lose on replay.
         ok = mirror_to_session(
             platform_name, str(chat_id), _cron_mirror_message(job, text),
-            source_label="cron", thread_id=thread_id, user_id=user_id, role="user")
+            source_label="cron", thread_id=thread_id, user_id=user_id, sender_id=_cron_sender_id(job))
         if ok:
             logger.info(
                 "Job '%s': mirrored delivery into %s:%s session transcript",
@@ -300,7 +305,7 @@ def _seed_cron_session(
             seeded_session_id = getattr(_entry, "session_id", None)
     return mirror_to_session(
         platform_name, str(chat_id), _cron_mirror_message(job, text),
-        source_label="cron", thread_id=thread_id, user_id=user_id, role="user",
+        source_label="cron", thread_id=thread_id, user_id=user_id, sender_id=_cron_sender_id(job),
         session_id=seeded_session_id,
     )
 

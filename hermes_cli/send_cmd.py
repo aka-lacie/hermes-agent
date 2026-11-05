@@ -237,7 +237,8 @@ def cmd_send(args: argparse.Namespace) -> None:
     tool_args = {"action": "send", "target": target, "message": message}
     if mentions:
         tool_args["mentions"] = mentions
-    result = send_message_tool(tool_args)
+    # Script output, never a session's model: delivered to the platform, mirrored into no transcript.
+    result = send_message_tool(tool_args, mirror=False)
     sys.exit(_emit_result(result, json_mode=getattr(args, "json", False), quiet=getattr(args, "quiet", False)))
 
 

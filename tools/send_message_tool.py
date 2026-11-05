@@ -36,14 +36,15 @@ def prepare_send_message_platforms() -> None:
     discover_plugins()
 
 
-def send_message_tool(args, **kw):
-    """Handle cross-channel send_message tool calls."""
+def send_message_tool(args, *, mirror: bool = True, **kw):
+    """Handle cross-channel send_message tool calls. ``mirror=False`` (``hermes send``: script text,
+    never a session's model) delivers without recording anything in any session transcript."""
     action = args.get("action", "send")
     if action == "list":
         return _handle_list()
     if action in ("react", "unreact"):
         return _handle_react(args, remove=action == "unreact")
-    return _handle_send(args)
+    return _handle_send(args, mirror=mirror)
 
 
 def _resolve_tool_target(target: str, *, pass_unresolved_references: bool = False):
@@ -209,7 +210,7 @@ def _handle_react(args, remove=False):
     return json.dumps(result)
 
 
-def _handle_send(args):
+def _handle_send(args, *, mirror: bool = True):
     target, message = args.get("target", ""), args.get("message", "")
     if not target or not message:
         return tool_error("Both 'target' and 'message' are required when action='send'")
@@ -290,7 +291,7 @@ def _handle_send(args):
                 record_response_delivery(platform=platform_name, chat_id=chat_id, thread_id=thread_id)
             if used_home_channel:
                 result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
-            if mirror_text and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
+            if mirror and mirror_text and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
                 result["mirrored"] = True
             if media_dropped:
                 # The text went out but an attachment the caller asked for did not: a script reading
@@ -432,14 +433,18 @@ def _slack_dm_chat_id(pconfig, chat_id):
 
 
 def _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
-    """Best-effort mirror of the sent message into the target's gateway session."""
+    """Best-effort mirror of the sent message into the target's gateway session, as a system_event
+    from the sending session. A send into the sender's own chat is already on record as its tool call."""
     try:
         from gateway.mirror import mirror_to_session
         from gateway.session_context import get_session_env
+        sender_session = get_session_env("HERMES_SESSION_ID", "")
         return bool(mirror_to_session(
             platform_name, chat_id, mirror_text, thread_id=thread_id,
             source_label=get_session_env("HERMES_SESSION_PLATFORM", "cli"),
-            user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None))
+            user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None,
+            sender_id=f"session:{sender_session}" if sender_session else "system:send_message",
+            exclude_session_id=sender_session or None))
     except Exception:
         return False
 

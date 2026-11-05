@@ -2117,7 +2117,7 @@ class TestCronDeliveryMirror:
             )
         m.assert_called_once()
         args, kwargs = m.call_args
-        assert kwargs.get("role") == "user", "cron mirror must be a user turn, not assistant"
+        assert kwargs.get("sender_id") == "cron:j1", "cron mirror is a user-role system_event from the job"
         # The brief text is prefixed with a human-readable cron-delivery label
         # so replay (where the mirror metadata is dropped at the SQLite
         # boundary) still distinguishes it from a genuine user message.

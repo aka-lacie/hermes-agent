@@ -183,10 +183,10 @@ class TestFallbackMirrorEndToEnd:
 
 
         def fake_mirror(platform, chat_id, text, source_label="cli",
-                        thread_id=None, user_id=None, role="assistant"):
+                        thread_id=None, user_id=None, session_id=None, *, sender_id):
             mirror_calls.append({
                 "platform": platform, "chat_id": chat_id,
-                "thread_id": thread_id, "user_id": user_id, "role": role,
+                "thread_id": thread_id, "user_id": user_id, "sender_id": sender_id,
             })
             return True
 
@@ -208,7 +208,7 @@ class TestFallbackMirrorEndToEnd:
             "home-channel session (the reply-continuity bug)"
         )
         assert slack_env["mirror"][0]["chat_id"] == "D0HOME"
-        assert slack_env["mirror"][0]["role"] == "user"
+        assert slack_env["mirror"][0]["sender_id"] == "cron:j1"  # a user-role system_event from the job
 
     def test_all_broadcast_does_not_mirror(self, slack_env):
         job = {"id": "j2", "name": "cast", "deliver": "all", "origin": None}
