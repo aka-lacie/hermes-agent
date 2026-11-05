@@ -1542,6 +1542,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         if evt.get("platform"):
             return  # already enriched
         delivery = evt.get("delivery") if isinstance(evt.get("delivery"), dict) else {}
+        # TODO(phase5): route every unit by its children's delivery_target first; the dispatch-time
+        # session_key (origin) still wins when present, which is the same session for delegate children.
         if not evt.get("session_key") and delivery.get("target_session_key"):
             # A unit with no dispatch origin (a queued resume the delegate drain ran): the child's own
             # delivery_target names the session, never a guess (gateway/delivery_targets.py).
