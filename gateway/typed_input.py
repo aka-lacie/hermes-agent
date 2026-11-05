@@ -120,10 +120,25 @@ def turn_typed_input(
             source_event_id=str(message_id) if message_id not in (None, "") else None)
     if display_kind is not None:
         return None
+    if getattr(source, "platform", None) == Platform.WEBHOOK:
+        return webhook_delivery_input(event, source, text, sent_at)
     delivery = "steer" if metadata.get("delivery") == "steer" else "turn"
     return human_turn_input(
         text, delivery=delivery, origin=message_origin(event, source, sent_at, redact_pii=redact_pii),
         sender_id=sender_id(source, redact_pii=redact_pii))
+
+
+def webhook_delivery_input(event: Any, source: Any, text: str, sent_at: Optional[float]) -> dict:
+    """A webhook delivery is an event, never a person speaking: one ``webhook`` system_event from
+    ``webhook:<route>`` whose meta names the route and the provider delivery id (also the row's
+    ``source_event_id``). Keyed sessions receive one such row per delivery (webhook_session_keys)."""
+    user_id = str(getattr(source, "user_id", "") or "")
+    route = user_id[len("webhook:"):] if user_id.startswith("webhook:") else (user_id or "webhook")
+    message_id = getattr(event, "message_id", None)
+    delivery_id = str(message_id) if message_id not in (None, "") else None
+    meta = {"route": route, **({"delivery_id": delivery_id} if delivery_id else {})}
+    return system_event_input("webhook", text, sender_kind="webhook", sender_id=f"webhook:{route}", meta=meta,
+                              sent_at=sent_at, source_event_id=delivery_id)
 
 
 def steer_origin(event: Any, *, redact_pii: bool = False) -> dict:

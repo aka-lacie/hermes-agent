@@ -243,7 +243,9 @@ def _snapshot_native(runner, event, provenance, fresh_roles=False, encoded_sourc
         adapter = runner._adapter_for_source(event.source)
         if provenance is None:
             raise RuntimeStoreError('permission_denied')
-        delivery = snapshot_destination(adapter, adapter._delivery_info.get(event.source.chat_id))
+        # A keyed chat is shared by its deliveries: snapshot THIS delivery's slot (webhook_session_keys).
+        lookup = getattr(adapter, 'delivery_info_for', None) or (lambda chat, _id: adapter._delivery_info.get(chat))
+        delivery = snapshot_destination(adapter, lookup(event.source.chat_id, event.message_id))
         envelope['webhook_delivery'] = delivery
         envelope['webhook_route'] = route_digest(adapter, event.source.chat_id)
     if event.source.role_authorized:

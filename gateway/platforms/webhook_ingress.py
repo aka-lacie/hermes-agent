@@ -263,7 +263,9 @@ async def _webhook_retry(authority, event, payload, rows):
         raise RuntimeStoreError('admission_conflict')
     event._webhook_duplicate = True
     receipt = authority._receipt(row)
-    finalize_webhook(authority, receipt)
+    from gateway.platforms.webhook_session_keys import is_keyed_chat_id
+    if not is_keyed_chat_id(event.source.chat_id):  # a keyed conversation outlives each delivery
+        finalize_webhook(authority, receipt)
     return receipt
 
 
@@ -302,9 +304,11 @@ async def recover_webhook_finalizations(authority):
           AND json_extract(a.payload_json, '$.native_text_v1.automation') IS NULL
         """)
     results = {}
+    from gateway.platforms.webhook_session_keys import is_keyed_chat_id
     for candidate in rows:
         row = get_session_admission(authority.db, admission_id=candidate['admission_id'])
-        if row is None:
+        # A keyed conversation is resumed by its next delivery, never closed here.
+        if row is None or is_keyed_chat_id(row['payload']['native_text_v1']['source'].get('chat_id')):
             continue
         sid = row['target_session_id']
         try:

@@ -31,6 +31,7 @@ from registration_lifecycle import replacement_coordinator
 from utils import env_var_enabled
 from hermes_cli.config import load_config_readonly
 from hermes_cli.plugins_subagents import SubagentExtensionContextMethods
+from hermes_cli.plugins_webhooks import WebhookContextMethods
 from hermes_cli.middleware import VALID_MIDDLEWARE
 from hermes_cli.plugin_capabilities import plugin_capability_granted
 from hermes_cli.relay_plugin_cutover import RELAY_PLUGINS_CONFIG_ENV, legacy_relay_plugin_keys
@@ -201,12 +202,12 @@ VALID_HOOKS: set[str] = {
     # Observer-first (#64204, #64182 rule 3); a directive-shaped return gets a debug log so future
     # block/rewrite adopters are discoverable once the middleware variant ships (#64231 taxonomy).
     "pre_command",
+    "resolve_session_key",  # webhook session keys; contract: gateway/platforms/webhook_session_keys.py
     "post_compaction",  # once per committed compaction on every path; observer (hooks.md, #118382)
 }
 
-# Hooks whose directive the shell-hook response parser has no channel for. VALID_HOOKS doubles as
-# the shell-hook allow-list, so these are refused loudly instead of having output silently ignored.
-SHELL_UNSUPPORTED_HOOKS: set[str] = {"transform_api_error_classification"}
+# VALID_HOOKS doubles as the shell-hook allow-list: hooks whose directive it cannot parse are refused loudly.
+SHELL_UNSUPPORTED_HOOKS: set[str] = {"transform_api_error_classification", "resolve_session_key"}
 
 _env_enabled = env_var_enabled  # imported by plugins/memory
 _UNSET = object()
@@ -228,7 +229,7 @@ class LoadedPlugin:
     deferred: bool = False
 
 
-class PluginContext(PluginCapabilityCtxMixin, SubagentExtensionContextMethods):
+class PluginContext(PluginCapabilityCtxMixin, SubagentExtensionContextMethods, WebhookContextMethods):
     """Facade given to plugins so they can register tools and hooks."""
 
     def __init__(self, manifest: PluginManifest, manager: PluginManager):
@@ -1817,11 +1818,8 @@ def render_system_prompt_sections(session_info: Mapping[str, Any]) -> list[Rende
 
 
 def invoke_middleware(kind: str, **kwargs: Any) -> list[Any]:
-    """Invoke registered middleware callbacks (lazy-discovers like :func:`invoke_hook`).
-
-    Lazy-discovers plugins on first use — same delivery-parity guarantee as :func:`invoke_hook` (tracking
-    #64178).
-    """
+    """Invoke registered middleware callbacks (lazy-discovers like :func:`invoke_hook`, same
+    delivery-parity guarantee; tracking #64178)."""
     return _delivery_manager().invoke_middleware(kind, **kwargs)
 
 

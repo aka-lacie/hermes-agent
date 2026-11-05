@@ -68,28 +68,42 @@ def snapshot_destination(adapter, delivery):
     return result
 
 
-def retained_destination(adapter, chat_id):
-    """Readback also checks today's connector and authorization; retained data is not a grant."""
-    from gateway.session_envelope import restore_native, _validate_native
+def _signed_rows(adapter, chat_id):
+    """``(runner, rows)``: the signed ingress admissions of *chat_id* that can own its reply leg.
+    Only the signed ingress admission carries the destination; later automation rows (process/watch
+    completions) on the same chat share its source but never compete. A keyed chat
+    (``webhook_session_keys``) holds one signed admission per delivery and its session FIFO runs them
+    one at a time: the reply leg belongs to the one executing now, else the newest."""
     runner = adapter.gateway_runner or getattr(adapter._message_handler, '__self__', None)
     from gateway.session_authorities import active_authority, all_authorities, serving_authorities
     if not all_authorities(runner):
-        return validate_destination(adapter._delivery_info.get(chat_id))
+        return runner, None
     # The reply leg runs in the routed profile's scope; that ledger holds the destination. A
     # delivery id is unique per route, so an unscoped caller may search every served ledger (a
     # parked profile's retained store is not served: reading it could fail every other profile's).
     scoped = active_authority(runner)
     candidates = [scoped] if scoped is not None else serving_authorities(runner)
-    # Only the signed ingress admission carries the destination; later automation rows
-    # (process/watch completions) on the same chat share its source but never compete.
-    query = """SELECT payload_json FROM session_admissions
+    query = """SELECT payload_json, status, seq, target_session_id FROM session_admissions
         WHERE json_extract(payload_json, '$.native_text_v1.source.chat_id')=?
           AND json_extract(payload_json, '$.native_text_v1.source.platform')='webhook'
           AND json_extract(payload_json, '$.native_text_v1.automation') IS NULL"""
-    rows = [row for authority in candidates for row in authority.db._read_all(query, (chat_id,))]
+    rows = [(authority, row) for authority in candidates for row in authority.db._read_all(query, (chat_id,))]
+    from gateway.platforms.webhook_session_keys import is_keyed_chat_id
+    if len(rows) > 1 and is_keyed_chat_id(chat_id):
+        started = [pair for pair in rows if pair[1]['status'] == 'started']
+        rows = started if len(started) == 1 else [max(rows, key=lambda pair: pair[1]['seq'])]
+    return runner, rows
+
+
+def retained_destination(adapter, chat_id):
+    """Readback also checks today's connector and authorization; retained data is not a grant."""
+    from gateway.session_envelope import restore_native, _validate_native
+    runner, rows = _signed_rows(adapter, chat_id)
+    if rows is None:
+        return validate_destination(adapter._delivery_info.get(chat_id))
     if len(rows) != 1:
         raise RuntimeStoreError('not_found')
-    payload = json.loads(rows[0]['payload_json'])
+    payload = json.loads(rows[0][1]['payload_json'])
     envelope = payload['native_text_v1']
     event = restore_native(payload, runner)
     _validate_native(runner, event, envelope.get('provenance'))
@@ -98,3 +112,16 @@ def retained_destination(adapter, chat_id):
     if envelope.get('webhook_route') != route_digest(adapter, chat_id):
         raise RuntimeStoreError('admission_conflict')
     return validate_destination(envelope.get('webhook_delivery'))
+
+
+def retained_session_target(adapter, chat_id):
+    """``sessions.delivery_target`` (plus the row id) of the session *chat_id*'s reply leg runs in,
+    or None (no ledger, no admission, or no target declared)."""
+    _runner, rows = _signed_rows(adapter, chat_id)
+    if not rows or len(rows) != 1:
+        return None
+    authority, row = rows[0]
+    from hermes_state_session_meta import session_meta
+    sid = authority.logical_owner(row['target_session_id'])
+    target = session_meta(authority.db, sid).get('delivery_target')
+    return {'id': sid, 'delivery_target': target} if isinstance(target, dict) else None

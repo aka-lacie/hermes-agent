@@ -92,6 +92,10 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `cron_job` | No | Fire an existing cron job (by ID or name) on each event instead of starting a fresh webhook agent session. The rendered `prompt` becomes transient per-run context; the job's own prompt, skills, model, and delivery settings apply. Mutually exclusive with `deliver_only`. See [Event-Triggered Cron Jobs](#event-triggered-cron-jobs). |
 | `coalesce` | No | Debounce rapid distinct events on the same logical entity into one agent run. Block with a required `key` (payload field or template identifying the entity, e.g. `pull_request.number`), optional `window_seconds` (quiet window, default 30) and `max_wait_seconds` (dispatch cap, default 300). See [Event Coalescing](#event-coalescing). Mutually exclusive with `deliver_only` and `cron_job`. |
 | `mirror_to_session` | No | Default `false`. When `true`, after a successful delivery to a chat platform the delivered message is also written into that chat's session transcript (as a labelled user turn, the same way continuable cron briefs are), so when you reply in that chat the agent knows what it just sent you. See [Replying to a delivery](#replying-to-a-delivery). |
+| `session_key` | No | Resume one agent session per logical conversation instead of a fresh session per delivery: a `{dot.path}` template (or a list tried in order), e.g. `"{repository.full_name}#{pull_request.number}"`. A route `script` may instead name the key with the reserved output field `__hermes_session_key__` (string = resume, `null` = per-delivery), and plugins can key a route with `ctx.register_webhook_session_key(route, fn)`. See [Keyed sessions](#keyed-sessions). Agent routes only. |
+| `model` / `provider` | No | Pin this route's agent to a provider and/or model instead of the profile default. A pinned route never borrows the profile's `fallback_providers` chain. |
+| `fallback_providers` | No | This route's own failover chain, a list of `{provider, model}` (optional `base_url`, `key_env`); `[]` disables fallback. Stored (credential-free) with the session, so a keyed session's next delivery keeps it. |
+| `delivery_target` | No | Where each turn's final output goes instead of `deliver`: `{kind: platform, platform, chat_id, thread_id}`, `{kind: session, session_id, attach}` (admitted into another session; `attach: true` also lists this session in that session's delegate list), or `{kind: none}`. |
 
 ### Full example
 
@@ -128,6 +132,18 @@ platforms:
               equals: "refs/heads/main"
           deliver: "telegram"
 ```
+
+### Keyed sessions {#keyed-sessions}
+
+By default every delivery runs in its own session, closed when its turn settles. A route that
+resolves a **session key** instead resumes one session per key: every delivery with the same
+`(profile, route, key)` is admitted into that session's queue, so deliveries for one pull request
+or one mail thread run one at a time, see each other's history and tool results, and compact like
+any other conversation. Keyed sessions are not closed per delivery (or by startup recovery) and
+survive a gateway restart. The key is resolved, first answer wins, from the route `script`'s
+`__hermes_session_key__` output (stripped from inbound payloads, so only the gate can set it), the
+route's `session_key` template(s), then the `resolve_session_key` plugin hook; no answer means a
+per-delivery session. The session row records `conversation_key = "webhook:<route>:<key>"`.
 
 ### Payload Filters
 
