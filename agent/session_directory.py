@@ -975,7 +975,10 @@ def list_sessions(db, conn, caller_session_id: str, *, scope: str = "children", 
 # or an attachable opt-in whose literal target is a segment of a level-(L-1) member -- exactly the
 # breadth-first walk's edge rule (``_subtree``), read from the other end. Ordering contract: the newest
 # `limit` of the WHOLE subtree (the breadth-first walk stopped collecting after ~_MAX_TREE_ROWS rows, so a
-# tree wider than that used to rank only its first levels).
+# tree wider than that used to rank only its first levels). The scan runs over the caller's delegation
+# tree (``root_session_id``): for the tree's own root that is its subtree; a deeper caller's scan also
+# passes (and rejects) newer rows of sibling branches. A ``query`` keeps the breadth-first walk (a search
+# reads every member anyway), as does a store whose rows predate the topology columns.
 
 def _tree_rows_sql(legacy: bool) -> str:
     return (f"SELECT s.id, s.parent_session_id, s.lineage_kind, s.delivery_target, s.root_session_id, s.model_config, "
