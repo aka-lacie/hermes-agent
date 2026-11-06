@@ -152,6 +152,46 @@ def capture_route(*, provider: Any, model: Any, base_url: Any = None, routing_cf
     return validate_route({k: v for k, v in route.items() if v is not None})
 
 
+LEGACY_ROUTE_KINDS = frozenset({"named", "default", "parent"})
+_UNNAMED_PROVIDERS = frozenset({"", "auto", "custom"})
+
+
+def legacy_route(descriptor: Any, *, provider: Any = None, model: Any = None, reasoning_effort: Any = None,
+                 ) -> Optional[dict]:
+    """The stored route of a pre-unified retained child, from its legacy ``delegate_sessions`` record.
+
+    *descriptor* is the legacy ``route_descriptor`` (``{kind, provider?, endpoint_sha256?, difficulty?}``, the
+    endpoint digest already normalized by the legacy capture), *provider*/*model* the record's own columns.
+    A descriptor-less record with a named provider becomes the ``named`` route the legacy resume rebuilt on
+    the fly; an unnamed one (``custom``/``auto``/blank, no saved endpoint identity) has no route: None, so
+    resume keeps refusing it exactly as before. A descriptor that does not validate is None too (never a
+    guessed identity)."""
+    raw = dict(descriptor) if isinstance(descriptor, Mapping) else {}
+    name = str(raw.get("provider") or provider or "").strip().lower()
+    kind = raw.get("kind")
+    if kind is None:
+        if name in _UNNAMED_PROVIDERS:
+            return None
+        kind, raw = "named", {}
+    if kind not in LEGACY_ROUTE_KINDS or (kind == "named" and name in _UNNAMED_PROVIDERS
+                                          and not raw.get("endpoint_sha256")):
+        return None
+    route: dict[str, Any] = {"v": ROUTE_VERSION, "kind": kind}
+    if name:
+        route["provider"] = name
+    if text := (str(model).strip() if model is not None else ""):
+        route["model"] = text
+    for key in ("endpoint_sha256", "difficulty"):
+        if raw.get(key):
+            route[key] = str(raw[key])
+    if effort := _effort_text(reasoning_effort):
+        route["reasoning_effort"] = effort
+    try:
+        return validate_route(route)
+    except RouteError:
+        return None
+
+
 def _effort_text(value: Any) -> Optional[str]:
     """A child's reasoning config (``{"effort": ...}`` / ``{"enabled": False}``) as its stored level."""
     if isinstance(value, str):

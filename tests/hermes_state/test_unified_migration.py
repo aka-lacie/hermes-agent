@@ -125,10 +125,13 @@ def test_apply_backfills_sessions(legacy_db):
     assert receipt["sessions"]["conflict_root_session_id"] == 1
     assert (sessions["child2"]["role"], sessions["child2"]["status"], sessions["child2"]["workspace"]) == \
         ("leaf", "idle", "/ws")
-    assert sessions["child"]["status"] == "closed"  # the compressed-away segment of the delegation
-    assert json.loads(sessions["child2"]["route"]) == {"provider": "cliproxy-claude", "model": "claude-opus-5-5"}
-    assert json.loads(sessions["dm"]["route"]) == {"provider": "cliproxy-gemini", "model": "gemini-4-argon",
-                                                   "reasoning_effort": "medium"}
+    # The delegation's logical status on its canonical id (its tip is idle), never the segment's own end.
+    assert sessions["child"]["status"] == "idle"
+    route = {"v": 1, "kind": "named", "provider": "cliproxy-claude", "model": "claude-opus-5-5"}
+    assert json.loads(sessions["child2"]["route"]) == json.loads(sessions["child"]["route"]) == route
+    assert sessions["dm"]["route"] is None  # routes are a delegate conversation's; a human session gets none
+    assert sessions["dm"]["status"] is None  # compressed, its tip dm2 is live: not closed
+    assert sessions["old"]["status"] == "closed"
     assert json.loads(sessions["child"]["fork_origin"])["session_id"] == "dm2"
     assert sessions["dm2"]["status"] is None  # live, no delegation record: not derivable
 

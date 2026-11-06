@@ -11,8 +11,14 @@ What it does (dry-run by default; ``--apply`` writes, in one transaction):
   (``_delegate_from`` / ``_branched_from`` / ``_reset_from``; a marker naming another row is an inherited
   copy, exactly as ``_non_continuation_child_sql`` reads it); ``group_id`` from the async delegation that
   spawned the child; ``role`` / ``status`` / ``workspace`` / ``fork_origin`` from ``delegate_sessions``;
-  ``status=closed`` for ended rows; a credential-free ``route`` from ``delegate_sessions`` and
-  ``model_config``. Only NULL columns are filled; a stored value that disagrees is counted, never changed.
+  the conversation's LOGICAL ``status`` (a compressed segment takes its tip's: a retained child's canonical
+  id stays idle and resumable; ``closed`` once the tip has ended); for delegate conversations only, a
+  credential-free unified ``route`` (``agent.session_routes.legacy_route``: a valid ``kind``). A retained
+  child's own row also gets the unified brief (``model_config._delegate_brief``: title, initial goal, latest
+  assignment, context, ``retain``) and its parent ``delivery_target`` (``{kind: session, session_id: parent,
+  attach: true}``), exactly what ``DelegateSessionStore.register`` writes, so the unified store resumes it
+  without the legacy table. Only NULL columns (and an absent brief) are filled; a stored value that
+  disagrees is counted, never changed.
 * **Messages (sessions in scope):** user rows get ``sender_kind`` / ``sender_id`` / ``sent_at`` /
   ``source_event_id`` / ``intent`` / ``part_kind`` and ``parts_json``, with ``content`` set to the
   parts' plain view (envelopes parsed once, here); tool rows get ``sender_kind="tool_result"``;
@@ -20,7 +26,8 @@ What it does (dry-run by default; ``--apply`` writes, in one transaction):
   with certainty is left untouched and counted under its reason.
 
 Idempotent: typed rows (``sender_kind`` or ``parts_json`` set) and re-tagged rows are skipped, so a
-second run changes nothing. ``delivery_target`` is not written (Phase 3 owns its semantics).
+second run changes nothing. Webhook/cron/human sessions get no ``route`` (their runtime stamps the owner's
+declaration on first use; a migrated pin would override it).
 """
 
 from __future__ import annotations
@@ -48,7 +55,7 @@ MARKERS = {"_delegate_from": "delegate", "_branched_from": "branch", "_reset_fro
 HUMAN_SOURCES = frozenset({"discord", "telegram", "slack", "whatsapp", "signal", "matrix", "mattermost", "cli",
                            "tui", "desktop", "gui", "acp", "local", "sms", "email", "homeassistant", "wechat"})
 SESSION_FILL_COLUMNS = ("root_session_id", "depth", "lineage_kind", "group_id", "role", "status", "workspace",
-                        "route", "fork_origin")
+                        "route", "fork_origin", "delivery_target")
 MESSAGE_COLUMNS = ("id", "session_id", "role", "content", "timestamp", "platform_message_id", "display_kind",
                    "display_metadata", "api_content", "finish_reason", "tool_calls", "reasoning", "reasoning_content",
                    "reasoning_details", "codex_reasoning_items", "codex_message_items", "gemini_content",
@@ -204,40 +211,86 @@ def load_groups(conn: sqlite3.Connection) -> dict:
 
 
 def derive_route(row: SessionRow, delegation: Optional[Mapping[str, Any]]) -> Optional[dict]:
-    """A credential-free route ``{provider, model, reasoning_effort?, fallback_providers?, endpoint_sha256?}``."""
+    """The credential-free stored route of a delegate conversation's segment, in the unified shape
+    (``agent.session_routes.legacy_route``: ``{v, kind, provider, model, endpoint_sha256?, ...}``), or None.
+
+    A retained child's legacy ``delegate_sessions`` record wins (its ``route_descriptor`` already carries the
+    normalized endpoint digest of an unnamed provider); a non-retained child uses its own ``model_config``.
+    A named provider is re-resolved by name on resume (never pinned to the endpoint it last ran on); an
+    unnamed one without a saved identity gets no route, so resume keeps its legacy refusal."""
+    from agent.session_routes import legacy_route
     runtime_raw = row.config.get("gateway_runtime")
     runtime: dict = runtime_raw if isinstance(runtime_raw, dict) else {}
     record: Mapping[str, Any] = delegation or {}
-    descriptor = _json_obj(record.get("route_descriptor"))
-    provider = (record.get("provider") or descriptor.get("provider") or row.config.get("provider")
-                or runtime.get("provider") or row["billing_provider"])
+    descriptor = _json_obj(record.get("route_descriptor")) if delegation is not None else None
+    provider = (record.get("provider") or row.config.get("provider") or runtime.get("provider")
+                or row["billing_provider"])
     model = record.get("model") or row.config.get("model") or row["model"]
-    if not (isinstance(provider, str) and provider and isinstance(model, str) and model):
+    if not (isinstance(model, str) and model):
         return None
-    route: dict = {"provider": provider, "model": model}
     reasoning = row.config.get("reasoning_config")
-    if isinstance(reasoning, dict) and reasoning.get("enabled") and isinstance(reasoning.get("effort"), str):
-        route["reasoning_effort"] = reasoning["effort"]
-    fallbacks = descriptor.get("fallback_providers")
-    if isinstance(fallbacks, list):
-        route["fallback_providers"] = [{k: f[k] for k in ("provider", "model") if isinstance(f, dict) and f.get(k)}
-                                       for f in fallbacks if isinstance(f, dict)]
-    base_url = row.config.get("base_url") or runtime.get("base_url") or row["billing_base_url"]
-    if isinstance(base_url, str) and base_url:
-        route["endpoint_sha256"] = hashlib.sha256(base_url.encode()).hexdigest()
-    return route
+    effort = reasoning if isinstance(reasoning, dict) and (reasoning.get("enabled") is False or (
+        reasoning.get("enabled") and isinstance(reasoning.get("effort"), str))) else None
+    return legacy_route(descriptor, provider=provider if isinstance(provider, str) else None, model=model,
+                        reasoning_effort=effort)
 
 
-def _status(row: SessionRow, delegation: Optional[Mapping[str, Any]]) -> Optional[str]:
+def logical_tip(sid: str, sessions: Mapping[str, SessionRow], kinds: Mapping[str, Optional[str]]) -> Optional[str]:
+    """The execution tip of *sid*'s compression lineage, picked like ``agent.session_directory.chain``
+    (a further-compressed continuation first, then an open one, then the most recent); None when a
+    compressed segment has no continuation left."""
+    cur, seen = sid, {sid}
+    while sessions[cur]["end_reason"] == "compression":
+        nxt = [c for c in sessions[cur].children if kinds.get(c) == "continuation" and c not in seen]
+        if not nxt:
+            return None
+
+        def order(child: str) -> tuple:
+            row = sessions[child]
+            rank = 0 if row["end_reason"] == "compression" else 1 if row["ended_at"] is None else 2
+            active = row["last_activity_at"] or row["ended_at"] or row["started_at"] or 0
+            return (-rank, active, row["started_at"] or 0, child)
+        cur = max(nxt, key=order)
+        seen.add(cur)
+    return cur
+
+
+def _status(sid: str, sessions: Mapping[str, SessionRow], kinds: Mapping[str, Optional[str]],
+            delegations: Mapping[str, Any]) -> Optional[str]:
+    """The LOGICAL status of *sid*'s conversation (never a segment's own end): a retained child's
+    ``delegate_sessions`` status on every segment it keys (the canonical child id stays usable while its
+    tip is idle), ``closed`` once the conversation's tip has ended, else None (left unstamped)."""
+    delegation = delegations.get(sid)
     if delegation is not None:
-        if delegation["current_session_id"] == row["id"]:
-            return delegation["status"]
+        return delegation["status"]
+    row = sessions[sid]
+    if row["ended_at"] is None:
+        return None
+    if row["end_reason"] != "compression":
         return "closed"
-    return "closed" if row["ended_at"] is not None else None
+    tip = logical_tip(sid, sessions, kinds)
+    if tip is None:
+        return "closed"  # the compression tip is gone: nothing can run this conversation again
+    if tip in delegations:
+        return delegations[tip]["status"]
+    return "closed" if sessions[tip]["ended_at"] is not None else None
 
 
 def _dumps(value: Any) -> Optional[str]:
     return None if value is None else json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _delegate_conversation(sid: str, sessions: Mapping[str, SessionRow], kinds: Mapping[str, Optional[str]]) -> bool:
+    return kinds.get(conversation_origin(sid, sessions, kinds)) == "delegate"
+
+
+def delegate_brief(delegation: Mapping[str, Any]) -> dict:
+    """The unified ``model_config._delegate_brief`` of a retained legacy child (what
+    ``DelegateSessionStore.register`` writes, plus the record's latest ``assignment``)."""
+    initial = str(delegation.get("initial_goal") or "")
+    return {"title": str(delegation.get("title") or "") or " ".join(initial.split())[:80] or "Delegated task",
+            "initial_goal": initial, "assignment": str(delegation.get("assignment") or initial),
+            "context": str(delegation.get("context") or ""), "retain": True}
 
 
 def derive_session_fields(sid: str, sessions: Mapping[str, SessionRow], kinds: Mapping[str, Optional[str]],
@@ -245,14 +298,20 @@ def derive_session_fields(sid: str, sessions: Mapping[str, SessionRow], kinds: M
     row = sessions[sid]
     root, depth = _topology(sid, sessions, kinds, memo)
     delegation = delegations.get(sid)
+    route = derive_route(row, delegation) if _delegate_conversation(sid, sessions, kinds) else None
     fields = {"root_session_id": root, "depth": depth, "lineage_kind": kinds.get(sid), "group_id": groups.get(sid),
-              "status": _status(row, delegation), "route": _dumps(derive_route(row, delegation))}
+              "status": _status(sid, sessions, kinds, delegations), "route": _dumps(route)}
     if delegation is not None:
         fields["role"] = delegation.get("role")
         fields["workspace"] = delegation.get("workspace")
         if delegation.get("forked_context"):
             fields["fork_origin"] = _dumps({"session_id": delegation["owner_session_id"], "message_uid": None,
                                             "policy": "legacy_forked_context"})
+        if delegation["session_id"] == sid:
+            parent = row["parent_session_id"] or delegation.get("owner_session_id")
+            if parent:
+                from gateway.delivery_targets import delegate_target, encode_delivery_target
+                fields["delivery_target"] = encode_delivery_target(delegate_target(parent))
     return fields
 
 
@@ -261,14 +320,27 @@ class SessionPlan:
     updates: dict  # sid -> {column: value}
     counts: Counter
     kinds: dict
+    briefs: dict = field(default_factory=dict)  # sid -> model_config._delegate_brief (set when absent)
 
 
 def plan_sessions(conn: sqlite3.Connection, sessions: Mapping[str, SessionRow]) -> SessionPlan:
     kinds = {sid: lineage_kind(row, sessions) for sid, row in sessions.items()}
     delegations, groups, memo = load_delegations(conn), load_groups(conn), {}
-    updates, counts = {}, Counter()
+    for sid, record in delegations.items():
+        # A retained child's own row is a delegate spawn even when its marker was never written.
+        if record["session_id"] == sid and sid in sessions and kinds.get(sid) is None \
+                and sessions[sid]["parent_session_id"]:
+            kinds[sid] = "delegate"
+    updates, briefs, counts = {}, {}, Counter()
     for sid, row in sessions.items():
         derived = derive_session_fields(sid, sessions, kinds, memo, delegations, groups)
+        record = delegations.get(sid)
+        if record is not None and record["session_id"] == sid and "_delegate_brief" not in row.config:
+            if row["model_config"] in (None, "") or _json_obj(row["model_config"]) or row["model_config"] == "{}":
+                briefs[sid] = delegate_brief(record)
+                counts["set_delegate_brief"] += 1
+            else:
+                counts["conflict_model_config_unreadable"] += 1
         change = {}
         for column, value in derived.items():
             if value is None:
@@ -282,13 +354,12 @@ def plan_sessions(conn: sqlite3.Connection, sessions: Mapping[str, SessionRow]) 
         if change:
             updates[sid] = change
         counts[f"lineage_kind={kinds[sid]}"] += 1
-        record = delegations.get(sid)
         if record is not None and record.get("current_session_id") == sid and derived["depth"] is not None \
                 and record.get("depth") != derived["depth"]:
             counts["depth_disagrees_with_delegate_sessions"] += 1
     counts["sessions_total"] = len(sessions)
-    counts["sessions_changed"] = len(updates)
-    return SessionPlan(updates, counts, kinds)
+    counts["sessions_changed"] = len(set(updates) | set(briefs))
+    return SessionPlan(updates, counts, kinds, briefs)
 
 
 # ── scope ─────────────────────────────────────────────────────────────────────
@@ -491,6 +562,10 @@ def _apply_sessions(conn: sqlite3.Connection, plan: SessionPlan) -> None:
         columns = sorted(change)
         assignments = ", ".join(f"{col} = COALESCE({col}, ?)" for col in columns)
         conn.execute(f"UPDATE sessions SET {assignments} WHERE id = ?", [change[c] for c in columns] + [sid])
+    for sid, brief in plan.briefs.items():
+        conn.execute("UPDATE sessions SET model_config = json_set(COALESCE(NULLIF(model_config, ''), '{}'), "
+                     "'$._delegate_brief', json(?)) WHERE id = ? AND json_extract(COALESCE(NULLIF(model_config, ''), "
+                     "'{}'), '$._delegate_brief') IS NULL", (_dumps(brief), sid))
 
 
 def _apply_messages(conn: sqlite3.Connection, plan: MessagePlan, scope: set) -> None:
