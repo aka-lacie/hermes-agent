@@ -1076,7 +1076,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         first_by_uid.setdefault(uid, key)
         return key
 
-    def _dedupe_display_generations(self, rows, *, drop_removed: bool = False):
+    def _dedupe_display_generations(self, rows, *, drop_removed: bool = False) -> list[Any]:
         """Collapse compaction generations so each logical message appears once (the protected tail is copied
         into each generation: same role/content/timestamp, different ``active``/id); prefer the live row, then
         the newest. The ONE definition every display projection shares. *rows* must be ordered by ``id``.
@@ -1085,6 +1085,11 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         newer copy) and ``compacted``. A message whose newest copy is removed is not shown, so a rewind in a
         compression child never brings back the parent's copy. Copies share the display key or ``message_uid``
         (a micro-compaction merge also stands for the rows it absorbed)."""
+        return [row for _, row in self._dedupe_display_generations_ordered(rows, drop_removed=drop_removed)]
+
+    def _dedupe_display_generations_ordered(self, rows, *, drop_removed: bool = False) -> list[tuple[int, Any]]:
+        """:meth:`_dedupe_display_generations` as ``(first row id, representative)`` pairs: the first id is the
+        logical message's order key (what a bounded tail read needs to prove its window complete)."""
         seen: dict[tuple[Any, ...], Any] = {}
         first_id: dict[tuple[Any, ...], int] = {}
         uid_key: dict[Any, tuple[Any, ...]] = {}  # message_uid -> the display key of its first copy
@@ -1129,7 +1134,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         keys = sorted(seen, key=first_id.__getitem__)
         if drop_removed:
             keys = [key for key in keys if not any(removed[copy] for copy in identities[key])]
-        return [seen[key] for key in keys]
+        return [(first_id[key], seen[key]) for key in keys]
 
     def _reconcile_display_orders(self, conn, session_id: str) -> None:
         """Re-fold split display generations by the recomputed display key.
@@ -1328,6 +1333,11 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
             # (display_order is per-segment and not comparable across segments, so the per-segment
             # display_order paging below does not apply across a lineage.)
             display = include_compacted and not include_inactive  # removed rows too: see drop_removed
+            if latest and limit is not None and not display:
+                # Newest-N: a bounded, identity-aware tail window instead of the whole lineage (review R9).
+                rows = self._lineage_tail_rows(session_ids, active_clause, limit + offset)
+                rows = rows[::-1][offset:][:limit][::-1]
+                return [self._row_to_message_dict(row, warn_context="get_messages", summary_flag=True) for row in rows]
             rows = self._read_all(f"SELECT * FROM messages WHERE session_id IN ({_placeholders(session_ids)})"
                                   + active_clause + " ORDER BY id ASC", session_ids)
             rows = self._dedupe_display_generations(
@@ -1355,6 +1365,166 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
             if latest:
                 rows.reverse()
         return [self._row_to_message_dict(row, warn_context="get_messages", summary_flag=True) for row in rows]
+
+    # Columns a bounded tail preview reads (no reasoning / api_content / provider items): what dedupe and
+    # ``agent.session_views.message_view`` use. Bodies longer than head+tail are read as head + "\n" + tail.
+    _TAIL_PREVIEW_COLUMNS = (
+        "id", "session_id", "role", "tool_call_id", "tool_calls", "tool_name", "timestamp", "_compressed_summary",
+        "active", "compacted", "display_kind", "display_metadata", "display_identity", "display_order", "message_uid",
+        "absorbed_message_uids", "sender_kind", "sender_id", "part_kind", "parts_json")
+    _TAIL_PREVIEW_HEAD = 1200
+    _TAIL_PREVIEW_TAIL = 1200
+
+    def _tail_columns(self, conn, preview: bool, *, bounded: Optional[str]) -> str:
+        """The select list of a tail read: ``*``, or the preview columns with *bounded* (a SQL condition, or
+        None for full bodies) deciding which bodies are read head/tail-bounded."""
+        if not preview:
+            return "*"
+        if not getattr(self, "_message_columns_cache", None):
+            # Same names PRAGMA table_info gives, from a zero-row statement (no row per column).
+            self._message_columns_cache = [d[0] for d in conn.execute("SELECT * FROM messages LIMIT 0").description]
+        present = set(self._message_column_names(conn))
+        cols = [c for c in self._TAIL_PREVIEW_COLUMNS if c in present]
+        if bounded is None:
+            cols += ["content", "length(content) AS _content_len", "0 AS _bounded"]
+        else:
+            cols += [f"CASE WHEN {bounded} THEN substr(content, 1, :head) || char(10) || substr(content, -:tail) "
+                     "ELSE content END AS content", "length(content) AS _content_len",
+                     f"CASE WHEN {bounded} THEN 1 ELSE 0 END AS _bounded"]
+        return ", ".join(cols)
+
+    def _preview_bounded_sql(self, *, twins: bool, active_clause: str) -> str:
+        """Read a body head/tail-bounded only when it is long, plain text and (*twins*) has no same-timestamp
+        twin in the lineage: a twin's body is part of its display identity, a lone row's never decides one."""
+        cond = "length(content) > :head + :tail + 1 AND substr(content, 1, 6) IS NOT :prefix"
+        if twins:
+            cond += (" AND NOT EXISTS (SELECT 1 FROM messages t WHERE t.session_id IN (SELECT value FROM json_each(:sids))"
+                     f"{active_clause.replace('active', 't.active').replace('compacted', 't.compacted')} "
+                     "AND t.timestamp = messages.timestamp AND t.id != messages.id)")
+        return cond
+
+    def _lineage_tail_rows(self, session_ids: list[str], active_clause: str, need: int, *,
+                           preview: bool = False) -> list[dict[str, Any]]:
+        """The last *need* entries of ``_dedupe_display_generations`` over the lineage's rows (all of it when
+        shorter), without reading the lineage (review R9).
+
+        One statement reads the newest W rows (``ORDER BY id DESC LIMIT`` per segment, index-served) plus every
+        older row sharing a timestamp with them (``idx_messages_session``): every display key carries its row's
+        timestamp, so these are the only rows that can be another copy of a window message. A message whose
+        copies all sit in the window ("pure") has exact order and representative; all pure messages follow
+        every other, so when at least *need* are pure the tail is exact. Otherwise (copies straddle the window
+        edge, or it holds summary carriers whose uid folds elsewhere) the closure is fetched or W grows; a
+        window that reaches the lineage's start is the full read. Never LIMITs before dedupe."""
+        if need <= 0:
+            return []
+        prefix = self._CONTENT_JSON_PREFIX
+
+        def read(conn):
+            window = max(2 * need, need + 16)
+            sids = json.dumps(list(session_ids))
+            full = self._tail_columns(conn, preview, bounded=None)
+            win = self._tail_columns(conn, preview, bounded=self._preview_bounded_sql(
+                twins=True, active_clause=active_clause)) if preview else full
+            base = {"sids": sids, "head": self._TAIL_PREVIEW_HEAD, "tail": self._TAIL_PREVIEW_TAIL, "prefix": prefix}
+            while True:
+                segments = " UNION ALL ".join(
+                    f"SELECT * FROM (SELECT {win} FROM messages WHERE session_id = :s{i}{active_clause} "
+                    "ORDER BY id DESC LIMIT :w)" for i in range(len(session_ids)))
+                params = {**base, "w": window, **{f"s{i}": sid for i, sid in enumerate(session_ids)}}
+                fetched = [dict(r) for r in conn.execute(
+                    f"WITH top AS (SELECT * FROM ({segments}) ORDER BY id DESC LIMIT :w) "
+                    "SELECT 1 AS _in_window, top.* FROM top UNION ALL "
+                    f"SELECT 0, {full} FROM messages WHERE session_id IN (SELECT value FROM json_each(:sids))"
+                    f"{active_clause} AND id < (SELECT MIN(id) FROM top) AND timestamp IN (SELECT timestamp FROM top)",
+                    params).fetchall()]
+                in_window = [r for r in fetched if r["_in_window"]]
+                if not in_window:
+                    return []
+                exhaustive = len(in_window) < window
+                edge = min(r["id"] for r in in_window)
+                combined = {r["id"]: r for r in fetched}
+                if not exhaustive:
+                    self._tail_carrier_closure(conn, combined, full, active_clause, edge, base)
+                ordered = self._dedupe_display_generations_ordered(sorted(combined.values(), key=lambda r: r["id"]))
+                if exhaustive:
+                    return [row for _, row in ordered][-need:]
+                pure = [row for first, row in ordered if first >= edge]
+                if len(pure) >= need:
+                    return pure[-need:]
+                window *= 4
+
+        rows = self._read_retrying_ioerr(read)
+        for row in rows:
+            row.pop("_in_window", None)
+        return rows
+
+    def _tail_carrier_closure(self, conn, combined: dict, cols: str, active_clause: str, edge: int, base: dict) -> None:
+        """Add the older rows a summary carrier in *combined* folds into (its uid's first copy, by uid) and their
+        timestamp twins, until no carrier is left unresolved (compaction carriers are rare: usually no read)."""
+        done_uids: set = set()
+        done_ts = {r["timestamp"] for r in combined.values()}
+        while True:
+            uids = {r["message_uid"] for r in combined.values() if r["_compressed_summary"] and r["message_uid"]} - done_uids
+            if not uids:
+                return
+            done_uids |= uids
+            extra = [dict(r) for r in conn.execute(
+                f"SELECT 0 AS _in_window, {cols} FROM messages WHERE session_id IN (SELECT value FROM json_each(:sids))"
+                f"{active_clause} AND id < :edge AND message_uid IN (SELECT value FROM json_each(:uids))",
+                {**base, "edge": edge, "uids": json.dumps(sorted(uids))}).fetchall()]
+            stamps = {r["timestamp"] for r in extra} - done_ts
+            if stamps:
+                done_ts |= stamps
+                extra += [dict(r) for r in conn.execute(
+                    f"SELECT 0 AS _in_window, {cols} FROM messages WHERE session_id IN (SELECT value FROM json_each(:sids))"
+                    f"{active_clause} AND id < :edge AND timestamp IN (SELECT value FROM json_each(:stamps))",
+                    {**base, "edge": edge, "stamps": json.dumps(sorted(stamps))}).fetchall()]
+            for row in extra:
+                combined.setdefault(row["id"], row)
+
+    def get_lineage_tail_preview(self, session_id: str, limit: int) -> list[dict[str, Any]]:
+        """``get_messages(session_id, include_ancestors=True, limit=limit, latest=True)`` for previews
+        (``agent.session_directory.observe``): the same messages, in the same order, but only the columns a
+        preview needs, and a long plain-text body as its head + ``"\\n"`` + tail (``_content_chars`` keeps the
+        body's real length; ``agent.session_views.message_view`` clips it exactly as the whole body)."""
+        if limit is None or int(limit) <= 0:
+            return []
+        limit = int(limit)
+        session_ids = self._resume_lineage_ids(session_id)
+        if len(session_ids) > 1:
+            rows = self._lineage_tail_rows(session_ids, " AND active = 1", limit, preview=True)
+        else:
+            def read(conn):
+                cols = self._tail_columns(conn, True, bounded=self._preview_bounded_sql(twins=False, active_clause=""))
+                return [dict(r) for r in conn.execute(
+                    f"SELECT {cols} FROM messages WHERE session_id = :sid AND active = 1 ORDER BY id DESC LIMIT :limit",
+                    {"sid": session_id, "limit": limit, "head": self._TAIL_PREVIEW_HEAD, "tail": self._TAIL_PREVIEW_TAIL,
+                     "prefix": self._CONTENT_JSON_PREFIX}).fetchall()][::-1]
+            rows = self._read_retrying_ioerr(read)
+        self._unbound_short_previews(rows)
+        out = []
+        for row in rows:
+            bounded, length = row.pop("_bounded", 0), row.pop("_content_len", None)
+            msg = self._row_to_message_dict(row, warn_context="get_lineage_tail_preview", summary_flag=True)
+            if bounded:
+                msg["_content_chars"] = int(length)
+            out.append(msg)
+        return out
+
+    def _unbound_short_previews(self, rows: list[dict[str, Any]]) -> None:
+        """Re-read the whole body of a bounded row whose head or tail flattens too short for an exact clip
+        (whitespace-heavy bodies): the preview contract is the clip of the WHOLE body."""
+        head_cap, tail_cap = self._TAIL_PREVIEW_HEAD, self._TAIL_PREVIEW_TAIL
+        short = [row["id"] for row in rows if row.get("_bounded") and (
+            len(" ".join(str(row["content"])[:head_cap].split())) <= 320
+            or len(" ".join(str(row["content"])[head_cap + 1:head_cap + 1 + tail_cap].split())) <= 120)]
+        if not short:
+            return
+        bodies = {r[0]: r[1] for r in self._read_all(
+            "SELECT id, content FROM messages WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(short),))}
+        for row in rows:
+            if row["id"] in bodies:
+                row["content"], row["_bounded"] = bodies[row["id"]], 0
 
     def find_pr_url_messages(self, session_ids: list[str]) -> list[dict[str, Any]]:
         """Tool results containing ``/pull/``: a deliberately loose scan, oldest-first so the caller takes the last."""
@@ -1640,16 +1810,17 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         session = self.get_session(session_id)
         if not session or self._is_explicit_fork_child_row(session):
             return [session_id]
-        # _is_compression_child_row is the per-hop gate: the child must not be an explicit
-        # branch/delegate/tool child AND its parent must have ended 'compression'.
+        # The per-hop gate is _is_compression_child_row (the child is not an explicit branch/delegate/reset/tool
+        # child AND its parent ended 'compression'), inlined so each hop reads its parent once.
         chain = [session_id]
         current = session
         seen = {session_id}
         while len(chain) < 100:  # defensive bound, same as _session_lineage_root_to_tip
-            if not self._is_compression_child_row(current):
+            parent_id = current.get("parent_session_id")
+            if not parent_id or self._is_explicit_fork_child_row(current, include_reset=True):
                 break
-            parent = self.get_session(current["parent_session_id"])
-            if not parent or parent["id"] in seen:
+            parent = self.get_session(parent_id)
+            if not parent or parent.get("end_reason") != "compression" or parent["id"] in seen:
                 break
             seen.add(parent["id"])
             chain.append(parent["id"])
