@@ -17,7 +17,8 @@ compact by construction (``agent.session_views``); policy beyond that belongs to
   + 1 (1 when the caller's current turn was not peer-triggered); above :data:`PEER_HOP_MAX` it is refused
   with :class:`SessionAdmissionError` ``peer_hop_limit``. Returns a small receipt dict.
   ``request_id`` makes the call idempotent: an exact retry (same caller, target, text, kind, meta,
-  intent) returns the original admission's receipt; the same ``request_id`` with a different request is
+  intent) returns the original admission's receipt, also when it overlaps the first call (the store
+  reconciles both inside the admission transaction); the same ``request_id`` with a different request is
   refused ``request_conflict``. Store refusals surface as :class:`SessionAdmissionError` too, never raw.
 - ``resolve(selector, profile=None)``: the session a logical selector names right now, or None.
 

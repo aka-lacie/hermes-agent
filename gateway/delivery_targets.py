@@ -391,19 +391,27 @@ def _same_request(stored: Mapping[str, Any], fresh: Mapping[str, Any]) -> bool:
     return strip(stored) == strip(fresh)
 
 
+def _same_payload(stored_payload: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    """*payload* is the caller's same request as the admitted *stored_payload*: every caller-supplied
+    field (text, kind, meta, sender identity, source event, hop) is equal; only the producer-generated
+    event fields may differ. The store asks this inside the admission transaction (``_same_request``)."""
+    if not isinstance(stored_payload, Mapping) or not isinstance(payload, Mapping):
+        return False
+    stored, fresh = event_from_payload(stored_payload), payload.get(EVENT_PAYLOAD_KEY)
+    if stored is None or not isinstance(fresh, Mapping) or not _same_request(stored, fresh):
+        return False
+    return ({k: v for k, v in stored_payload.items() if k != EVENT_PAYLOAD_KEY}
+            == {k: v for k, v in payload.items() if k != EVENT_PAYLOAD_KEY})
+
+
 def _exact_retry(db, principal: str, session_id: str, request: str, payload: dict, intent: str) -> Optional[dict]:
     """The payload of an exact semantic retry of an already-admitted *request*: the stored one (its
-    original ``sent_at``), so the admission digest matches and the original receipt is returned. None
-    when the request is new, or differs in substance (that conflict is the store's to refuse)."""
+    original ``sent_at``). None when the request is new, or differs in substance (that conflict is
+    the store's to refuse). A read before the write: it only routes a known retry past folding; the
+    store's in-transaction ``_same_request`` check is what makes overlapping first requests agree."""
     from hermes_state_runtime import find_session_admission
     existing = find_session_admission(db, principal_id=principal, session_id=session_id, request_id=request)
-    if existing is None or existing.get("intent") != intent:
-        return None
-    stored, fresh = event_from_payload(existing["payload"]), payload.get(EVENT_PAYLOAD_KEY)
-    if stored is None or not isinstance(fresh, Mapping) or not _same_request(stored, fresh):
-        return None
-    if {k: v for k, v in existing["payload"].items() if k != EVENT_PAYLOAD_KEY} != \
-            {k: v for k, v in payload.items() if k != EVENT_PAYLOAD_KEY}:
+    if existing is None or existing.get("intent") != intent or not _same_payload(existing["payload"], payload):
         return None
     return existing["payload"]
 
@@ -429,7 +437,8 @@ def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optio
     payload = event.payload()
     intent = intent if intent in ("queue", "steer") else "queue"
     replaced = None
-    retry = _exact_retry(db, principal, session_id, request, payload, intent) if (request_id or event.source_event_id) else None
+    caller_request = bool(request_id or event.source_event_id)
+    retry = _exact_retry(db, principal, session_id, request, payload, intent) if caller_request else None
     if retry is not None:
         payload = retry  # the original bytes: the store replays the existing admission
     elif event.fold_key:
@@ -449,10 +458,13 @@ def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optio
     if replaced is not None:
         binding = replacement_binding(principal, session_id, request)
         guard = lambda conn: retire_replaced_input(conn, replaced["admission_id"], binding)
+    # A caller-identified request that overlaps its own first admission (both read no admission
+    # above) is reconciled in the admission transaction: same caller request -> the original receipt.
+    same_request = _same_payload if caller_request and replaced is None else None
     try:
         row = admit_session_input(db, epoch=epoch, principal_id=principal, session_id=session_id, request_id=request,
                                   payload=payload, _authorize_write=guard, wake_policy=wake_policy,
-                                  intent=intent)
+                                  intent=intent, _same_request=same_request)
     except RuntimeStoreError as exc:
         if replaced is None or exc.reason != "admission_started":
             raise

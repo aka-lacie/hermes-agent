@@ -129,7 +129,8 @@ ADMISSION_QUEUE_MAX = 32
 
 def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
                         request_id: str, payload: dict, intent: str = 'queue',
-                        _authorize_write=None, _replay_guard=None, wake_policy: str | None = None) -> dict:
+                        _authorize_write=None, _replay_guard=None, wake_policy: str | None = None,
+                        _same_request=None) -> dict:
     """Admit input; the trusted private guard raises to refuse a NEW write.
 
     The guard receives the owning transaction connection, must not commit it or
@@ -139,6 +140,14 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
     transaction (a replacement's binding to the admission it retired).
     ``wake_policy`` ``batch_with_next_user_turn`` holds the row for the next user turn
     (``hermes_state_wake``); None/``immediate`` is an ordinary FIFO entry.
+
+    ``_same_request(stored_payload, payload) -> bool`` is the producer's semantic equality for a
+    request whose payload carries producer-generated fields (an event's ``sent_at``). It runs inside
+    the admission transaction, only when this identity's existing admission has the same intent but
+    another payload digest: True replays that admission (its original payload and receipt; the
+    stored digest stays the fingerprint of the stored bytes), False is the ordinary
+    ``admission_conflict``. Both payloads are given in their canonical JSON form. Two overlapping
+    first requests are thus reconciled under the write lock, not by a read before it.
     """
     for value in (principal_id, session_id, request_id):
         _text(value)
@@ -159,7 +168,9 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
         old = conn.execute('''SELECT * FROM session_admissions
             WHERE principal_id=? AND target_session_id=? AND request_id=?''', (principal_id, session_id, request_id)).fetchone()
         if old is not None:
-            if old['payload_digest'] != digest:
+            if old['payload_digest'] != digest and not (
+                    _same_request is not None and old['intent'] == intent
+                    and _same_request(json.loads(old['payload_json']), json.loads(encoded))):
                 raise RuntimeStoreError('admission_conflict', **ADMITTED_REQUEST_CONFLICT)
             if _replay_guard is not None:
                 _replay_guard(conn)
