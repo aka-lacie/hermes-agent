@@ -143,17 +143,21 @@ def message_view(message: Mapping[str, Any]) -> dict:
     role = str(message.get("role") or "")
     out: dict[str, Any] = {"role": role, "kind": message_kind(message)}
     content = _text(message.get("content"))
+    # A head/tail-bounded read (``SessionDB.get_lineage_tail_preview``) keeps the body's true length here;
+    # its preview text is built so the clips below come out exactly as from the whole body.
+    chars = message.get("_content_chars")
+    chars = int(chars) if isinstance(chars, int) else len(content)
     if role == "tool":
         if message.get("tool_name"):
             out["tool"] = clip_head(message["tool_name"], 48)
         out["text"] = clip(content, RESULT_CAP)
-        if len(content) > RESULT_CAP:
-            out["chars"] = len(content)
+        if chars > RESULT_CAP:
+            out["chars"] = chars
     else:
         if content.strip():
             out["text"] = clip(content, TEXT_CAP)
             if len(one_line(content)) > TEXT_CAP:
-                out["chars"] = len(content)
+                out["chars"] = chars
         calls = message.get("tool_calls") if role == "assistant" else None
         if isinstance(calls, list) and calls:
             summaries = [s for s in (call_summary(c) for c in calls[:CALLS_PER_MESSAGE]) if s]
@@ -234,15 +238,16 @@ def _size(value: Any) -> int:
 
 def children_rollup(records: Iterable[Mapping[str, Any]], latest: Callable[[Mapping[str, Any]], Optional[str]],
                     *, inherit_model: Optional[str] = None, max_children: int = CHILDREN_MAX,
-                    budget: int = CHILDREN_BUDGET) -> dict:
+                    budget: int = CHILDREN_BUDGET, total: Optional[int] = None) -> dict:
     """``{"children": [...], ["children_total": n]}``: running first, then most recent activity; per child only
     ``session_id, title, model, status, last_activity_at`` and a one-line ``latest`` step (``model`` omitted
     when it is *inherit_model*, the observed session's own). The serialized roll-up stays within *budget*
     bytes: ``latest`` previews shrink first (never below ``CHILD_LATEST_MIN``), then the least recent rows go
-    (``children_total`` still counts them)."""
+    (``children_total`` still counts them). *total*: how many children exist when *records* is already the
+    SQL-selected head of them (``agent.session_directory`` selects at most *max_children* before hydrating)."""
     ordered = sorted(records, key=lambda r: (r.get("status") != "running", -(float(r.get("last_activity_at") or 0)),
                                              str(r.get("session_id"))))
-    total = len(ordered)
+    total = len(ordered) if total is None else max(int(total), len(ordered))
     rows = []
     for record in ordered[:max_children]:
         row = {"session_id": record["session_id"], "title": clip_head(record.get("title"), CHILD_TITLE_CAP)}

@@ -458,13 +458,13 @@ def test_acl_denies_non_descendants_and_admits_delivery_targets(state):
     with pytest.raises(DelegateSessionError):
         store.get("stranger", "inbox")
     # The ACL is pluggable (worker C exposes it on ctx.sessions).
-    previous = directory.set_session_acl(lambda db_, conn, caller, row: row["id"] == "theirs")
+    previous = directory.set_session_acl(lambda db_, conn, caller, row: row["id"] == "theirs", scope=db)
     try:
         assert store.get("parent", "theirs")["session_id"] == "theirs"
         with pytest.raises(DelegateSessionError):
             store.get("parent", "mine")
     finally:
-        directory.set_session_acl(previous)
+        directory.set_session_acl(previous, scope=db)
 
 
 def test_main_resumes_a_webhook_session_delivering_to_it_through_its_owner_sink(state):

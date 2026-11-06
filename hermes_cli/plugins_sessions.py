@@ -10,8 +10,8 @@ keyword ``caller_session_id`` (a plugin tool handler receives it as its ``sessio
   kind=None, meta=None, wake_policy=None, request_id=None)``: refusals raise ``SessionAdmissionError``
   (``.code``, ``.to_dict()``), e.g. ``peer_hop_limit`` past ``PEER_HOP_MAX``
 - ``resolve(selector, *, profile=None)``
-- ``set_acl(policy, *, action="observe"|"peer")``: replace an ACL (``agent.session_directory``); the
-  previous one is restored when the plugin unloads.
+- ``set_acl(policy, *, action="observe"|"peer")``: stack an ACL for this profile's database only
+  (``agent.session_directory.install_session_acl``, a generation lease); the plugin's unload disposes it.
 
 Policy stays pluggable: nothing here hardcodes ``caller == parent``.
 """
@@ -26,6 +26,7 @@ class PluginSessions:
     def __init__(self, ctx: Any = None, *, db_path: Any = None):
         from agent.sessions_api import PEER_HOP_MAX, SessionAdmissionError
         self._ctx, self._db_path = ctx, db_path
+        self._leases: list = []  # this facade's ACL generations (agent.session_directory.AclLease)
         self.PEER_HOP_MAX = PEER_HOP_MAX
         self.SessionAdmissionError = SessionAdmissionError
 
@@ -68,11 +69,20 @@ class PluginSessions:
             return api.resolve(selector, profile=profile)
 
     def set_acl(self, policy: Optional[Callable[..., bool]], *, action: str = "observe") -> Callable[..., bool]:
+        """Install *policy* for *action* on THIS facade's profile database only (the explicit ``db_path``, else
+        the current profile's ``state.db`` at install time), as a generation lease the plugin's unload
+        disposes. Other profiles never see it, and unloading plugins in any order leaves the newest
+        still-loaded plugin's policy (or the base/default) in force. Returns the policy it shadows."""
         from agent import session_directory as directory
-        previous = directory.set_session_acl(policy, action=action)
-        if self._ctx is not None and hasattr(self._ctx, "on_unload"):
-            def restore(installed=directory.get_session_acl(action)):
-                if directory.get_session_acl(action) is installed:
-                    directory.set_session_acl(previous, action=action)
-            self._ctx.on_unload(restore)
+        scope = directory.acl_scope(self._db_path)
+        previous = directory.get_session_acl(action, scope=scope)
+        owner = getattr(self._ctx, "plugin_id", None) if self._ctx is not None else None
+        lease = directory.install_session_acl(policy, action=action, scope=scope, owner=owner)
+        if self._ctx is not None:
+            track = getattr(self._ctx, "_track", None)
+            if callable(track):
+                track("session_acl", f"{action}@{scope}", lease.dispose)
+            elif hasattr(self._ctx, "on_unload"):
+                self._ctx.on_unload(lease.dispose)
+        self._leases.append(lease)
         return previous

@@ -18,8 +18,21 @@ top-level list: each row carries only the integers ``running_children`` / ``chil
 a child carries a compact roll-up of its sub-children (``agent.session_views``), and ``scope="tree"``
 expands the caller's whole subtree.
 
-Policy is pluggable: :func:`set_session_acl` replaces the default ACL (the caller may reach its descendants
-and sessions whose ``delivery_target`` names it); ``set_session_acl(policy, action="peer")`` replaces the
+**Bounded work (review R8/R9).** Candidate selection, Freya's semantic filter, the closed filter, the
+activity ordering and ``LIMIT`` all run in ONE SQL statement over indexed arms (``parent_session_id``,
+``attached_session_id`` and the expression indexes on ``delivery_target``'s ``session_id`` / ``selector``);
+only the returned rows are hydrated, in the same statement, through correlated per-row subqueries
+(compression segments, latest message timestamp per segment, running/queued admissions through
+``session_admissions_pending``, the latest parent assignment through ``(target_session_id, seq)`` DESC
+LIMIT 1, grandchild roll-up counts). Nothing reads a transcript or an admission history in Python, and the
+statement count of a list does not depend on how many children, grandchildren or messages exist.
+
+Policy is pluggable **per profile database** (review R6/R7): :func:`set_session_acl` replaces the base ACL
+of one scope (a profile's ``state.db``; default: the current profile's) and :func:`install_session_acl`
+stacks a generation lease on top of it (what ``ctx.sessions.set_acl`` uses; plugin unload disposes the
+lease). The effective policy of a scope is its newest live lease, else its base, else the default; a
+lookup always uses the scope of the database it authorizes against, so profile A's widening never reaches
+profile B, and disposing leases in any order never resurrects a retired policy. ``action="peer"`` is the
 peer-admission ACL (default: siblings only: same parent conversation, both delegate sessions). The
 primitives here take ``caller_session_id`` and apply only those ACLs plus the store's own safety rules;
 nothing hardcodes ``caller == parent``.
@@ -27,9 +40,14 @@ nothing hardcodes ``caller == parent``.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
+import os
 import sqlite3
+import threading
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -39,23 +57,25 @@ OPT_IN_KINDS = frozenset({"webhook", "cron"})
 _MAX_TREE_DEPTH = 8
 _MAX_TREE_ROWS = 500
 _CHAIN_CAP = 64
+_CONTENT_JSON_PREFIX = "\x00json:"  # hermes_state.SessionDB._CONTENT_JSON_PREFIX (structured content)
+_LATEST_STEP_CHARS = 4000  # head of the latest-step message read for a roll-up row (clip is 120 chars)
 
 # Chain segments of one logical conversation: a compression continuation of *parent* (never a fork).
 _NEXT_SEGMENT_SQL = None  # built lazily (needs hermes_state_common)
 
 
-def _next_segment_sql() -> str:
+def _next_segment_sql(parent_expr: str = "?") -> str:
     global _NEXT_SEGMENT_SQL
     if _NEXT_SEGMENT_SQL is None:
         from hermes_state_common import _non_continuation_child_sql, _sql_session_last_active
         _NEXT_SEGMENT_SQL = (
             "SELECT child.id FROM sessions parent JOIN sessions child ON child.parent_session_id = parent.id "
-            "WHERE parent.id = ? AND parent.end_reason = 'compression' "
+            "WHERE parent.id = {parent} AND parent.end_reason = 'compression' "
             + _non_continuation_child_sql("child.", "parent.id")
             + " ORDER BY CASE WHEN child.end_reason = 'compression' THEN 0 "
             "WHEN child.ended_at IS NULL THEN 1 ELSE 2 END, "
             + _sql_session_last_active("child") + " DESC, child.started_at DESC, child.id DESC LIMIT 1")
-    return _NEXT_SEGMENT_SQL
+    return _NEXT_SEGMENT_SQL.replace("{parent}", parent_expr)
 
 
 def json_field(value: Any) -> Any:
@@ -97,6 +117,159 @@ def lineage(db, conn, session_id: str) -> list[str]:
 
 def _placeholders(values: Iterable[Any]) -> str:
     return ",".join("?" * len(list(values)))
+
+
+def _segments_from(raw: Any, start: str) -> list[str]:
+    """The ``[[n, id], ...]`` JSON a segment CTE aggregates, as :func:`chain` returns it (cut at a repeat)."""
+    pairs = sorted((int(n), sid) for n, sid in (json_field(raw) or []) if sid is not None)
+    out, seen = [], set()
+    for _, sid in pairs:
+        if sid in seen:
+            break
+        out.append(sid)
+        seen.add(sid)
+    return out or [start]
+
+
+# ── SQL building blocks (one definition each; every list/observe statement composes them) ─────────────
+
+def _safe_target(alias: str) -> str:
+    return f"(CASE WHEN json_valid({alias}delivery_target) THEN {alias}delivery_target ELSE json_object() END)"
+
+
+def target_sql(alias: str, path: str) -> str:
+    """``delivery_target``'s *path* (a non-throwing json_extract). With ``alias=""`` it is exactly the
+    expression ``idx_sessions_delivery_session`` / ``idx_sessions_delivery_selector`` index."""
+    from hermes_state_common import _sql_json_extract
+    return _sql_json_extract(f"{alias}delivery_target", path)
+
+
+def _target_type(alias: str, path: str) -> str:
+    return f"json_type({_safe_target(alias)}, '{path}')"
+
+
+def _truthy(alias: str, path: str) -> str:
+    """Python truthiness of the JSON value at *path* (missing/null/false/""/0/[]/{} are falsy)."""
+    kind, value = _target_type(alias, path), target_sql(alias, path)
+    return (f"COALESCE({kind} NOT IN ('null', 'false') AND NOT ({kind} = 'text' AND {value} = '') "
+            f"AND NOT ({kind} IN ('integer', 'real') AND {value} = 0) AND NOT ({kind} = 'array' AND {value} = '[]') "
+            f"AND NOT ({kind} = 'object' AND {value} = '{{}}'), 0)")
+
+
+def _held_sql(alias: str, selectors: bool) -> str:
+    """:func:`_target_held_by` in SQL (params ``:lin`` = the caller lineage, ``:held`` / ``:unres`` = the
+    selectors that resolve into it / resolve nowhere)."""
+    sid, sel = target_sql(alias, "$.session_id"), target_sql(alias, "$.selector")
+    selector_arm = (f"({sel} IN (SELECT value FROM json_each(:held)) OR ({sel} IN (SELECT value FROM json_each(:unres)) "
+                    f"AND {alias}attached_session_id IN (SELECT value FROM json_each(:lin))))") if selectors else "0"
+    return (f"(CASE WHEN {_truthy(alias, '$.session_id')} THEN ({_target_type(alias, '$.session_id')} = 'text' "
+            f"AND {sid} IN (SELECT value FROM json_each(:lin))) "
+            f"WHEN {_truthy(alias, '$.selector')} THEN {selector_arm} ELSE 0 END)")
+
+
+def _attached_sql(alias: str, selectors: bool) -> str:
+    """:func:`attached_to` in SQL: an ``attach: true`` ``kind=session`` target the caller holds."""
+    return (f"({alias}delivery_target IS NOT NULL AND {_target_type(alias, '$.attach')} IS 'true' "
+            f"AND {target_sql(alias, '$.kind')} IS 'session' AND {_held_sql(alias, selectors)})")
+
+
+def _kind_sql(s: str = "s.", d: str = "d.") -> str:
+    """:func:`_listed_kind` in SQL (*d*: the legacy ``delegate_sessions`` join, NULL when absent)."""
+    return f"COALESCE(NULLIF({s}lineage_kind, ''), CASE WHEN {d}session_id IS NOT NULL THEN 'delegate' END)"
+
+
+_EXCLUDED_KINDS = frozenset({"continuation", "branch", "reset", "switch", "root"})
+_NOT_ATTACHABLE_SQL = "('continuation', 'branch', 'reset', 'switch', 'root', 'delegate')"
+
+
+def _how_sql(selectors: bool, s: str = "s.", d: str = "d.") -> str:
+    """:func:`_is_default_child` in SQL: ``'own'`` / ``'attached'`` / NULL (params ``:lin`` and selectors)."""
+    kind = _kind_sql(s, d)
+    return (f"(CASE WHEN {kind} = 'delegate' AND {s}parent_session_id IN (SELECT value FROM json_each(:lin)) "
+            f"THEN 'own' WHEN ({kind} IS NULL OR {kind} NOT IN {_NOT_ATTACHABLE_SQL}) "
+            f"AND {_attached_sql(s, selectors)} THEN 'attached' END)")
+
+
+def _running_sql(s: str = "s.") -> str:
+    return (f"EXISTS (SELECT 1 FROM session_admissions a WHERE a.target_session_id = {s}id "
+            f"AND a.status IN ('started', 'unknown'))")
+
+
+def _status_sql(s: str = "s.", d: str = "d.") -> str:
+    """:func:`record`'s status (a cached ``running`` with no started admission left is a finished run)."""
+    stored = f"COALESCE(NULLIF({s}status, ''), {d}status)"
+    return (f"(CASE WHEN {stored} = 'closed' THEN 'closed' WHEN {_running_sql(s)} THEN 'running' "
+            f"WHEN {stored} IN ('running', 'idle') THEN 'idle' "
+            f"WHEN COALESCE({s}ended_at, 0) != 0 AND {s}end_reason IS NOT 'compression' THEN 'closed' "
+            f"ELSE 'idle' END)")
+
+
+def _created_sql(s: str = "s.", d: str = "d.") -> str:
+    return f"COALESCE(NULLIF({s}started_at, 0), NULLIF({d}created_at, 0), 0)"
+
+
+def _floor_sql(s: str = "s.", d: str = "d.") -> str:
+    return f"MAX({_created_sql(s, d)}, COALESCE(NULLIF({s}last_activity_at, 0), 0))"
+
+
+def _legacy_join(present: bool, s: str = "s", d: str = "d") -> str:
+    if present:
+        return (f" LEFT JOIN delegate_sessions {d} ON {d}.session_id = {s}.id "
+                f"AND COALESCE({s}.lineage_kind, '') = ''")
+    return f" LEFT JOIN (SELECT NULL AS session_id, NULL AS status, NULL AS created_at) {d} ON 0"
+
+
+def _seg_cte(base: str) -> str:
+    """``seg(start, id, n)``: every compression segment of each ``base`` row (``n`` = position; at most
+    ``_CHAIN_CAP`` steps; a NULL ``id`` row marks the end of a chain)."""
+    return (f"seg(start, id, n) AS (SELECT id, id, 0 FROM {base} UNION ALL "
+            f"SELECT seg.start, ({_next_segment_sql('seg.id')}), seg.n + 1 FROM seg "
+            f"WHERE seg.id IS NOT NULL AND seg.n < {_CHAIN_CAP})")
+
+
+def _activity_sql(o: str) -> str:
+    """Newest message timestamp over *o*'s segments: one index-served MAX per segment (never a scan)."""
+    return (f"(SELECT MAX((SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = seg.id)) FROM seg "
+            f"WHERE seg.start = {o}.id AND seg.id IS NOT NULL)")
+
+
+def _hydration_sql(o: str, *, rollup: bool, legacy: bool) -> str:
+    """Per-row record columns for an already-selected row *o* (never evaluated before ``LIMIT``)."""
+    payload = "(CASE WHEN json_valid(a.payload_json) THEN a.payload_json ELSE '{}' END)"
+    cols = [
+        f"(SELECT json_group_array(json_array(seg.n, seg.id)) FROM seg WHERE seg.start = {o}.id "
+        f"AND seg.id IS NOT NULL) AS _segs",
+        f"(SELECT COUNT(*) FROM session_admissions a WHERE a.target_session_id = {o}.id "
+        f"AND a.status = 'queued') AS _queued",
+        f"(SELECT json_extract({payload}, '$.text') FROM session_admissions a WHERE a.target_session_id = {o}.id "
+        f"AND substr(a.principal_id, 1, 7) = 'parent:' AND json_type({payload}, '$.text') = 'text' "
+        f"ORDER BY a.seq DESC LIMIT 1) AS _latest",
+    ]
+    if rollup:
+        # COUNT(DISTINCT): a looping chain repeats segments; seg(start) and idx_sessions_parent drive the join.
+        children = (f"FROM seg JOIN sessions c ON c.parent_session_id = seg.id{_legacy_join(legacy, 'c', 'dc')} "
+                    f"WHERE seg.start = {o}.id AND seg.id IS NOT NULL AND {_kind_sql('c.', 'dc.')} = 'delegate'")
+        cols += [
+            f"(SELECT COUNT(DISTINCT c.id) {children}) AS _children_total",
+            f"(SELECT COUNT(DISTINCT c.id) {children} AND c.status IS NOT 'closed' AND EXISTS (SELECT 1 FROM "
+            f"session_admissions a WHERE a.target_session_id = c.id AND a.status IN ('started', 'unknown', 'queued'))"
+            f") AS _running_children",
+        ]
+    return ", ".join(cols)
+
+
+def _row_cols(selectors: bool) -> str:
+    return (f"s.*, {_kind_sql()} AS _kind, {_how_sql(selectors)} AS _how, {_status_sql()} AS _status, "
+            f"{_created_sql()} AS _created, {_floor_sql()} AS _floor, d.session_id AS _legacy_id")
+
+
+def _legacy_table(conn) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'delegate_sessions'").fetchone() \
+        is not None
+
+
+def _params(lin: Iterable[str], held: Iterable[Any] = (), unres: Iterable[Any] = (), **extra) -> dict:
+    return {"lin": json.dumps(list(lin)), "held": json.dumps(list(held)), "unres": json.dumps(list(unres)), **extra}
 
 
 # ── records ──────────────────────────────────────────────────────────────────
@@ -149,53 +322,32 @@ def _legacy_delegate(conn, session_id: str) -> Optional[dict]:
     return dict(row) if row is not None else None
 
 
-def _last_activity(conn, ids: list[str], floor: float) -> float:
-    best = floor or 0.0
-    for sid in ids:
-        stamp = conn.execute("SELECT MAX(timestamp) FROM messages WHERE session_id = ?", (sid,)).fetchone()[0]
-        if stamp is not None:
-            best = max(best, float(stamp))
-    return best
+def _legacy_rows(conn, rows: Iterable[Any], present: Optional[bool] = None) -> dict[str, dict]:
+    """The legacy shim rows of every *rows* entry without a ``lineage_kind`` (one batched read, only when
+    such a row and the table exist)."""
+    ids = [r["id"] for r in rows if not r["lineage_kind"]]
+    if not ids or not (_legacy_table(conn) if present is None else present):
+        return {}
+    return {r["session_id"]: dict(r) for r in conn.execute(
+        "SELECT * FROM delegate_sessions WHERE session_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))}
 
 
-def _admission_state(conn, session_id: str) -> tuple[bool, int, Optional[str]]:
-    """``(running, queued_count, latest_assignment_text)`` from the session's own FIFO."""
-    rows = conn.execute("SELECT status, principal_id, payload_json FROM session_admissions WHERE target_session_id = ? "
-                        "ORDER BY seq", (session_id,)).fetchall()
-    running = any(r["status"] in ("started", "unknown") for r in rows)
-    queued = sum(1 for r in rows if r["status"] == "queued")
-    latest = None
-    for r in rows:
-        if str(r["principal_id"]).startswith("parent:"):
-            payload = json_field(r["payload_json"]) or {}
-            if isinstance(payload.get("text"), str):
-                latest = payload["text"]
-    return running, queued, latest
-
-
-def record(conn, row) -> dict:
-    """The public record of one session row (credential-free; never transcript bodies)."""
+def _build_record(row, legacy: Optional[dict]) -> dict:
+    """The public record of one hydrated session row (credential-free; never transcript bodies)."""
     row = dict(row)
     sid = row["id"]
     config = json_field(row.get("model_config")) or {}
     brief = config.get("_delegate_brief") if isinstance(config.get("_delegate_brief"), dict) else {}
-    legacy = _legacy_delegate(conn, sid) if not row.get("lineage_kind") else None
+    legacy = legacy if not row.get("lineage_kind") else None
     route = json_field(row.get("route")) or {}
-    segments = chain(conn, sid)
-    running, queued, latest = _admission_state(conn, sid)
-    stored = row.get("status") or (legacy or {}).get("status")
-    if stored == "closed":
-        status = "closed"
-    elif running:
-        status = "running"
-    elif stored in ("running", "idle"):
-        status = "idle"  # a cached "running" with no started admission left is a finished run
-    else:
-        status = "closed" if row.get("ended_at") and row.get("end_reason") != "compression" else "idle"
+    segments = _segments_from(row.get("_segs"), sid)
     fork = json_field(row.get("fork_origin"))
     kind = row.get("lineage_kind") or ("delegate" if legacy else _effective_kind(_RowView(row)))
     initial = brief.get("initial_goal") or (legacy or {}).get("initial_goal") or ""
-    created = float(row.get("started_at") or (legacy or {}).get("created_at") or 0)
+    created = float(row.get("_created") or 0)
+    activity = row.get("_act")
+    last = max(float(row.get("_floor") or 0), float(activity) if activity is not None else 0.0)
+    latest = row.get("_latest")
     return {
         "session_id": sid, "current_session_id": segments[-1], "parent_session_id": row.get("parent_session_id"),
         "root_session_id": row.get("root_session_id"), "depth": row.get("depth"), "lineage_kind": kind,
@@ -208,11 +360,53 @@ def record(conn, row) -> dict:
         "route": route or None, "model": route.get("model") or row.get("model") or (legacy or {}).get("model"),
         "provider": route.get("provider") or (legacy or {}).get("provider") or row.get("billing_provider"),
         "role": row.get("role") or (legacy or {}).get("role") or "leaf",
-        "status": status, "queued": queued, "created_at": created,
-        "last_activity_at": _last_activity(conn, segments, max(created, float(row.get("last_activity_at") or 0))),
+        "status": row.get("_status") or "idle", "queued": int(row.get("_queued") or 0), "created_at": created,
+        "last_activity_at": last,
         "delivery_target": json_field(row.get("delivery_target")), "group_id": row.get("group_id"),
         "retained": bool(brief.get("retain") or legacy),
     }
+
+
+def _hydrate_rows(conn, rows: Iterable[Any], *, rollup: bool = False, legacy: Optional[bool] = None
+                  ) -> list[tuple[dict, list[str]]]:
+    """``(record, compression segments)`` of many rows from ONE statement (plus one legacy read only for
+    legacy rows), in input order. *legacy*: whether ``delegate_sessions`` exists (None: probe when needed)."""
+    rows = list(rows)
+    if not rows:
+        return []
+    ids = [r["id"] for r in rows]
+    if not any(not r["lineage_kind"] for r in rows):
+        legacy = False
+    elif legacy is None:
+        legacy = _legacy_table(conn)
+    got = {r["id"]: r for r in conn.execute(
+        f"WITH RECURSIVE base(id) AS (SELECT value FROM json_each(:ids)), {_seg_cte('base')} "
+        f"SELECT {_row_cols(False)}, {_activity_sql('s')} AS _act, {_hydration_sql('s', rollup=rollup, legacy=legacy)} "
+        f"FROM base JOIN sessions s ON s.id = base.id{_legacy_join(legacy)}",
+        _params([], ids=json.dumps(ids))).fetchall()}
+    shims = _legacy_rows(conn, got.values(), legacy) if legacy else {}
+    out = []
+    for sid in ids:
+        if sid in got:
+            info = _build_record(got[sid], shims.get(sid))
+            if rollup:
+                info["running_children"] = int(got[sid]["_running_children"] or 0)
+                info["children_total"] = int(got[sid]["_children_total"] or 0)
+            out.append((info, _segments_from(got[sid]["_segs"], sid)))
+    return out
+
+
+def hydrate(conn, rows: Iterable[Any], *, rollup: bool = False) -> list[dict]:
+    """:func:`record` of many rows in ONE statement (plus one legacy read only for legacy rows), input order."""
+    return [info for info, _ in _hydrate_rows(conn, rows, rollup=rollup)]
+
+
+def record(conn, row) -> dict:
+    """The public record of one session row (credential-free; never transcript bodies)."""
+    found = hydrate(conn, [row])
+    if not found:
+        raise LookupError("No session with that session_id.")
+    return found[0]
 
 
 class _RowView(dict):
@@ -269,7 +463,29 @@ def attached_to(row, caller_lineage: set, selectors: Optional[_Selectors] = None
         row, target, caller_lineage, selectors)
 
 
-# ── ACL ──────────────────────────────────────────────────────────────────────
+def _selector_split(db, conn, lineage_ids: set, selectors: _Selectors, legacy_probe: bool = False
+                    ) -> tuple[bool, list, list]:
+    """``(legacy table present, selectors resolving into the caller, unresolvable selectors)``: one statement
+    (an index walk over the selector expression index; each distinct selector resolves once)."""
+    sel = target_sql("", "$.selector")
+    rows = conn.execute(
+        "SELECT 'legacy', NULL FROM sqlite_master WHERE type = 'table' AND name = 'delegate_sessions' "
+        f"UNION ALL SELECT 'selector', v FROM (SELECT DISTINCT {sel} AS v FROM sessions "
+        f"WHERE delivery_target IS NOT NULL AND {sel} IS NOT NULL)").fetchall()
+    legacy = any(r[0] == "legacy" for r in rows)
+    held, unres = [], []
+    for kind, value in rows:
+        if kind != "selector" or value in ("", 0):
+            continue
+        resolved = selectors.resolve(str(value))
+        if resolved is None:
+            unres.append(value)
+        elif resolved in lineage_ids:
+            held.append(value)
+    return legacy, held, unres
+
+
+# ── ACL (per profile database; generation leases) ───────────────────────────
 
 def _targets(row, caller_lineage: set, selectors: Optional[_Selectors] = None) -> bool:
     return _target_held_by(row, json_field(row["delivery_target"]), caller_lineage, selectors)
@@ -300,9 +516,6 @@ def default_session_acl(db, conn, caller_session_id: str, target_row) -> bool:
     return False
 
 
-_acl: Callable[..., bool] = default_session_acl
-
-
 def _delegate_root(db, conn, session_id: str):
     """The first segment row of *session_id*'s conversation (a delegate child's own row), or None."""
     if not session_id:
@@ -330,30 +543,134 @@ def default_peer_acl(db, conn, caller_session_id: str, target_row) -> bool:
     return are_siblings(db, conn, caller_session_id, target_row)
 
 
-_peer_acl: Callable[..., bool] = default_peer_acl
 ACL_ACTIONS = ("observe", "peer")
+_DEFAULT_ACLS = {"observe": default_session_acl, "peer": default_peer_acl}
 
 
-def set_session_acl(policy: Optional[Callable[..., bool]], *, action: str = "observe") -> Callable[..., bool]:
-    """Install ``policy(db, conn, caller_session_id, target_row) -> bool`` (None restores the default) for
-    *action*: ``"observe"`` (observe / list / resume / steer / close reach) or ``"peer"`` (peer admissions).
-    Returns the previous policy. A plugin can widen either (e.g. peers beyond siblings) through it."""
-    global _acl, _peer_acl
-    if action == "peer":
-        previous, _peer_acl = _peer_acl, (policy or default_peer_acl)
-        return previous
-    if action != "observe":
+def _check_action(action: str) -> str:
+    if action not in _DEFAULT_ACLS:
         raise ValueError(f"action must be one of {', '.join(ACL_ACTIONS)}")
-    previous, _acl = _acl, (policy or default_session_acl)
-    return previous
+    return action
 
 
-def get_session_acl(action: str = "observe") -> Callable[..., bool]:
-    return _peer_acl if action == "peer" else _acl
+@lru_cache(maxsize=256)
+def _resolved(path: str) -> str:
+    try:
+        return str(Path(path).expanduser().resolve())
+    except (OSError, RuntimeError):
+        return str(path)
+
+
+def acl_scope(target: Any = None) -> str:
+    """The ACL scope key of *target*: a SessionDB (or a wrapper holding one as ``_db``), a database path, or
+    None for the current profile's ``state.db``. Two handles on one database share one scope."""
+    if target is None:
+        from hermes_state import _default_db_path
+        path: Any = _default_db_path()
+    elif isinstance(target, (str, os.PathLike)):
+        path = target
+    else:
+        path = getattr(getattr(target, "_db", None) or target, "db_path", None)
+        if not isinstance(path, (str, os.PathLike)):
+            return ""
+    return _resolved(os.fspath(path))
+
+
+class AclLease:
+    """One installed policy generation in one ``(scope, action)`` slot; :meth:`dispose` retires exactly it."""
+
+    __slots__ = ("scope", "action", "policy", "generation", "owner", "active", "_registry")
+
+    def __init__(self, registry, scope: str, action: str, policy: Callable[..., bool], generation: int,
+                 owner: Optional[str]):
+        self._registry, self.scope, self.action, self.policy = registry, scope, action, policy
+        self.generation, self.owner, self.active = generation, owner, True
+
+    def dispose(self) -> None:
+        self._registry.dispose(self)
+
+    def __repr__(self) -> str:
+        return f"AclLease({self.action}@{self.scope!r} gen={self.generation} owner={self.owner!r} active={self.active})"
+
+
+class _AclRegistry:
+    """Per-scope ACL state: a base policy plus a stack of generation leases. The effective policy is the
+    newest live lease, else the base, else the default; a disposed lease simply leaves the stack, so no
+    unload order can bring back a policy whose owner is gone (review R7)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._base: dict[tuple[str, str], Callable[..., bool]] = {}
+        self._leases: dict[tuple[str, str], list[AclLease]] = {}
+        self._generations = itertools.count(1)
+
+    def effective(self, scope: str, action: str) -> Callable[..., bool]:
+        with self._lock:
+            leases = self._leases.get((scope, action))
+            if leases:
+                return leases[-1].policy
+            return self._base.get((scope, action)) or _DEFAULT_ACLS[action]
+
+    def set_base(self, scope: str, action: str, policy: Optional[Callable[..., bool]]) -> Callable[..., bool]:
+        with self._lock:
+            previous = self._base.get((scope, action)) or _DEFAULT_ACLS[action]
+            if policy is None or policy is _DEFAULT_ACLS[action]:
+                self._base.pop((scope, action), None)
+            else:
+                self._base[(scope, action)] = policy
+            return previous
+
+    def install(self, scope: str, action: str, policy: Optional[Callable[..., bool]],
+                owner: Optional[str] = None) -> AclLease:
+        with self._lock:
+            lease = AclLease(self, scope, action, policy or _DEFAULT_ACLS[action], next(self._generations), owner)
+            self._leases.setdefault((scope, action), []).append(lease)
+            return lease
+
+    def dispose(self, lease: AclLease) -> None:
+        with self._lock:
+            if not lease.active:
+                return
+            lease.active = False
+            slot = (lease.scope, lease.action)
+            live = [item for item in self._leases.get(slot, []) if item is not lease]
+            if live:
+                self._leases[slot] = live
+            else:
+                self._leases.pop(slot, None)
+
+    def leases(self, scope: str, action: str) -> list[AclLease]:
+        with self._lock:
+            return list(self._leases.get((scope, action), []))
+
+
+_registry = _AclRegistry()
+
+
+def set_session_acl(policy: Optional[Callable[..., bool]], *, action: str = "observe", scope: Any = None
+                    ) -> Callable[..., bool]:
+    """Install ``policy(db, conn, caller_session_id, target_row) -> bool`` as the BASE policy of one profile
+    database (*scope*: a SessionDB, a db path, or None for the current profile's ``state.db``; None policy
+    restores the default) for *action*: ``"observe"`` (observe / list / resume / steer / close reach) or
+    ``"peer"`` (peer admissions). Returns the previous base. Plugin leases (:func:`install_session_acl`)
+    stack above the base."""
+    return _registry.set_base(acl_scope(scope), _check_action(action), policy)
+
+
+def install_session_acl(policy: Optional[Callable[..., bool]], *, action: str = "observe", scope: Any = None,
+                        owner: Optional[str] = None) -> AclLease:
+    """Stack *policy* for *action* on *scope* as a new generation lease (newest live lease wins); dispose
+    the returned lease to retire exactly this generation."""
+    return _registry.install(acl_scope(scope), _check_action(action), policy, owner)
+
+
+def get_session_acl(action: str = "observe", *, scope: Any = None) -> Callable[..., bool]:
+    """The effective policy for *action* on *scope* (see :func:`set_session_acl`)."""
+    return _registry.effective(acl_scope(scope), _check_action(action))
 
 
 def allowed(db, conn, caller_session_id: str, target_row, *, action: str = "observe") -> bool:
-    policy = _peer_acl if action == "peer" else _acl
+    policy = get_session_acl(action, scope=db)
     try:
         return bool(policy(db, conn, caller_session_id, target_row))
     except Exception:  # health: allow BLE001 -- plugin policy boundary: a broken ACL fails closed, logged
@@ -362,9 +679,6 @@ def allowed(db, conn, caller_session_id: str, target_row, *, action: str = "obse
 
 
 # ── listing ──────────────────────────────────────────────────────────────────
-
-_EXCLUDED_KINDS = frozenset({"continuation", "branch", "reset", "switch", "root"})
-
 
 def _listed_kind(conn, row) -> Optional[str]:
     """The kind a row lists under: its stamped ``lineage_kind``, or ``delegate`` for a pre-unified retained child
@@ -386,38 +700,39 @@ def _is_default_child(row, caller_lineage: set, conn=None, selectors: Optional[_
     return None
 
 
-def _rollup(conn, session_id: str) -> tuple[int, int]:
-    """``(running_children, children_total)`` of one d=1 row: delegate children of its conversation
-    (running = a run holds its FIFO or a turn is queued)."""
-    ids = chain(conn, session_id)
-    rows = conn.execute(f"SELECT * FROM sessions WHERE parent_session_id IN ({_placeholders(ids)})", ids).fetchall()
-    active = total = 0
-    for row in rows:
-        if _listed_kind(conn, row) != "delegate":
-            continue
-        total += 1
-        running, queued, _ = _admission_state(conn, row["id"])
-        if (running or queued) and row["status"] != "closed":
-            active += 1
-    return active, total
-
-
-def _matches(conn, info: dict, needle: str) -> bool:
-    if any(needle in str(info.get(key) or "").casefold() for key in ("session_id", "title", "assignment", "initial_goal")):
-        return True
-    for sid in chain(conn, info["session_id"]):
-        if conn.execute("SELECT 1 FROM messages WHERE session_id = ? AND instr(lower(content), ?) > 0 LIMIT 1",
-                        (sid, needle)).fetchone():
-            return True
-    return False
-
-
-def _entry(conn, row, how: Optional[str]) -> dict:
-    info = record(conn, row)
+def _entry(info: dict, how: Optional[str]) -> dict:
     if how == "attached" or info["lineage_kind"] not in ("delegate", None):
         info["badge"] = info["lineage_kind"]
-    info["running_children"], info["children_total"] = _rollup(conn, info["session_id"])
     return info
+
+
+def _transcript_hits(conn, records: list[dict], segments: dict[str, list[str]], needle: str) -> set[str]:
+    """The *records* whose own transcript (any segment) contains *needle*: one statement per page."""
+    pairs = [[info["session_id"], sid] for info in records for sid in segments.get(info["session_id"], [])]
+    if not pairs:
+        return set()
+    return {row[0] for row in conn.execute(
+        "SELECT DISTINCT json_extract(p.value, '$[0]') FROM json_each(?) p WHERE EXISTS (SELECT 1 FROM messages m "
+        "WHERE m.session_id = json_extract(p.value, '$[1]') AND instr(lower(m.content), ?) > 0)",
+        (json.dumps(pairs), needle))}
+
+
+def _matches_fields(info: dict, needle: str) -> bool:
+    return any(needle in str(info.get(key) or "").casefold() for key in ("session_id", "title", "assignment", "initial_goal"))
+
+
+def _ordered_page(conn, *, cand_sql: str, filter_sql: str, legacy: bool, selectors: bool, params: dict,
+                  rollup: bool = True) -> list[Any]:
+    """One statement: candidates -> semantic filter -> activity order -> LIMIT/OFFSET -> per-row hydration."""
+    return conn.execute(
+        f"WITH RECURSIVE cand(id) AS ({cand_sql}), "
+        f"pick AS (SELECT {_row_cols(selectors)} FROM cand JOIN sessions s ON s.id = cand.id{_legacy_join(legacy)}), "
+        f"picked AS (SELECT * FROM pick WHERE {filter_sql}), {_seg_cte('picked')}, "
+        f"ordered AS (SELECT picked.*, {_activity_sql('picked')} AS _act FROM picked), "
+        f"page AS (SELECT * FROM ordered ORDER BY MAX(_floor, COALESCE(_act, _floor)) DESC, _created DESC, id DESC "
+        f"LIMIT :page OFFSET :offset) "
+        f"SELECT page.*, {_hydration_sql('page', rollup=rollup, legacy=legacy)} FROM page "
+        f"ORDER BY MAX(_floor, COALESCE(_act, _floor)) DESC, _created DESC, id DESC", params).fetchall()
 
 
 def list_sessions(db, conn, caller_session_id: str, *, scope: str = "children", query: Optional[str] = None,
@@ -430,40 +745,81 @@ def list_sessions(db, conn, caller_session_id: str, *, scope: str = "children", 
     needle = str(query or "").strip().casefold()
     mine = lineage(db, conn, caller_session_id)
     mine_set = set(mine)
-    selectors = _Selectors(db)
+    if scope == "tree":
+        return _list_tree(db, conn, caller_session_id, mine, needle=needle, limit=limit, include_closed=include_closed)
+    policy = get_session_acl("observe", scope=db)
     if scope == "children":
-        # Own spawns (parent link), literal opt-ins, opt-ins bound here (attach primitive) and every selector
-        # opt-in (resolved below: its selector may name this conversation since a /new).
-        candidates = conn.execute(
-            f"SELECT * FROM sessions WHERE parent_session_id IN ({_placeholders(mine)}) "
-            f"UNION SELECT * FROM sessions WHERE delivery_target IS NOT NULL AND "
-            f"json_extract(delivery_target, '$.session_id') IN ({_placeholders(mine)}) "
-            f"UNION SELECT * FROM sessions WHERE attached_session_id IN ({_placeholders(mine)}) "
-            f"UNION SELECT * FROM sessions WHERE delivery_target IS NOT NULL AND "
-            f"json_extract(delivery_target, '$.selector') IS NOT NULL", (*mine, *mine, *mine)).fetchall()
-        picked = [(row, _is_default_child(row, mine_set, conn, selectors)) for row in candidates]
-        picked = [(row, how) for row, how in picked if how]
+        legacy, held, unres = _selector_split(db, conn, mine_set, _Selectors(db))
+        sid, sel = target_sql("", "$.session_id"), target_sql("", "$.selector")
+        lin = "(SELECT value FROM json_each(:lin))"
+        cand = (f"SELECT id FROM sessions WHERE parent_session_id IN {lin} "
+                f"UNION SELECT id FROM sessions WHERE delivery_target IS NOT NULL AND {sid} IN {lin} "
+                f"UNION SELECT id FROM sessions WHERE attached_session_id IN {lin}")
+        if held:
+            cand += (f" UNION SELECT id FROM sessions WHERE delivery_target IS NOT NULL AND {sel} IS NOT NULL "
+                     f"AND {sel} IN (SELECT value FROM json_each(:held))")
+        filter_sql = f"_how IS NOT NULL AND id NOT IN {lin}"
+        params = _params(mine, held, unres)
+        # The default ACL admits every row the rule picks (an own delegate spawn or a target the caller holds);
+        # only a custom policy or a legacy shim row (no lineage_kind) needs the per-row policy call.
+        def acl_needed(row) -> bool:
+            return policy is not default_session_acl or not row["lineage_kind"]
+        selectors = True
     elif scope == "siblings":
         own = conn.execute("SELECT * FROM sessions WHERE id = ?", (logical_root(db, conn, caller_session_id),)).fetchone()
         parent = own["parent_session_id"] if own is not None else None
         if not parent or _effective_kind(own) != "delegate":
             return []
         parents = lineage(db, conn, parent)
-        rows = conn.execute(f"SELECT * FROM sessions WHERE parent_session_id IN ({_placeholders(parents)})",
-                            parents).fetchall()
-        picked = [(row, "sibling") for row in rows
-                  if row["id"] not in mine_set and _listed_kind(conn, row) == "delegate"]
-    else:
-        picked = _subtree(db, conn, mine)
-    out = []
-    for row, how in picked:
-        if not allowed(db, conn, caller_session_id, row) and how != "sibling":
-            continue
-        info = _entry(conn, row, how if how != "sibling" else None)
-        if scope == "tree":
-            info["depth_below_caller"] = how
+        legacy = _legacy_table(conn)
+        cand = "SELECT id FROM sessions WHERE parent_session_id IN (SELECT value FROM json_each(:parents))"
+        filter_sql = "_kind = 'delegate' AND id NOT IN (SELECT value FROM json_each(:lin))"
+        params = _params(mine, parents=json.dumps(parents))
+        def acl_needed(row) -> bool:
+            return False  # a sibling list is the peer roster: the observe ACL does not gate it
+        selectors = False
+    if not needle and not include_closed:
+        filter_sql += " AND _status != 'closed'"
+    out: list[dict] = []
+    page_size = limit if not needle else max(limit, 20)
+    offset = 0
+    while len(out) < limit:
+        rows = _ordered_page(conn, cand_sql=cand, filter_sql=filter_sql, legacy=legacy, selectors=selectors,
+                             params={**params, "page": page_size, "offset": offset})
+        kept = [row for row in rows if not acl_needed(row) or allowed(db, conn, caller_session_id, row)]
+        shims = _legacy_rows(conn, kept, legacy) if legacy else {}
+        infos = []
+        for row in kept:
+            info = _entry(_build_record(row, shims.get(row["id"])), row["_how"] if scope == "children" else None)
+            info["running_children"] = int(row["_running_children"] or 0)
+            info["children_total"] = int(row["_children_total"] or 0)
+            infos.append((info, _segments_from(row["_segs"], row["id"])))
         if needle:
-            if not _matches(conn, info, needle):
+            unmatched = [info for info, _ in infos if not _matches_fields(info, needle)]
+            hits = _transcript_hits(conn, unmatched, {info["session_id"]: segs for info, segs in infos}, needle)
+            infos = [(info, segs) for info, segs in infos if _matches_fields(info, needle) or info["session_id"] in hits]
+        out.extend(info for info, _ in infos)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+        page_size = max(page_size, limit * 2)
+    return out[:limit]
+
+
+def _list_tree(db, conn, caller_session_id: str, mine: list[str], *, needle: str, limit: int,
+               include_closed: bool) -> list[dict]:
+    picked = _subtree(db, conn, mine)
+    policy = get_session_acl("observe", scope=db)
+    kept = [(row, level) for row, level in picked if allowed(db, conn, caller_session_id, row)] \
+        if policy is not default_session_acl else _default_tree_reach(db, conn, mine, picked)
+    levels = {row["id"]: level for row, level in kept}
+    infos = [_entry(info, None) for info in hydrate(conn, [row for row, _ in kept], rollup=True)]
+    out = []
+    for info in infos:
+        info["depth_below_caller"] = levels[info["session_id"]]
+        if needle:
+            if not _matches_fields(info, needle) and not _transcript_hits(
+                    conn, [info], {info["session_id"]: chain(conn, info["session_id"])}, needle):
                 continue
         elif info["status"] == "closed" and not include_closed:
             continue
@@ -472,30 +828,65 @@ def list_sessions(db, conn, caller_session_id: str, *, scope: str = "children", 
     return out[:limit]
 
 
+def _default_tree_reach(db, conn, mine: list[str], picked: list[tuple]) -> list[tuple]:
+    """:func:`default_session_acl` over a whole subtree with the caller's lineage resolved once (the per-row
+    walk stays exact; its lookups are memoized per conversation)."""
+    mine_set, selectors = set(mine), _Selectors(db)
+    roots: dict[str, Any] = {}
+
+    def conversation(parent: str):
+        if parent not in roots:
+            roots[parent] = conn.execute("SELECT * FROM sessions WHERE id = ?",
+                                         (logical_root(db, conn, parent),)).fetchone()
+        return roots[parent]
+
+    out = []
+    for row, level in picked:
+        if row["id"] in mine_set:
+            continue
+        if _targets(row, mine_set, selectors):
+            out.append((row, level))
+            continue
+        current = row
+        for _ in range(_MAX_TREE_DEPTH):
+            parent = current["parent_session_id"]
+            if not parent:
+                break
+            if parent in mine_set:
+                if _effective_kind(current) not in (None, "continuation", "branch", "reset", "switch"):
+                    out.append((row, level))
+                break
+            current = conversation(parent)
+            if current is None:
+                break
+    return out
+
+
 def _subtree(db, conn, mine: list[str]) -> list[tuple]:
-    """Every delegate/attached descendant of the caller's conversation, breadth-first, bounded. The
-    candidate set is pre-filtered on the indexed ``root_session_id``; ``parent_session_id`` decides."""
+    """Every delegate/attached descendant of the caller's conversation, breadth-first, bounded: one
+    statement per level (its rows' compression segments included). The candidate set is pre-filtered on
+    the indexed ``root_session_id``; ``parent_session_id`` decides."""
     frontier, out, seen = list(mine), [], set(mine)
     root = conn.execute("SELECT root_session_id FROM sessions WHERE id = ?", (mine[0],)).fetchone()
     root_id = root[0] if root is not None else None
+    legacy = _legacy_table(conn)
     for level in range(1, _MAX_TREE_DEPTH + 1):
         if not frontier or len(out) >= _MAX_TREE_ROWS:
             break
-        sql = f"SELECT * FROM sessions WHERE parent_session_id IN ({_placeholders(frontier)})"
-        params: list[Any] = list(frontier)
-        if root_id:
-            sql += " AND (root_session_id = ? OR root_session_id IS NULL)"
-            params.append(root_id)
+        root_filter = " AND (s.root_session_id = :root OR s.root_session_id IS NULL)" if root_id else ""
+        rows = conn.execute(
+            f"WITH RECURSIVE picked AS (SELECT {_row_cols(False)} FROM sessions s{_legacy_join(legacy)} "
+            f"WHERE s.parent_session_id IN (SELECT value FROM json_each(:lin)){root_filter}), {_seg_cte('picked')} "
+            f"SELECT picked.*, (SELECT json_group_array(json_array(seg.n, seg.id)) FROM seg WHERE seg.start = picked.id "
+            f"AND seg.id IS NOT NULL) AS _segs FROM picked",
+            _params(frontier, root=root_id)).fetchall()
         nxt = []
-        for row in conn.execute(sql, params).fetchall():
-            if row["id"] in seen:
-                continue
-            how = _is_default_child(row, set(frontier), conn)
-            if how is None:
+        for row in rows:
+            if row["id"] in seen or row["_how"] is None:
                 continue
             seen.add(row["id"])
             out.append((row, level))
-            nxt.extend(chain(conn, row["id"]))
+            nxt.extend(_segments_from(row["_segs"], row["id"]))
         frontier = nxt
     return out
 
@@ -514,24 +905,79 @@ def _latest_message(db, conn, session_id: str) -> Optional[dict]:
     return rows[-1] if rows else None
 
 
+def _children_preview(db, conn, ids: list[str], max_children: int, *, legacy: bool) -> tuple[list[dict], int]:
+    """The observed conversation's default children (``parent_session_id`` in *ids*): the newest
+    *max_children* in roll-up order, selected in SQL before hydration, each with its latest step's message
+    (head-bounded); and how many there are. One statement (plus fallbacks only for odd rows)."""
+    order = "(_status IS NOT 'running'), MAX(_floor, COALESCE(_act, _floor)) DESC, id ASC"
+    rows = conn.execute(
+        f"WITH RECURSIVE picked AS (SELECT {_row_cols(False)} FROM sessions s{_legacy_join(legacy)} "
+        f"WHERE s.parent_session_id IN (SELECT value FROM json_each(:lin))), "
+        f"kept AS (SELECT * FROM picked WHERE _how IS NOT NULL), {_seg_cte('kept')}, "
+        f"acted AS (SELECT kept.*, {_activity_sql('kept')} AS _act, COUNT(*) OVER () AS _total FROM kept), "
+        f"page AS (SELECT * FROM acted ORDER BY {order} LIMIT :max), "
+        f"hydrated AS (SELECT page.*, {_hydration_sql('page', rollup=False, legacy=legacy)}, "
+        f"(SELECT seg.id FROM seg WHERE seg.start = page.id AND seg.id IS NOT NULL ORDER BY seg.n DESC LIMIT 1) AS _tip "
+        f"FROM page) "
+        f"SELECT hydrated.*, lm.id AS _lm_id, lm.role AS _lm_role, lm.tool_calls AS _lm_tool_calls, "
+        f"lm.tool_name AS _lm_tool_name, lm.part_kind AS _lm_part_kind, lm.parts_json AS _lm_parts_json, "
+        f"length(lm.content) AS _lm_chars, CASE WHEN length(lm.content) > :cap AND substr(lm.content, 1, 6) != :prefix "
+        f"THEN substr(lm.content, 1, :cap) ELSE lm.content END AS _lm_content FROM hydrated "
+        f"LEFT JOIN messages lm ON lm.id = (SELECT x.id FROM messages x WHERE x.session_id = hydrated._tip "
+        f"AND x.active = 1 ORDER BY x.id DESC LIMIT 1) ORDER BY (hydrated._status IS NOT 'running'), "
+        f"MAX(hydrated._floor, COALESCE(hydrated._act, hydrated._floor)) DESC, hydrated.id ASC",
+        _params(ids, max=max_children, cap=_LATEST_STEP_CHARS, prefix=_CONTENT_JSON_PREFIX)).fetchall()
+    shims = _legacy_rows(conn, rows, legacy) if legacy else {}
+    total = int(rows[0]["_total"]) if rows else 0
+    out = []
+    for row in rows:
+        info = _build_record(row, shims.get(row["id"]))
+        if info["current_session_id"] != row["_tip"]:  # a looping chain: the walk's tip, read the plain way
+            info["_latest_message"] = _latest_message(db, conn, row["id"])
+        else:
+            info["_latest_message"] = _latest_row(db, conn, row)
+        out.append(info)
+    return out, total
+
+
+def _latest_row(db, conn, row) -> Optional[dict]:
+    if row["_lm_id"] is None:
+        return None
+    content = row["_lm_content"]
+    if row["_lm_chars"] is not None and content is not None and row["_lm_chars"] > len(content):
+        from agent.session_views import CHILD_LATEST_CAP, one_line
+        if len(one_line(content)) <= CHILD_LATEST_CAP * 2:  # whitespace-heavy head: the clip needs the body
+            content = conn.execute("SELECT content FROM messages WHERE id = ?", (row["_lm_id"],)).fetchone()[0]
+    calls = json_field(row["_lm_tool_calls"]) if row["_lm_tool_calls"] else None
+    return {"role": row["_lm_role"], "content": db._decode_content(content),
+            "tool_calls": calls if isinstance(calls, list) else ([] if row["_lm_tool_calls"] else None),
+            "tool_name": row["_lm_tool_name"], "part_kind": row["_lm_part_kind"], "parts_json": row["_lm_parts_json"]}
+
+
 def observe(db, conn, caller_session_id: str, session_id: str, *, limit: Optional[int] = None,
             max_chars: Optional[int] = None) -> dict:
     """A bounded, low-noise read of one reachable session (any descendant of the caller, read-only): its
     header, the NEWEST *limit* transcript messages in chronological order (each capped, never reasoning,
     whole tool arguments or raw parts) and a compact roll-up of its own children (d+1). Observation never
-    counts as activity. ``max_chars`` is accepted for compatibility; the per-field caps bound the size."""
+    counts as activity. ``max_chars`` is accepted for compatibility; the per-field caps bound the size.
+
+    Bounded work (review R9): the tail is a lineage-aware ``ORDER BY id DESC LIMIT`` window
+    (``SessionDB.get_lineage_tail_preview``: deduplicated exactly like the full read, body previews read
+    head/tail-bounded); the roll-up selects its at most ``CHILDREN_MAX`` children in SQL before hydrating
+    them, each latest step one ``DESC LIMIT 1`` lookup in the same statement."""
     from agent import session_views as views
-    info = get_record(db, conn, caller_session_id, session_id)
+    row = conn.execute(
+        "SELECT s.*, EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'delegate_sessions') "
+        "AS _legacy_present FROM sessions s WHERE s.id = ?", (session_id,)).fetchone()
+    if row is None or not allowed(db, conn, caller_session_id, row):
+        raise LookupError("No session with that session_id is reachable from this conversation.")
+    legacy = bool(row["_legacy_present"])
+    info, ids = _hydrate_rows(conn, [row], legacy=legacy)[0]
     limit = views.observe_limit(limit)
-    messages = db.get_messages(info["current_session_id"], include_ancestors=True, limit=limit + 1, latest=True)
+    messages = db.get_lineage_tail_preview(info["current_session_id"], limit + 1)
     truncated = len(messages) > limit
     tail = [views.message_view(m) for m in messages[-limit:]]
-    ids = chain(conn, session_id)
-    subs = []
-    for row in conn.execute(f"SELECT * FROM sessions WHERE parent_session_id IN ({_placeholders(ids)})", ids).fetchall():
-        if _is_default_child(row, set(ids), conn) is None:
-            continue
-        subs.append(record(conn, row))
-    rollup = views.children_rollup(subs, lambda sub: views.latest_step(_latest_message(db, conn, sub["session_id"])),
-                                   inherit_model=info.get("model"))
+    subs, total = _children_preview(db, conn, ids, views.CHILDREN_MAX, legacy=legacy)
+    rollup = views.children_rollup(subs, lambda sub: views.latest_step(sub.get("_latest_message")),
+                                   inherit_model=info.get("model"), total=total)
     return {"session": views.session_brief(info), "messages": tail, "truncated": truncated, **rollup}

@@ -193,11 +193,12 @@ def test_peer_admission_reaches_siblings_only_and_is_a_typed_peer_event(state):
         api.admit("a", "b", "still there?")
     assert closed.value.code == "closed"
     # The peer ACL is pluggable; a widened reach is labelled relation="peer".
-    previous = directory.set_session_acl(lambda db_, conn, caller, row: row["id"] == "a-sub", action="peer")
+    previous = directory.set_session_acl(lambda db_, conn, caller, row: row["id"] == "a-sub", action="peer",
+                                         scope=db)
     try:
         assert api.admit("b", "a-sub", "cross-tree")["delivered"]
     finally:
-        directory.set_session_acl(previous, action="peer")
+        directory.set_session_acl(previous, action="peer", scope=db)
     event = event_from_payload(list_session_admissions(db, session_id="a-sub")[0]["payload"])
     assert event["meta"]["relation"] == "peer"
     # Non-peer senders keep the observe ACL (a parent addressing its child).

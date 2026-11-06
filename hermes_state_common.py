@@ -957,6 +957,18 @@ CREATE INDEX IF NOT EXISTS idx_sessions_group
     ON sessions(group_id) WHERE group_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_attached_session
     ON sessions(attached_session_id) WHERE attached_session_id IS NOT NULL;
+-- Freya's default delegate list (agent/session_directory.py) finds opt-ins by their delivery_target's
+-- literal session id or selector. Expression indexes over the same non-throwing JSON read the list uses
+-- (agent.session_directory.target_sql), maintained by SQLite on every write: no writer changes, no scan.
+CREATE INDEX IF NOT EXISTS idx_sessions_delivery_session
+    ON sessions(""" + _sql_json_extract("delivery_target", "$.session_id") + """) WHERE delivery_target IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_delivery_selector
+    ON sessions(""" + _sql_json_extract("delivery_target", "$.selector") + """)
+    WHERE delivery_target IS NOT NULL AND """ + _sql_json_extract("delivery_target", "$.selector") + """ IS NOT NULL;
+-- A list row's latest parent assignment: newest admission of one target first (ORDER BY seq DESC LIMIT 1),
+-- never the target's whole admission history.
+CREATE INDEX IF NOT EXISTS idx_session_admissions_target_seq
+    ON session_admissions(target_session_id, seq);
 DROP TRIGGER IF EXISTS sessions_topology_insert;
 CREATE TRIGGER IF NOT EXISTS sessions_topology_insert
 AFTER INSERT ON sessions WHEN new.root_session_id IS NULL OR new.depth IS NULL
