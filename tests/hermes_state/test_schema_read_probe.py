@@ -60,9 +60,12 @@ class TestSchemaReadProbeStatements:
         """
         conn = _fresh_schema_conn()
         try:
-            # Indexes that depend on the column must be removed before SQLite
-            # can emulate a pre-column legacy store via DROP COLUMN.
+            # Indexes (and the list-recency triggers) that depend on the column must be removed before
+            # SQLite can emulate a pre-column legacy store via DROP COLUMN.
             conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
+            for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                                        "AND name LIKE '%list_recency%'").fetchall():
+                conn.execute(f"DROP TRIGGER {name}")
             conn.execute("ALTER TABLE sessions DROP COLUMN last_activity_at")
             # The failure must come from the sessions probe naming the exact
             # column — not incidentally from some other statement — so a

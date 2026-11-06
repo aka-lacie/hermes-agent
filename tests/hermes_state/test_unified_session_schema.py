@@ -93,6 +93,14 @@ def test_reconcile_adds_columns_to_an_old_store_without_backfilling(tmp_path):
     with sqlite3.connect(path) as legacy:  # the shape a pre-2a release left behind
         for name in ("sessions_topology_insert", "sessions_topology_reparent"):
             legacy.execute(f"DROP TRIGGER {name}")
+        # re-review R8's list-recency triggers/indexes/columns are later still (they read the 2a columns)
+        for kind, name in legacy.execute("SELECT type, name FROM sqlite_master WHERE name LIKE '%list_recency%' "
+                                         "OR name LIKE 'idx_sessions_%recency' OR name = 'idx_sessions_conversation_root'"
+                                         ).fetchall():
+            legacy.execute(f"DROP {kind.upper()} {name}")
+        for column in ("conversation_root_id", "conversation_activity_at", "list_closed"):
+            legacy.execute(f"ALTER TABLE sessions DROP COLUMN {column}")
+        legacy.execute("DELETE FROM state_meta WHERE key = 'list_recency_backfill'")
         for name in ("idx_sessions_root_session", "idx_sessions_group",
                      # review R8's delivery_target expression indexes: a pre-2a store has neither the column
                      # nor these (and SQLite refuses to drop a column an index still reads)
@@ -110,6 +118,7 @@ def test_reconcile_adds_columns_to_an_old_store_without_backfilling(tmp_path):
         assert "wake_policy" in _columns(db._conn, "session_admissions")
         indexes = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
         assert {"idx_sessions_delivery_session", "idx_sessions_delivery_selector"} <= indexes  # added after the column
+        assert {"idx_sessions_parent_recency", "idx_sessions_root_recency"} <= indexes  # and the recency indexes
         assert [m["content"] for m in db.get_messages_as_conversation("old-root")] == ["kept"]
         # Existing rows are left for the lineage migration...
         assert _topology(db, "old-root") == (None, None)

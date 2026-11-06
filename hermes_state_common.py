@@ -542,6 +542,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- parent_session_id, so no compression/continuation walk can ever mistake it for a segment of its
     -- target. Rebound to the target's current session on creation and every delivery. NULL otherwise.
     attached_session_id TEXT,
+    -- Materialized list recency (agent/session_directory.py, review R8), maintained by SQLite triggers on
+    -- every write (DEFERRED_INDEX_SQL ``*_list_recency_*``), whoever wrote it. conversation_root_id labels
+    -- the row's compression family (a continuation joins its parent's); conversation_activity_at is an UPPER
+    -- BOUND of the delegate list's order key (started_at / last_activity_at / the newest message of any
+    -- family segment), exact in the normal one-continuation case; list_closed = 1 only when the row's list
+    -- status is certainly 'closed'. Readers scan the recency indexes and verify the exact key.
+    conversation_root_id TEXT,
+    conversation_activity_at REAL NOT NULL DEFAULT 0,
+    list_closed INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id),
     FOREIGN KEY (system_prompt_hash) REFERENCES system_prompts(hash)
 );
@@ -812,6 +821,43 @@ _SESSION_TOPOLOGY_DEPTH_SQL = (
     + _sql_json_extract("new.model_config", "$._delegate_from")
     + " = new.parent_session_id THEN 1 ELSE 0 END FROM sessions p WHERE p.id = new.parent_session_id) END")
 
+# ── Materialized list recency (review R8) ──
+# The delegate list orders by MAX(started_at, last_activity_at, newest message of any compression segment)
+# DESC, started_at DESC, id DESC (agent.session_directory). ``conversation_activity_at`` is kept >= that key
+# for every row by the ``*_list_recency_*`` triggers below; the recency indexes order by these columns.
+LIST_RECENCY_ORDER_SQL = "conversation_activity_at DESC, started_at DESC, id DESC"
+# Kinds an own-delegate arm can list ('' = a pre-unified row the legacy delegate_sessions shim may claim).
+LIST_OWN_KIND_SQL = "COALESCE(lineage_kind, '') IN ('delegate', '')"
+# Kinds an opt-in (attach) arm can list: agent.session_directory._NOT_ATTACHABLE_SQL's complement.
+LIST_ATTACHABLE_KIND_SQL = ("COALESCE(lineage_kind, '') NOT IN "
+                            "('continuation', 'branch', 'reset', 'switch', 'root', 'delegate')")
+# 1 when agent.session_directory._status_sql is 'closed' for the row unless a running (started/unknown)
+# admission overrides it -- the one input that lives outside the row: readers add those few rows back through
+# idx_session_admissions_running, so no trigger sits on the admission hot path. A row without lineage_kind
+# may take its status from the legacy shim: never flagged. *row*: '' for the row an ``UPDATE sessions`` is
+# writing, ``new.`` inside a trigger's WHEN.
+def _list_closed_sql(row: str = "") -> str:
+    return (f"(CASE WHEN NULLIF({row}status, '') = 'closed' THEN 1 WHEN COALESCE({row}lineage_kind, '') = '' THEN 0 "
+            f"WHEN {row}status IN ('running', 'idle') THEN 0 "
+            f"WHEN COALESCE({row}ended_at, 0) != 0 AND {row}end_reason IS NOT 'compression' THEN 1 ELSE 0 END)")
+
+
+LIST_CLOSED_SQL = _list_closed_sql()
+# The running admissions that can override a flagged row (idx_session_admissions_running's predicate).
+LIST_RUNNING_ADMISSION_SQL = "status IN ('started', 'unknown')"
+# The family rows a message of *session* must lift (the message triggers' WHEN and body).
+_LIST_FAMILY_ROWS_SQL = ("(conversation_root_id = (SELECT s.conversation_root_id FROM sessions s WHERE s.id = {sid}) "
+                         "OR id = {sid}) AND conversation_activity_at < {ts}")
+_LIST_FAMILY_MAX_SQL = ("(SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id IN "
+                        "(SELECT f.id FROM sessions f WHERE f.conversation_root_id = {root}))")
+_LIST_PARENT_FAMILY_SQL = (
+    "SELECT p.conversation_root_id FROM sessions p WHERE p.id = new.parent_session_id "
+    "AND p.end_reason = 'compression' " + _non_continuation_child_sql("new.", "p.id").replace("\n", " "))
+_LIST_CHILD_FAMILIES_SQL = (
+    "SELECT c.conversation_root_id FROM sessions c WHERE c.parent_session_id = new.id "
+    + _non_continuation_child_sql("c.", "new.id").replace("\n", " ")
+    + " AND c.conversation_root_id IS NOT new.conversation_root_id")
+
 # Indexes on later-added columns must run AFTER _reconcile_columns(), or executescript fails on legacy DBs.
 # sessions_runtime_ledger_delete_guard: every delete path in this release retires a session's ledger rows
 # (session_admissions / worker_executions, ON DELETE RESTRICT) first, so only a release that predates the
@@ -996,6 +1042,118 @@ BEGIN
         depth = """ + _SESSION_TOPOLOGY_DEPTH_SQL + """
     WHERE id = new.id;
 END;
+""" + """
+CREATE INDEX IF NOT EXISTS idx_sessions_conversation_root
+    ON sessions(conversation_root_id) WHERE conversation_root_id IS NOT NULL;
+-- Materialized list recency (review R8; agent/session_directory.py). Each delegate list / tree arm walks one
+-- of these in (conversation_activity_at, started_at, id) DESC order -- the list's tie-breakers -- and stops
+-- once the exact key of the page's last row beats the next row's bound: O(limit) rows, never O(candidates).
+-- Partial on the kinds an arm can ever list (own delegate spawns / attachable opt-ins).
+CREATE INDEX IF NOT EXISTS idx_sessions_parent_recency
+    ON sessions(parent_session_id, list_closed, """ + LIST_RECENCY_ORDER_SQL + """)
+    WHERE parent_session_id IS NOT NULL AND """ + LIST_OWN_KIND_SQL + """;
+CREATE INDEX IF NOT EXISTS idx_sessions_delivery_session_recency
+    ON sessions(""" + _sql_json_extract("delivery_target", "$.session_id") + """, list_closed, """ + LIST_RECENCY_ORDER_SQL + """)
+    WHERE delivery_target IS NOT NULL AND """ + LIST_ATTACHABLE_KIND_SQL + """;
+CREATE INDEX IF NOT EXISTS idx_sessions_delivery_selector_recency
+    ON sessions(""" + _sql_json_extract("delivery_target", "$.selector") + """, list_closed, """ + LIST_RECENCY_ORDER_SQL + """)
+    WHERE delivery_target IS NOT NULL AND """ + _sql_json_extract("delivery_target", "$.selector") + """ IS NOT NULL
+      AND """ + LIST_ATTACHABLE_KIND_SQL + """;
+CREATE INDEX IF NOT EXISTS idx_sessions_attached_recency
+    ON sessions(attached_session_id, list_closed, """ + LIST_RECENCY_ORDER_SQL + """)
+    WHERE attached_session_id IS NOT NULL AND """ + LIST_ATTACHABLE_KIND_SQL + """;
+CREATE INDEX IF NOT EXISTS idx_sessions_root_recency
+    ON sessions(root_session_id, list_closed, """ + LIST_RECENCY_ORDER_SQL + """);
+DROP TRIGGER IF EXISTS sessions_list_recency_insert;
+CREATE TRIGGER IF NOT EXISTS sessions_list_recency_insert
+AFTER INSERT ON sessions
+BEGIN
+    -- A new row joins its parent's compression family when it is an eligible continuation of a parent
+    -- already ended by compression (the rule agent.session_directory's segment walk follows), else starts
+    -- its own. Its bound starts at its own floor; list_closed mirrors the list status rule.
+    UPDATE sessions SET
+        conversation_root_id = COALESCE((SELECT p.conversation_root_id FROM sessions p
+            WHERE p.id = new.parent_session_id AND p.end_reason = 'compression'
+            """ + _non_continuation_child_sql("new.", "p.id").replace("\n", " ") + """), new.id),
+        conversation_activity_at = MAX(COALESCE(conversation_activity_at, 0), COALESCE(started_at, 0),
+            COALESCE(last_activity_at, 0),
+            COALESCE((SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = new.id), 0)),
+        list_closed = """ + LIST_CLOSED_SQL + """
+    WHERE id = new.id;
+    UPDATE sessions SET conversation_activity_at = (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = new.id)
+    WHERE conversation_root_id = (SELECT s.conversation_root_id FROM sessions s WHERE s.id = new.id)
+      AND conversation_activity_at < (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = new.id);
+END;
+DROP TRIGGER IF EXISTS sessions_list_recency_join;
+CREATE TRIGGER IF NOT EXISTS sessions_list_recency_join
+AFTER UPDATE OF parent_session_id, model_config, source ON sessions
+WHEN new.parent_session_id IS NOT NULL AND (""" + _LIST_PARENT_FAMILY_SQL + """) IS NOT NULL
+  AND (""" + _LIST_PARENT_FAMILY_SQL + """) IS NOT new.conversation_root_id
+BEGIN
+    -- This row became an eligible continuation of a compression-ended parent (reparent / marker change):
+    -- the parent's family learns this family's newest message, then absorbs it. Families only ever merge,
+    -- so the bound can only go stale HIGH (readers verify the exact key), never low.
+    UPDATE sessions SET conversation_activity_at = """ + _LIST_FAMILY_MAX_SQL.format(root="new.conversation_root_id") + """
+    WHERE conversation_root_id = (""" + _LIST_PARENT_FAMILY_SQL + """)
+      AND conversation_root_id IS NOT new.conversation_root_id
+      AND conversation_activity_at < """ + _LIST_FAMILY_MAX_SQL.format(root="new.conversation_root_id") + """;
+    UPDATE sessions SET conversation_root_id = (""" + _LIST_PARENT_FAMILY_SQL + """)
+    WHERE conversation_root_id = new.conversation_root_id
+      AND (""" + _LIST_PARENT_FAMILY_SQL + """) IS NOT NULL
+      AND (""" + _LIST_PARENT_FAMILY_SQL + """) IS NOT new.conversation_root_id;
+END;
+DROP TRIGGER IF EXISTS sessions_list_recency_split;
+CREATE TRIGGER IF NOT EXISTS sessions_list_recency_split
+AFTER UPDATE OF end_reason ON sessions
+WHEN new.end_reason = 'compression' AND EXISTS (""" + _LIST_CHILD_FAMILIES_SQL + """)
+BEGIN
+    -- A compression split whose continuation row already exists: the continuation families join this one.
+    UPDATE sessions SET conversation_activity_at = (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id IN (
+        SELECT f.id FROM sessions f WHERE f.conversation_root_id IN (""" + _LIST_CHILD_FAMILIES_SQL + """)))
+    WHERE conversation_root_id = new.conversation_root_id
+      AND conversation_activity_at < (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id IN (
+        SELECT f.id FROM sessions f WHERE f.conversation_root_id IN (""" + _LIST_CHILD_FAMILIES_SQL + """)));
+    UPDATE sessions SET conversation_root_id = new.conversation_root_id
+    WHERE new.conversation_root_id IS NOT NULL AND conversation_root_id IN (""" + _LIST_CHILD_FAMILIES_SQL + """);
+END;
+DROP TRIGGER IF EXISTS sessions_list_recency_floor;
+CREATE TRIGGER IF NOT EXISTS sessions_list_recency_floor
+AFTER UPDATE OF started_at, last_activity_at ON sessions
+WHEN new.conversation_activity_at < MAX(COALESCE(new.started_at, 0), COALESCE(new.last_activity_at, 0))
+BEGIN
+    UPDATE sessions SET conversation_activity_at = MAX(COALESCE(new.started_at, 0), COALESCE(new.last_activity_at, 0))
+    WHERE id = new.id;
+END;
+DROP TRIGGER IF EXISTS sessions_list_recency_closed;
+CREATE TRIGGER IF NOT EXISTS sessions_list_recency_closed
+AFTER UPDATE OF status, ended_at, end_reason, lineage_kind ON sessions
+WHEN new.list_closed IS NOT """ + _list_closed_sql("new.") + """
+BEGIN
+    UPDATE sessions SET list_closed = """ + LIST_CLOSED_SQL + """ WHERE id = new.id;
+END;
+DROP TRIGGER IF EXISTS messages_list_recency_insert;
+CREATE TRIGGER IF NOT EXISTS messages_list_recency_insert
+AFTER INSERT ON messages
+WHEN EXISTS (SELECT 1 FROM sessions WHERE """ + _LIST_FAMILY_ROWS_SQL.format(sid="new.session_id", ts="new.timestamp") + """)
+BEGIN
+    -- Every family row's bound covers its newest message, whoever wrote it (a copy of an older row is a no-op).
+    UPDATE sessions SET conversation_activity_at = new.timestamp
+    WHERE """ + _LIST_FAMILY_ROWS_SQL.format(sid="new.session_id", ts="new.timestamp") + """;
+END;
+DROP TRIGGER IF EXISTS messages_list_recency_update;
+CREATE TRIGGER IF NOT EXISTS messages_list_recency_update
+AFTER UPDATE OF timestamp, session_id ON messages
+WHEN (new.timestamp IS NOT old.timestamp OR new.session_id IS NOT old.session_id)
+  AND EXISTS (SELECT 1 FROM sessions WHERE """ + _LIST_FAMILY_ROWS_SQL.format(sid="new.session_id", ts="new.timestamp") + """)
+BEGIN
+    UPDATE sessions SET conversation_activity_at = new.timestamp
+    WHERE """ + _LIST_FAMILY_ROWS_SQL.format(sid="new.session_id", ts="new.timestamp") + """;
+END;
+-- The running admissions that override a list_closed row: readers add those rows back through this (small:
+-- one entry per in-flight run), so the admission write path carries no list trigger. (status leads so the
+-- partial index covers its own predicate: the planner then prefers it to scanning session_admissions_pending.)
+CREATE INDEX IF NOT EXISTS idx_session_admissions_running
+    ON session_admissions(status, target_session_id) WHERE """ + LIST_RUNNING_ADMISSION_SQL + """;
 """
 
 

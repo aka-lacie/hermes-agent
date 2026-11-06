@@ -230,6 +230,12 @@ SCHEMA_HISTORY: dict[str, _TableHistory] = {
         )),
         # Unified session model (dev3 Phase 3): the attach primitive of opted-in webhook/cron sessions.
         ('34 2026-11-06T00:00Z dev3-phase3', (('+', 'attached_session_id', 'group_id'),)),
+        # Materialized delegate-list recency (dev3 re-review R8): compression family, order-key bound, closed flag.
+        ('35 2026-11-06T13:00Z dev3-rr-r8', (
+            ('+', 'conversation_root_id', 'attached_session_id'),
+            ('+', 'conversation_activity_at', 'conversation_root_id'),
+            ('+', 'list_closed', 'conversation_activity_at'),
+        )),
         ),
     ),
     "messages": _TableHistory(

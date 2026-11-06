@@ -980,6 +980,10 @@ class SessionSchemaMixin:
         except sqlite3.OperationalError as exc:
             logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
         self._execute_ddl_skipping_settled_triggers(cursor, DEFERRED_INDEX_SQL)  # same ordering constraint (``active``)
+        # The list-recency columns of rows that predate their triggers (review R8): once per store, after the
+        # triggers exist so a concurrent write is covered by one or the other. A settled store only reads.
+        from hermes_state_list_recency import backfill as _backfill_list_recency
+        _backfill_list_recency(cursor)
 
         # Heal NULL ``active`` rows on every startup: older reconciler builds added ``active``
         # without NOT NULL DEFAULT 1, so ``WHERE active = 1`` loaders hid whole histories. A

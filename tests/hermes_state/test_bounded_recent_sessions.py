@@ -32,6 +32,11 @@ def test_writable_startup_reconciles_legacy_activity_column_before_index(tmp_pat
     conn = sqlite3.connect(path)
     try:
         conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
+        # A pre-last_activity_at store has none of the later list-recency triggers that read the column
+        # (SQLite refuses to drop a column a trigger references); startup reinstalls them.
+        for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                                    "AND name LIKE '%list_recency%'").fetchall():
+            conn.execute(f"DROP TRIGGER {name}")
         conn.execute("ALTER TABLE sessions DROP COLUMN last_activity_at")
         conn.commit()
     finally:

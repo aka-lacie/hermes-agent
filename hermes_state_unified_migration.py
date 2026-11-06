@@ -667,6 +667,10 @@ def run(opts: Options) -> dict:
             conn.execute("BEGIN IMMEDIATE")
             _apply_sessions(conn, session_plan)
             _apply_messages(conn, message_plan, scope)
+            # Fold this apply's rewrites into the materialized list recency (review R8) without depending on
+            # trigger coverage of the rows it touched; monotone, so a repeat run changes nothing.
+            from hermes_state_list_recency import compute as _list_recency
+            _list_recency(conn)
             conn.execute("COMMIT")
         receipt["messages_after"] = _role_counts(conn)
     finally:
