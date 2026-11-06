@@ -207,13 +207,16 @@ class TestCommandCwdReadsTheRecord:
         )
         assert resolved == "/config/default"
 
-    def test_cd_then_next_command_runs_in_the_new_dir(self, monkeypatch):
+    def test_cd_then_next_command_runs_in_the_new_dir(self, monkeypatch, tmp_path):
         """E2E through terminal_tool: the record round-trips cd state."""
         import json
 
+        project = tmp_path / "project"
+        project.mkdir()
+
         class FakeEnv:
             env = {}
-            cwd = "/start"
+            cwd = str(tmp_path)
             def execute(self, command, **kwargs):
                 self.last_cwd_arg = kwargs.get("cwd")
                 if command.startswith("cd "):
@@ -227,7 +230,7 @@ class TestCommandCwdReadsTheRecord:
         monkeypatch.setattr(tt, "_last_activity", {})
         monkeypatch.setattr(
             tt, "_get_env_config",
-            lambda: {"env_type": "local", "cwd": "/default", "timeout": 60,
+            lambda: {"env_type": "local", "cwd": str(tmp_path), "timeout": 60,
                      "lifetime_seconds": 3600},
         )
         monkeypatch.setattr(
@@ -235,7 +238,7 @@ class TestCommandCwdReadsTheRecord:
             lambda command, env_type, **kwargs: {"approved": True},
         )
 
-        json.loads(tt.terminal_tool(command="cd /project", task_id="sess-a"))
-        assert tt.get_session_cwd("sess-a") == "/project"
+        json.loads(tt.terminal_tool(command=f"cd {project}", task_id="sess-a"))
+        assert tt.get_session_cwd("sess-a") == str(project)
         json.loads(tt.terminal_tool(command="pwd", task_id="sess-a"))
-        assert fake.last_cwd_arg == "/project"
+        assert fake.last_cwd_arg == str(project)

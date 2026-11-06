@@ -316,27 +316,35 @@ def _skills_prompt(agent: Any) -> str:
 
 
 def _auto_load_parts(agent: Any) -> list[str]:
-    """``skills.auto_load`` blocks, resolved once per agent lifecycle (config, skill files and
-    HERMES_IGNORE_RULES are read on the first build only) so the prompt stays byte-stable
-    across model switches, compression and static-prefix restoration.
+    """Resolve profile and per-agent skill bodies once, after the actual tool surface is known.
 
-    Same gate as ``_skills_prompt``: nothing without the skills toolset, and nothing for agents that skip
-    context files (delegate children, curator/review forks, gateway hygiene agents) — pinned skills are
-    operator guidance for the user's session, not payload for every internal fork."""
-    if getattr(agent, "skip_context_files", False) or not any(
+    Delegated children inherit profile auto_load even though they skip context files. Other internal
+    forks retain their skip gate. Eligibility never grants tools; valid_tool_names includes deferred
+    tools reachable by this agent, not only the schemas currently disclosed to its model.
+    """
+    delegated = getattr(agent, "platform", "") == "subagent" or hasattr(agent, "_delegate_depth")
+    if (getattr(agent, "skip_context_files", False) and not delegated) or not any(
             name in agent.valid_tool_names for name in ("skills_list", "skill_view", "skill_manage")):
         return []
     if not getattr(agent, "_auto_load_skills_resolved", False):
+        from agent.skill_preload import prepare_skill_preloads
+        prepare_skill_preloads(agent, user_message="")
         result: tuple[str, list[str], list[str]] = ("", [], [])
         try:
             if not is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")):
                 from agent.skill_commands import build_auto_load_prompt
-                result = build_auto_load_prompt(task_id=getattr(agent, "session_id", None), home_override=_agent_home(agent))
+                import model_tools
+                toolsets = {model_tools.get_toolset_for_tool(n) for n in agent.valid_tool_names} - {None, ""}
+                result = build_auto_load_prompt(
+                    task_id=getattr(agent, "session_id", None), home_override=_agent_home(agent),
+                    valid_tool_names=agent.valid_tool_names, available_toolsets=toolsets,
+                    preload_skills=getattr(agent, "preload_skills", None))
             if result[2]:
                 logger.warning("skills.auto_load: skill(s) not found or disabled, skipped: %s", ", ".join(result[2]))
         except Exception:
             logger.debug("skills.auto_load: injection skipped", exc_info=True)  # config errors never block session start
         agent._auto_load_skills_result = result
+        agent._preloaded_skill_names = set(result[1])
         agent._auto_load_skills_resolved = True
     prompt = agent._auto_load_skills_result[0]
     return [prompt] if prompt else []

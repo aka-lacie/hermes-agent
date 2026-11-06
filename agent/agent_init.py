@@ -2146,7 +2146,12 @@ def init_agent(
     # Main or subagent operating guidance, independent of platform/tools. None preserves
     # platform defaults; subagent also loads its role file when project context is skipped.
     instruction_role: Optional[str] = None,
+    preload_skills: Optional[list[str]] = None,
 ):
+    if not isinstance(preload_skills or [], list) or any(
+            not isinstance(n, str) or not n.strip() for n in (preload_skills or [])):
+        raise ValueError("preload_skills must be a list of non-empty skill names")
+    agent.preload_skills = list(dict.fromkeys(n.strip() for n in (preload_skills or [])))
     if instruction_role not in (None, "main", "subagent"):
         raise ValueError("instruction_role must be 'main', 'subagent', or None")
     agent.instruction_role = instruction_role or ("subagent" if platform == "subagent" else "main")

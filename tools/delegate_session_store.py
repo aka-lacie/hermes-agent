@@ -287,7 +287,7 @@ class DelegateSessionStore:
     # ── writes ───────────────────────────────────────────────────────────────
     def register(self, parent_session_id: str, session_id: str, *, model, provider, assignment, context="",
                  title=None, role="leaf", depth=1, workspace=None, forked_context=False, route=None,
-                 group_id=None, retain=True, fork_policy="fork_context", route_descriptor=None) -> dict:
+                 group_id=None, retain=True, fork_policy="fork_context", route_descriptor=None, preload_skills=None) -> dict:
         """Stamp a persisted child row as a delegate session (never overwriting a different parent)."""
         from agent.session_routes import RouteError, validate_route
         from gateway.delivery_targets import delegate_target, encode_delivery_target
@@ -299,7 +299,11 @@ class DelegateSessionStore:
             except RouteError as exc:
                 raise DelegateSessionError("invalid_route", str(exc)) from exc
         title = str(title or " ".join(str(assignment).split())[:80]).strip() or "Delegated task"
-        brief = {"title": title, "initial_goal": assignment, "context": context or "", "retain": bool(retain)}
+        if not isinstance(preload_skills or [], list) or any(
+                not isinstance(n, str) or not n.strip() for n in (preload_skills or [])):
+            raise DelegateSessionError("invalid_skills", "preload_skills must contain non-empty skill names.")
+        brief = {"title": title, "initial_goal": assignment, "context": context or "", "retain": bool(retain),
+                 "preload_skills": list(dict.fromkeys(n.strip() for n in (preload_skills or [])))}
         fork = {"session_id": parent_session_id, "message_uid": None, "policy": fork_policy} if forked_context else None
 
         def write(conn):

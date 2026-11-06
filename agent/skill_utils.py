@@ -740,7 +740,22 @@ _CONDITION_KEYS = ("fallback_for_toolsets", "requires_toolsets", "fallback_for_t
 def extract_skill_conditions(frontmatter: dict[str, Any]) -> dict[str, list]:
     """Extract conditional activation fields from parsed frontmatter (absent = ``[]``)."""
     hermes = _hermes_metadata(frontmatter)
-    return {key: hermes.get(key, []) for key in _CONDITION_KEYS}
+    return {key: hermes.get(key, frontmatter.get(key, [])) for key in _CONDITION_KEYS}
+
+
+def skill_tools_eligible(frontmatter: dict[str, Any], valid_tool_names=None, available_toolsets=None) -> bool:
+    """Pure eligibility: requirements never enable tools, discover tools, or install dependencies.
+
+    Callers pass the agent's full accessible surface, including discoverable deferred tools, not
+    merely the eager schema subset. With no capability evidence, required skills fail closed.
+    """
+    conditions = extract_skill_conditions(frontmatter)
+    tools, toolsets = set(valid_tool_names or ()), set(available_toolsets or ())
+    for key, available in (("requires_tools", tools), ("requires_toolsets", toolsets)):
+        required = conditions.get(key) or []
+        if not isinstance(required, list) or any(not isinstance(n, str) or n not in available for n in required):
+            return False
+    return True
 
 
 def extract_skill_config_vars(frontmatter: dict[str, Any]) -> list[dict[str, Any]]:

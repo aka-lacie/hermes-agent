@@ -250,7 +250,8 @@ def _resolve_skill_commands_project() -> Optional[str]:
     return str(root) if root is not None else None
 
 
-def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tuple[dict[str, Any], Path | None, str] | None:
+def _load_skill_payload(skill_identifier: str, task_id: str | None = None, *,
+                        valid_tool_names=None, available_toolsets=None) -> tuple[dict[str, Any], Path | None, str] | None:
     """Load a skill by name/path and return (loaded_payload, skill_dir, display_name)."""
     from agent.safe_worker_policy import safe_worker_enabled
 
@@ -263,7 +264,10 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         from tools.skills_tool import _skills_dir, skill_view
         from agent.skill_utils import normalize_skill_lookup_name
         normalized = normalize_skill_lookup_name(raw_identifier)
-        loaded_skill = json.loads(skill_view(normalized, task_id=task_id, preprocess=False))
+        loaded_skill = json.loads(skill_view(
+            normalized, task_id=task_id, preprocess=False,
+            **({"valid_tool_names": valid_tool_names, "available_toolsets": available_toolsets}
+               if valid_tool_names is not None else {})))
     except Exception:
         return None
     if not loaded_skill.get("success"):
@@ -289,12 +293,14 @@ def ambiguous_skill_label(identifier: str, payload: dict) -> Optional[str]:
     return f"{AMBIGUOUS_SKILL_PREFIX}{identifier}: use one of {', '.join(load_names)}" if load_names else None
 
 
-def _missing_skill_label(identifier: str) -> str:
+def _missing_skill_label(identifier: str, *, valid_tool_names=None, available_toolsets=None) -> str:
     """Display form of an identifier that failed to load (failure path only: re-asks skill_view)."""
     try:
         from tools.skills_tool import skill_view
         from agent.skill_utils import normalize_skill_lookup_name
-        payload = json.loads(skill_view(normalize_skill_lookup_name(identifier), preprocess=False))
+        payload = json.loads(skill_view(normalize_skill_lookup_name(identifier), preprocess=False,
+            **({"valid_tool_names": valid_tool_names, "available_toolsets": available_toolsets}
+               if valid_tool_names is not None else {})))
     except Exception:
         return identifier
     return ambiguous_skill_label(identifier, payload) or identifier
@@ -942,6 +948,8 @@ def _load_skill_blocks(
             else:
                 disabled.append(skill_name or identifier)
             continue
+        if skill_name in loaded_names:
+            continue
         if already_loaded and skill_name in already_loaded:
             loaded_names.append(skill_name)
             continue
@@ -952,32 +960,37 @@ def _load_skill_blocks(
 
 def build_preloaded_skills_prompt(
     skill_identifiers: list[str], task_id: str | None = None, excluded_loaded_names: set[str] | None = None,
+    *, valid_tool_names=None, available_toolsets=None, home_override: Path | None = None,
 ) -> tuple[str, list[str], list[str]]:
-    """Load skills for session-wide CLI/TUI preloading; returns (prompt_text,
-    loaded_skill_names, missing_identifiers). Disabled skills count as missing:
-    this path bypasses the scan-time filter, and ``hermes -s <skill>`` must not
-    force-load an operator-disabled skill. *excluded_loaded_names* are canonical
-    names the session already carries (skills.auto_load): they resolve as loaded
-    but are not rendered again.
+    """Render an ordered union of local or plugin-qualified skill names, without granting tools.
 
-    Disabled skills are treated the same as missing ones: this loads via a raw identifier straight into
-    ``_load_skill_payload``, bypassing ``get_skill_commands()``'s scan-time disabled filter — mirrors the
-    bundle-invocation gate (#59156).
+    ``valid_tool_names`` is the agent's complete accessible surface (including deferred discovery),
+    not only eager schemas. Ineligible, missing and disabled names are skipped. Home binding covers
+    config, plugin registry and file lookup. Unscoped frontend callers retain explicit-load behavior;
+    agent prompt builders always supply their actual tools.
     """
     from agent.safe_worker_policy import safe_worker_enabled
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
     if safe_worker_enabled():
         return "", [], list(skill_identifiers)
-    loaded_names, missing, _disabled, prompt_parts = _load_skill_blocks(
-        [(raw or "").strip() for raw in skill_identifiers],
-        lambda identifier: _load_skill_payload(identifier, task_id=task_id),
-        lambda name: (f'[IMPORTANT: The user launched this CLI session with the "{name}" skill '
-                      "preloaded. Treat its instructions as active guidance for the duration of this "
-                      "session unless the user overrides them.]"),
-        task_id, missing_label=_missing_skill_label, disabled_names=_disabled_skill_names(),
-        disabled_as_missing=True, already_loaded=excluded_loaded_names,
-    )
-    return "\n\n".join(prompt_parts), loaded_names, missing
+    token = set_hermes_home_override(str(home_override)) if home_override is not None else None
+    try:
+        loaded_names, missing, _disabled, prompt_parts = _load_skill_blocks(
+            [raw.strip() for raw in skill_identifiers if isinstance(raw, str)],
+            lambda identifier: _load_skill_payload(identifier, task_id=task_id,
+                valid_tool_names=valid_tool_names, available_toolsets=available_toolsets),
+            lambda name: (f'[IMPORTANT: The "{name}" skill is preloaded. Treat its instructions as active '
+                          "guidance for this session unless the user overrides them.]"),
+            task_id, disabled_names=_disabled_skill_names(),
+            missing_label=lambda ident: _missing_skill_label(ident, valid_tool_names=valid_tool_names,
+                                                            available_toolsets=available_toolsets),
+            disabled_as_missing=True, already_loaded=excluded_loaded_names,
+        )
+        return "\n\n".join(prompt_parts), loaded_names, missing
+    finally:
+        if token is not None:
+            reset_hermes_home_override(token)
 
 
 def resolve_auto_load_skills(user_config: dict | None = None) -> list[str]:
@@ -999,6 +1012,7 @@ def resolve_auto_load_skills(user_config: dict | None = None) -> list[str]:
 
 def build_auto_load_prompt(
     task_id: str | None = None, user_config: dict | None = None, home_override: Path | None = None,
+    *, valid_tool_names=None, available_toolsets=None, preload_skills: list[str] | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Render ``skills.auto_load`` as fully loaded skill blocks for a new session; returns
     ``(prompt_text, loaded_names, missing)``. Missing and operator-disabled names are reported,
@@ -1012,14 +1026,17 @@ def build_auto_load_prompt(
     home_token = set_hermes_home_override(str(home_override)) if home_override is not None else None
     try:
         auto_skills = resolve_auto_load_skills(user_config)
-        if not auto_skills:
+        names = list(dict.fromkeys([*auto_skills, *(preload_skills or [])]))
+        if not names:
             return "", [], []
         loaded_names, missing, _disabled, prompt_parts = _load_skill_blocks(
-            auto_skills,
-            lambda identifier: _load_skill_payload(identifier, task_id=task_id),
+            names,
+            lambda identifier: _load_skill_payload(identifier, task_id=task_id,
+                valid_tool_names=valid_tool_names, available_toolsets=available_toolsets),
             lambda name: (f'[IMPORTANT: The "{name}" skill is auto-loaded via config (skills.auto_load). '
                           "Treat its instructions as active guidance for the duration of this session unless "
-                          "the user overrides them.]"),
+                          "the user overrides them.]" if name in auto_skills else
+                          f'[IMPORTANT: The "{name}" skill is preloaded for this agent. Follow it unless overridden.]'),
             task_id, disabled_names=_disabled_skill_names(), disabled_as_missing=True,
         )
         return "\n\n".join(prompt_parts), loaded_names, missing

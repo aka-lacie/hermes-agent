@@ -376,7 +376,9 @@ skills:
     - github-pr-workflow
 ```
 
-Each entry is a skill name. The list is resolved once when a session's system prompt is first built and the rendered bytes are reused for the life of the conversation (model switches, compression), so prompt caching stays intact; config edits take effect in the next session. Missing or disabled skills log a warning and are skipped. `-s` names that overlap the list are loaded once.
+Each entry is a regular skill name or an enabled plugin's qualified `plugin:skill` name. The list is resolved once when a session's system prompt is first built and the rendered bytes are reused for the life of the conversation (model switches, compression), so prompt caching stays intact; config edits take effect in the next session. Missing or disabled skills log a warning and are skipped. `-s` names that overlap the list are loaded once.
+
+Delegated agents inherit the profile list, ordered before their explicit `preload_skills` names and high-confidence plugin selections. Canonical names are deduplicated even when aliases differ. The host filters this union against each child's actual accessible tools, including tools available through deferred discovery. `requires_tools: [delegate_task]` (top-level frontmatter, or `metadata.hermes.requires_tools`) means **eligible only when that agent has `delegate_task`**. It never enables tools, installs them, or changes delegation depth. Leaf children therefore skip delegation-only skills but still receive eligible explicit skills. Non-delegated internal forks that skip context files keep that gate.
 
 `--ignore-rules` (equivalently `HERMES_IGNORE_RULES=1`) skips auto-load together with AGENTS.md, SOUL.md, `.cursorrules` and memory injection; explicit `-s` skills still load. The setting is profile-scoped: each profile's `config.yaml` controls its own list.
 

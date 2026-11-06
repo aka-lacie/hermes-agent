@@ -558,6 +558,7 @@ def _build_children(
             if isinstance(exc, ValueError):
                 return [], str(exc)
             raise
+        child.preload_skills = list(options[i].get("preload_skills") or [])
         pin_child_service_tier(child, route.creds)
         attach_fork_history(child, histories[i])
         if _task_schema is not None:
@@ -823,7 +824,8 @@ def launch_resumed(parent_agent, record: dict, claim: dict, reservation: dict, *
     stored route. The reservation transfers the claim to the built child, whose teardown settles it."""
     payload = claim.get("payload") or {}
     route = resumed_route(parent_agent, record, payload.get("model"))
-    task = {"goal": str(payload.get("text") or ""), "context": record.get("context") or "", "fork_context": False}
+    task = {"goal": str(payload.get("text") or ""), "context": record.get("context") or "", "fork_context": False,
+            "skills": list(record.get("preload_skills") or [])}
     cfg = _load_config()
     return launch_children(
         [task], [route], parent_agent=parent_agent, background=background, context=task["context"],

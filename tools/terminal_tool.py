@@ -289,6 +289,20 @@ def clear_session_cwd(session_key: str) -> None:
         _session_cwd.pop(_qualify_task_key(session_key), None)
 
 
+def _terminal_cwd_session_key(task_id: Optional[str]) -> str:
+    """Children own their seeded cwd, not the inherited approval/delivery owner.
+
+    Top-level sessions retain routing-key precedence. Never rebind approval
+    context to isolate mutable terminal state: approvals still go to the parent.
+    """
+    from agent.delegation_context import is_delegated_child_context
+    from tools.approval import get_current_session_key
+
+    if task_id and is_delegated_child_context():
+        return task_id
+    return get_current_session_key(default="") or (task_id or "")
+
+
 def _sanitize_cwd_for_live_env(env: Any, new_cwd: str) -> Optional[str]:
     """Cwd to write into a LIVE cached env, or None to leave it untouched.
 
@@ -1011,6 +1025,24 @@ def _container_visible_default(default_cwd: str, env_type: str | None, env=None)
     return default_cwd
 
 
+def _recover_recorded_local_cwd(recorded: str, default_cwd: str, session_key: Optional[str]) -> str:
+    """Repair only implicit local state, before its path enters the shell wrapper."""
+    from tools.environments.local import _msys_to_windows_path, _resolve_safe_cwd
+
+    if os.path.isdir(_msys_to_windows_path(recorded)):
+        return recorded
+    overrides = _task_env_overrides.get(_qualify_task_key(str(session_key or "default")), {})
+    workspace = overrides.get("cwd")
+    candidate = workspace if workspace and os.path.isdir(_msys_to_windows_path(workspace)) else default_cwd
+    recovered = _resolve_safe_cwd(candidate)
+    record_session_cwd(session_key, recovered)
+    logger.warning(
+        "Recorded local session cwd %r is missing on disk; recovering to %r before command execution.",
+        recorded, recovered,
+    )
+    return recovered
+
+
 def _resolve_command_cwd(
     *,
     workdir: Optional[str],
@@ -1024,7 +1056,9 @@ def _resolve_command_cwd(
     ``default_cwd``.
 
     The record is written after every completed command of THIS session, so
-    it is the session's ``cd`` state with no shared-env ambiguity. On
+    it is the session's ``cd`` state with no shared-env ambiguity. Missing
+    implicit local records are reseeded before constructing the shell wrapper;
+    explicit workdirs and remote paths are never host-repaired. On
     container backends a recorded HOST path (a desktop/TUI surface registering
     its workspace) is unusable in the sandbox — ``cd <host path>`` fails with
     exit 126 — so it is discarded in favor of ``default_cwd``.
@@ -1039,6 +1073,8 @@ def _resolve_command_cwd(
     if workdir:
         return coerce_ssh_remote_cwd(_container_visible_cwd(workdir, env_type, env), env_type)
     recorded = get_session_cwd(session_key)
+    if recorded and env_type == "local":
+        return _recover_recorded_local_cwd(recorded, default_cwd, session_key)
     if recorded and _is_container_backend(env_type) and _is_unusable_container_cwd(
         recorded, mounted_host=mounted_host
     ) and not _in_sandbox_home(recorded, env):
@@ -1522,12 +1558,7 @@ def terminal_tool(
         with _call_in_flight(plan.effective_task_id, task_id):
             env_type, cwd, effective_task_id = plan.env_type, plan.cwd, plan.effective_task_id
 
-            # Session key for cwd records: the contextvar doesn't cross tool-worker
-            # threads, so fall back to the raw task_id (the top-level agent's
-            # session_key) as a stable anchor.
-            from tools.approval import get_current_session_key
-
-            session_key = get_current_session_key(default="") or (task_id or "")
+            session_key = _terminal_cwd_session_key(task_id)
 
             # The supervised-gateway identity probe ends in a kernel process query
             # (psutil create_time) that has wedged for the better part of an hour on

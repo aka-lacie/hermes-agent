@@ -13,8 +13,9 @@ class SubagentExtension:
         return True
 
     def child_options(self, task: dict) -> dict:
-        """Optional retain/review_skills/fork_context booleans and a display title.
+        """Optional retain/review_skills/fork_context booleans, title and preload_skills names.
 
+        preload_skills is data only: the child's prompt builder filters against its actual tools.
         fork_context is a default for new children; an explicit task choice wins.
         """
         return {}
@@ -54,7 +55,11 @@ def resolve_child_options(extension, task):
     fork = task.get("fork_context", options.get("fork_context", False))
     if type(fork) is not bool:
         raise ValueError("Task fork_context must be a boolean.")
-    return {**options, "fork_context": fork}
+    for names in (options.get("preload_skills", []), task.get("skills", [])):
+        if not isinstance(names, list) or any(not isinstance(n, str) or not n.strip() for n in names):
+            raise ValueError("Skill preloads must be a list of non-empty skill names.")
+    preloads = list(dict.fromkeys(n.strip() for n in [*options.get("preload_skills", []), *task.get("skills", [])]))
+    return {**options, "fork_context": fork, "preload_skills": preloads}
 
 
 def extend_delegation_schema(schema):

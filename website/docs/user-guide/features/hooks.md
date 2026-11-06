@@ -398,6 +398,19 @@ def register(ctx):
 - Correlation fields such as `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count` are hook-specific and may be absent. Treat IDs as opaque.
 - Runtime event-name validity comes from `hermes_cli.plugins.VALID_HOOKS`. `hermes hooks list` lists configured shell/outbound hooks, not every available event; `hermes hooks test <event>` reports the valid set only when an invalid event is supplied.
 
+### Turn-zero skill selection
+
+`pre_skill_preload` is a fail-open, timeout-bounded plugin hook before a new conversation's system
+prompt is built (also before each retained delegate activation). It receives `user_message`,
+`conversation_history`, `platform`, `session_id`, `parent_session_id`, `is_first_turn`, and optional typed
+`inputs`. Return `{"preload_skills": ["name", "plugin:skill"]}` to append ordered skill names. This is a
+name-selection contract, not permission to add tools or replace the prompt. Core merges the profile's
+`skills.auto_load`, agent/extension preloads and selector names, deduplicates canonical skills and
+filters their `requires_tools` / `requires_toolsets` against the agent's real accessible surface.
+Skill bodies are frozen with the prefix. Ordinary resumed sessions restore their existing prefix
+instead; later-turn selections belong in `pre_llm_call` advisory context. Selection must not mutate a
+cached system prompt or grant capabilities. Invalid callback results are ignored.
+
 ### Cache-safe system prompt sections
 
 Plugins that need durable, always-on guidance can register a bounded system

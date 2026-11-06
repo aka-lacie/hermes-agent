@@ -122,7 +122,8 @@ def _preprocess_skill(content: str, skill_dir, session_id, debug_msg: str, *args
 
 def _serve_plugin_skill(
     skill_md: Path, namespace: str, bare: str, file_path: str | None = None, *,
-    preprocess: bool = True, session_id: str | None = None) -> str:
+    preprocess: bool = True, session_id: str | None = None,
+    valid_tool_names=None, available_toolsets=None) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from hermes_cli.plugins import _get_disabled_plugins, get_plugin_manager
     from hermes_cli.plugins_content import plugin_skill_owners
@@ -135,6 +136,10 @@ def _serve_plugin_skill(
     except Exception as e:
         return _fail(f"Failed to read skill '{qualified_name}': {e}")
     parsed_frontmatter = _safe_frontmatter(content=content)
+    from agent.skill_utils import skill_tools_eligible
+    if valid_tool_names is not None and not skill_tools_eligible(
+            parsed_frontmatter, valid_tool_names, available_toolsets):
+        return _fail(f"Skill '{qualified_name}' requires unavailable tools.", ineligible=True)
     if _st._is_skill_disabled(qualified_name):
         return _fail(f"Skill '{qualified_name}' is disabled.")
     if not _st.skill_matches_platform(parsed_frontmatter):
@@ -156,6 +161,7 @@ def _serve_plugin_skill(
         namespace, bare)
     return _json({
         "success": True, "name": qualified_name, "content": banner + rendered_content,
+        **({"raw_content": content} if not preprocess else {}),
         "description": _truncate_description(str(parsed_frontmatter.get("description", ""))),
         "linked_files": _plugin_skill_linked_files(skill_md.parent),
         "readiness_status": SkillReadinessStatus.AVAILABLE.value,

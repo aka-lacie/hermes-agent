@@ -174,6 +174,7 @@ def bind_child(parent, child, task, resume=None, *, extension, options, routing_
             role=child._delegate_role, depth=child._delegate_depth,
             workspace=child._delegate_workspace, forked_context=child._delegate_forked_context,
             route=capture_agent_route(child, routing_cfg=routing_cfg, report=getattr(child, "_delegate_route", None)),
+            preload_skills=list(task.get("skills") or []),
             group_id=getattr(child, "_delegation_id", None),
         )
         deleg = getattr(child, "_delegation_id", None)

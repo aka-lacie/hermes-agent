@@ -365,6 +365,7 @@ def _build_record(row, legacy: Optional[dict]) -> dict:
         # parent admission supersedes it.
         "assignment": latest or brief.get("assignment") or (legacy or {}).get("assignment") or initial,
         "context": brief.get("context") or (legacy or {}).get("context") or "",
+        "preload_skills": list(brief.get("preload_skills") or []),
         "workspace": row.get("workspace") or (legacy or {}).get("workspace"),
         "forked_context": bool(fork) or bool((legacy or {}).get("forked_context")), "fork_origin": fork,
         "route": route or None, "model": route.get("model") or row.get("model") or (legacy or {}).get("model"),
@@ -615,7 +616,7 @@ def acl_scope(target: Any = None) -> str:
 class AclLease:
     """One installed policy generation in one ``(scope, action)`` slot; :meth:`dispose` retires exactly it."""
 
-    __slots__ = ("scope", "action", "policy", "generation", "owner", "active", "_registry")
+    __slots__ = ("_registry", "action", "active", "generation", "owner", "policy", "scope")
 
     def __init__(self, registry, scope: str, action: str, policy: Callable[..., bool], generation: int,
                  owner: Optional[str]):

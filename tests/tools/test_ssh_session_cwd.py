@@ -65,8 +65,10 @@ def test_late_registration_keeps_file_execution_in_backend_namespace(
 
 @pytest.mark.parametrize("env_type, raw_cwd, backend_cwd", CASES)
 def test_recorded_session_cwd_is_coerced_without_changing_explicit_remote_workdir(
-    env_type, raw_cwd, backend_cwd
+    env_type, raw_cwd, backend_cwd, tmp_path
 ):
+    if env_type == "local":
+        raw_cwd = backend_cwd = str(tmp_path)
     task_id = "session-example"
     terminal_tool.record_session_cwd(task_id, raw_cwd)
 
