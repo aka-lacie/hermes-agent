@@ -348,6 +348,39 @@ def set_parts(msg: MutableMapping[str, Any], parts: list) -> MutableMapping[str,
 def _parts_or_legacy(msg: Mapping[str, Any]) -> Optional[list]:
     if has_parts(msg):
         return list(msg[MESSAGE_PARTS])
+    # Canonical merges type plain text only; list content stays its own (multimodal) row.
+    return untyped_parts(msg) if isinstance(msg.get("content"), str) else None
+
+
+# Text-only list blocks an untyped multimodal side can be typed from (anything else is media).
+_TEXT_BLOCK_TYPES = frozenset({"text", "input_text"})
+
+
+def untyped_parts(msg: Mapping[str, Any]) -> Optional[list]:
+    """The parts an UNTYPED user row joins typed parts with, from its columns and role semantics only
+    (never by parsing its text): a compaction summary (the compressor's structured flag) is the
+    ``compaction`` system event it is; otherwise :func:`build_parts` with ``type_untyped`` (its
+    ``sender_kind`` / ``part_kind`` columns when stored, else a display kind's event, else the human turn a
+    legacy plain user row has always been). A text-only multimodal list types block by block, each as
+    the row's own kind; a list holding media (no stored digest/path to type it with) is None, so the
+    caller keeps it out of a parts merge rather than losing or reclassifying it."""
+    if msg.get("role") != "user":
+        return None
+    content = msg.get("content")
+    if isinstance(content, list):
+        texts = [b.get("text") for b in content if isinstance(b, dict)]
+        if len(texts) != len(content) or not all(
+                isinstance(b, dict) and b.get("type") in _TEXT_BLOCK_TYPES and isinstance(b.get("text"), str)
+                for b in content):
+            return None
+        out: list = []
+        for text in texts:
+            out.extend(untyped_parts({**msg, "content": text}) or [])
+        return out
+    if not isinstance(content, str):
+        return None
+    if msg.get(_COMPRESSED_SUMMARY_KEY) and msg.get("sender_kind") is None:
+        return [system_event(COMPACTION_EVENT_KIND, content)]
     return build_parts(msg, type_untyped=True)
 
 
@@ -372,9 +405,13 @@ def merge(prev: MutableMapping[str, Any], msg: Mapping[str, Any]) -> bool:
         return False
     if prev.get(RENDERED) or msg.get(RENDERED):
         # A rendered wire clone (adapter-owned route): content is already wire text, so the caller's text
-        # join stands; the adapter still sees every part, in order.
-        prev[MESSAGE_PARTS] = [*copy.deepcopy(prev.get(MESSAGE_PARTS) or []),
-                               *copy.deepcopy(msg.get(MESSAGE_PARTS) or [])]
+        # join stands; the adapter still sees every part of BOTH sides, in order. An untyped side joins as
+        # the parts its columns give it (:func:`untyped_parts`); one that has none was kept out of the
+        # merge by the caller (:func:`parts_mergeable`) and is left untouched here.
+        left, right = _wire_side_parts(prev), _wire_side_parts(msg)
+        if left is None or right is None:
+            return False
+        prev[MESSAGE_PARTS] = [*left, *right]
         prev[RENDERED] = True
         return False
     left, right = _parts_or_legacy(prev), _parts_or_legacy(msg)
@@ -382,6 +419,22 @@ def merge(prev: MutableMapping[str, Any], msg: Mapping[str, Any]) -> bool:
         return False
     _assign(prev, left + right)
     return True
+
+
+def _wire_side_parts(msg: Mapping[str, Any]) -> Optional[list]:
+    if has_parts(msg):
+        return copy.deepcopy(list(msg[MESSAGE_PARTS]))
+    return untyped_parts(msg)
+
+
+def parts_mergeable(prev: Mapping[str, Any], msg: Mapping[str, Any]) -> bool:
+    """Whether two adjacent user rows can merge without losing a side from the parts a native adapter
+    reads. Only a rendered wire clone (``RENDERED``) next to an untyped side that has no parts (media in
+    list content) cannot: the adapter would see the typed side alone. Such a pair stays two rows (the
+    adapter owns its layout); every other pair merges as before."""
+    if not (prev.get(RENDERED) or msg.get(RENDERED)):
+        return True
+    return _wire_side_parts(prev) is not None and _wire_side_parts(msg) is not None
 
 
 # ── construction from structured fields, (de)serialisation, copies ───────────

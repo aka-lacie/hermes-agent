@@ -22,7 +22,7 @@ from agent.message_sanitization import (
 from agent.message_metadata import (
     TOOL_CALL_UIDS, merge_tool_call_uids, per_occurrence_tool_call_uids, record_absorbed_message)
 from agent.interrupt_control import drained_steer_inputs
-from agent.message_parts import MESSAGE_PARTS, RENDERED, merge as merge_parts, stands_alone
+from agent.message_parts import MESSAGE_PARTS, RENDERED, merge as merge_parts, parts_mergeable, stands_alone
 from agent.cache_bounds import publish_lru
 from agent.prompt_builder import STEER_DISPLAY_KIND, steer_user_row
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
@@ -1232,14 +1232,23 @@ def drop_thinking_only_and_merge_users(
         content = _UNMERGEABLE
         if prev is not None and prev.get("role") == "user" and m.get("role") == "user":
             content = _merge_user_content(prev.get("content", ""), m.get("content", ""))
+            if content is not _UNMERGEABLE and not parts_mergeable(prev, m):
+                # An adapter-owned (rendered) row beside an untyped side its parts cannot carry (media):
+                # merged, the adapter would read the typed side alone. Two rows lose nothing.
+                content = _UNMERGEABLE
         if content is _UNMERGEABLE:
             # Not a user pair, or an unknown content shape: append separately (the latter violates
             # alternation, but is safer than raising in a hot path).
             merged.append(m)
         else:
-            merged[-1] = {**prev, "content": content}  # copy so caller dicts are never mutated
-            if not merge_parts(merged[-1], m) and not merged[-1].get(RENDERED):  # untypable content drops parts
-                merged[-1].pop(MESSAGE_PARTS, None)
+            # Copy so caller dicts are never mutated. The parts merge reads each side's OWN content (an untyped
+            # side joins as the parts its columns give it), so the joined text is written only afterwards.
+            survivor = dict(prev)
+            if not merge_parts(survivor, m):
+                survivor["content"] = content
+                if not survivor.get(RENDERED):  # untypable content drops parts
+                    survivor.pop(MESSAGE_PARTS, None)
+            merged[-1] = survivor
             merges += 1
     if dropped == 0 and merges == 0:
         return messages
