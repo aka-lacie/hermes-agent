@@ -537,9 +537,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     role TEXT,
     root_session_id TEXT,
     group_id TEXT,
-    -- A producer's stable conversation key (keyed webhook sessions: ``webhook:<route>:<key>``); unique per
-    -- source among the rows that carry one (idx_sessions_conversation_key). NULL for everything else.
-    conversation_key TEXT,
+    -- The attach primitive (gateway/delivery_targets.py): the live session an opted-in webhook/cron session
+    -- (delivery_target {kind: session, attach: true}) is currently bound to. Deliberately NOT
+    -- parent_session_id, so no compression/continuation walk can ever mistake it for a segment of its
+    -- target. Rebound to the target's current session on creation and every delivery. NULL otherwise.
+    attached_session_id TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id),
     FOREIGN KEY (system_prompt_hash) REFERENCES system_prompts(hash)
 );
@@ -953,8 +955,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_root_session
     ON sessions(root_session_id) WHERE root_session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_group
     ON sessions(group_id) WHERE group_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_conversation_key
-    ON sessions(source, conversation_key) WHERE conversation_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_attached_session
+    ON sessions(attached_session_id) WHERE attached_session_id IS NOT NULL;
 DROP TRIGGER IF EXISTS sessions_topology_insert;
 CREATE TRIGGER IF NOT EXISTS sessions_topology_insert
 AFTER INSERT ON sessions WHEN new.root_session_id IS NULL OR new.depth IS NULL

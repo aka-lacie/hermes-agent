@@ -1846,6 +1846,11 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         as ``_NON_CONTINUATION_CHILD_FILTER_SQL``)."""
         if session.get("source") == "tool":
             return True
+        parent_id = session.get("parent_session_id")
+        if parent_id and session.get("attached_session_id") == parent_id:
+            # An opted-in session bound to this parent (the attach primitive) is never its continuation, even
+            # if a parent link was ever written alongside the binding (gateway/delivery_targets.py).
+            return True
         cfg = session.get("model_config")
         if isinstance(cfg, str):
             try:
@@ -1857,7 +1862,6 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         markers = (cfg.get("_branched_from"), cfg.get("_delegate_from"))
         if include_reset:
             markers += (cfg.get("_reset_from"),)
-        parent_id = session.get("parent_session_id")
         return parent_id in markers if parent_id else any(m is not None for m in markers)
 
     def is_explicit_fork_child(self, session_id: str) -> bool:
