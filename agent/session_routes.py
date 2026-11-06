@@ -337,24 +337,6 @@ def route_fallback_chain(route: Optional[Mapping[str, Any]], inherited: Optional
     return scoped_fallback_chain(inherited, live, pinned=route_pinned(route), owner=owner)
 
 
-def encode_route(route: Optional[Mapping[str, Any]]) -> Optional[str]:
-    return None if not route else json.dumps(dict(route), sort_keys=True, separators=(",", ":"))
-
-
-def decode_route(raw: Any) -> Optional[dict]:
-    """A stored ``sessions.route`` value as a dict, or None (missing or unreadable)."""
-    if isinstance(raw, dict):
-        return raw
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        logger.warning("Ignoring unreadable stored session route")
-        return None
-    return value if isinstance(value, dict) else None
-
-
 def _same_endpoint(base_url: Any, digest: str) -> bool:
     try:
         return endpoint_fingerprint(base_url) == digest

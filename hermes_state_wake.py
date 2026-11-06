@@ -38,11 +38,6 @@ def stored_wake_policy(value):
     raise RuntimeStoreError('invalid_params', field='wake_policy', detail='unknown wake policy')
 
 
-def is_held(row) -> bool:
-    """A queued notice waiting for the next user turn (never a head on its own)."""
-    return row.get('status') == 'queued' and row.get('wake_policy') == WAKE_WITH_NEXT_USER_TURN
-
-
 def claimable(row) -> bool:
     """A queued row a drain may claim as its FIFO head."""
     return row.get('status') == 'queued' and row.get('wake_policy') != WAKE_WITH_NEXT_USER_TURN

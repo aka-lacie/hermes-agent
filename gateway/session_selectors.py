@@ -229,10 +229,3 @@ def resolve_session_selector(db: Any, selector: str, *, profile: Optional[str] =
         return _webhook_session(db, rest, profile)
     key = session_key_for_selector(value, namespace=_namespace(db, profile))
     return current_session_for_key(db, key) if key else None
-
-
-def selector_holds(db: Any, selector: str, session_ids: set, *, profile: Optional[str] = None,
-                   config: Optional[Mapping[str, Any]] = None) -> bool:
-    """True when the session *selector* resolves to now is one of *session_ids* (a conversation's lineage)."""
-    resolved = resolve_session_selector(db, selector, profile=profile, config=config)
-    return resolved is not None and resolved in session_ids
