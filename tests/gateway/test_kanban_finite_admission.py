@@ -236,8 +236,10 @@ def test_kanban_card_fenced_unknown_across_owner_epochs_settles_interrupted(kanb
             sid = (await run_task(owner.connection, owner.params))['session_id']
             row = _lose_across_restart(owner.authority, sid)
             assert (row['status'], row['outcome']) == ('terminal', 'interrupted'), row
-            notices = [m['content'] for m in owner.authority.db.get_messages(sid)
-                       if m.get('display_kind') == 'failed_turn']
+            from agent.message_parts import FAILED_TURN_EVENT_TEXT, project_harness_notice_for_display
+            rows = [m for m in owner.authority.db.get_messages(sid) if m.get('display_kind') == 'failed_turn']
+            notices = [project_harness_notice_for_display(m)['content'] for m in rows]  # the UI copy
+            assert rows and rows[0]['content'] == FAILED_TURN_EVENT_TEXT, rows
             assert notices and 'automat' in notices[0].lower(), notices
         finally:
             await owner.close()

@@ -115,10 +115,13 @@ async def test_unknown_automation_settles_interrupted_and_fifo_moves_on(tmp_path
         # The follower ran exactly once; the automation input was never replayed.
         assert executed == ['FOLLOWER']
         assert _statuses(authority.db)[follower_id] == ('terminal', 'completed')
-        # A Hermes notice in the transcript says the automated delivery was interrupted.
+        # A Hermes notice in the transcript says the automated delivery was interrupted (its UI copy; the
+        # model-facing content is the neutral failed-turn event).
+        from agent.message_parts import FAILED_TURN_EVENT_TEXT, project_harness_notice_for_display
         messages = authority.db.get_messages('s')
         notices = [m for m in messages if m.get('display_kind') == 'failed_turn']
-        assert notices and 'automat' in notices[0]['content'].lower(), messages
+        assert notices and notices[0]['content'] == FAILED_TURN_EVENT_TEXT, messages
+        assert 'automat' in project_harness_notice_for_display(notices[0])['content'].lower(), messages
     finally:
         store.close_all_db_handles()
 
