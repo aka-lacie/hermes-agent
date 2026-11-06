@@ -121,9 +121,10 @@ def platform_job(job: dict, target: dict) -> dict:
     return {**job, "deliver": deliver, "attach_to_session": False, "failure_deliver": None}
 
 
-def declared_delivery(job: dict, content: str):
+def declared_delivery(job: dict, content: str, *, owner_handoff: bool = False):
     """``(True, error-or-None)`` when the job's delivery_target delivered (or deliberately delivered nothing);
-    ``(False, job)`` to continue the ordinary scheduler delivery with *job* (rewritten for kind=platform)."""
+    ``(False, job)`` to continue the ordinary scheduler delivery with *job* (rewritten for kind=platform).
+    ``owner_handoff``: the caller holds no gateway adapters (:func:`deliver_to_session`)."""
     declared = job_delivery_target(job)
     if job.get("delivery_mode") == "internal_turn" and declared is not None and declared["kind"] != "session":
         return True, "internal-turn delivery requires a valid session delivery_target"
@@ -134,7 +135,7 @@ def declared_delivery(job: dict, content: str):
     if declared["kind"] == "none":
         return True, None
     if declared["kind"] == "session":
-        return True, deliver_to_session(job, content, declared)
+        return True, deliver_to_session(job, content, declared, owner_handoff=owner_handoff)
     return False, platform_job(job, declared)
 
 
@@ -180,7 +181,7 @@ def route_declared(job: dict, content: str, deliver, adapters=None, loop=None, *
     try:
         handled, outcome = _queue_external_session_delivery(job, content, adapters, for_failure)
         if not handled:
-            handled, outcome = declared_delivery(job, content)
+            handled, outcome = declared_delivery(job, content, owner_handoff=adapters is None)
     except (ValueError, KeyError) as exc:
         return True, f"cron session delivery failed: {exc}"
     if handled:
@@ -206,16 +207,27 @@ def cron_event(job: dict, content: str):
                          source_event_id=str(job.get("execution_id") or "") or None)
 
 
-def deliver_to_session(job: dict, content: str, target: dict, *, db: Any = None) -> Optional[str]:
-    """Admit the run's output into the target session. None on success, else the error text."""
+def deliver_to_session(job: dict, content: str, target: dict, *, db: Any = None,
+                       owner_handoff: bool = False) -> Optional[str]:
+    """Admit the run's output into the target session. None on success, else the error text.
+
+    ``owner_handoff``: this process is no gateway (dashboard Run-now, ``hermes cron run``, a CLI session's
+    cron tool, a headless tick), so a human chat only the gateway owner admits into answers ``no_owner``
+    here. The event is then committed into that chat's own ``session_admissions`` FIFO as its typed
+    automation row, for the owner to pick up (``gateway/session_automation_handoff.py``)."""
     from gateway.delivery_targets import dispatch
     own = db
     if own is None:
         from hermes_state_registry import acquire
         own = acquire()
     try:
-        receipt = dispatch(own, None, cron_event(job, content), target=target,
-                           request_id=f"cron:{job.get('id')}:{job.get('execution_id') or ''}".rstrip(":"))
+        event = cron_event(job, content)
+        request_id = f"cron:{job.get('id')}:{job.get('execution_id') or ''}".rstrip(":")
+        receipt = dispatch(own, None, event, target=target, request_id=request_id)
+        if owner_handoff and not receipt.delivered and receipt.reason == "no_owner" and receipt.target_session_id:
+            from gateway.session_automation_handoff import admit_for_owner
+            receipt = admit_for_owner(own, receipt.target_session_id, event, wake_policy=target.get("wake_policy"),
+                                      request_id=request_id)
     finally:
         if db is None:
             from hermes_state_registry import release

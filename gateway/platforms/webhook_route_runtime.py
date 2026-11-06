@@ -171,8 +171,14 @@ def _walk_chain(route: dict, config: Optional[dict], exc: Exception) -> tuple[di
     raise exc
 
 
+RUNTIME_PINNED = "_webhook_runtime_pinned"
+
+
 def early_pinned_runtime(runner: Any, source: Any, session_key: Optional[str], model: str):
-    """A worker pin resolves before any default-provider authentication or chat override."""
+    """A worker pin resolves before any default-provider authentication or chat override. The
+    returned runtime carries the private :data:`RUNTIME_PINNED` marker for the turn route
+    (``_resolve_turn_agent_config``); a raw ``AIAgent(**runtime)`` spread goes through
+    :func:`agent_runtime_kwargs`."""
     if _webhook_route_name(source) is None:
         return None
     route, _config = stored_route(runner, source, _session_id_for_key(runner, session_key))
@@ -180,8 +186,13 @@ def early_pinned_runtime(runner: Any, source: Any, session_key: Optional[str], m
     if not route_pinned(route):
         return None
     selected_model, runtime = pinned_runtime(runner, source, session_key, model, {})
-    runtime['_webhook_runtime_pinned'] = True
+    runtime[RUNTIME_PINNED] = True
     return selected_model, runtime
+
+
+def agent_runtime_kwargs(runtime: dict) -> dict:
+    """Remove private webhook turn-route state before passing runtime kwargs to ``AIAgent``."""
+    return {key: value for key, value in runtime.items() if not key.startswith("_webhook_")}
 
 
 def pinned_runtime(runner: Any, source: Any, session_key: Optional[str], model: str,

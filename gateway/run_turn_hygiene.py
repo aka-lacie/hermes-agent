@@ -685,8 +685,9 @@ class GatewayTurnHygieneMixin:
         _hyg_checkpoint_required = _is_truthy(
             ((_load_cfg() or {}).get("compression") or {}).get("checkpoint_required"), default=False,
         )
+        from gateway.platforms.webhook_route_runtime import agent_runtime_kwargs
         _hyg_agent = AIAgent(
-            **_hyg_runtime, model=_hyg_model, max_iterations=4, quiet_mode=True,
+            **agent_runtime_kwargs(_hyg_runtime), model=_hyg_model, max_iterations=4, quiet_mode=True,
             skip_memory=not _hyg_checkpoint_required, enabled_toolsets=["memory"],
             session_id=session_entry.session_id, session_db=_hyg_session_db,
         )

@@ -407,39 +407,13 @@ class GatewayBusySessionMixin:
         except Exception:
             return False
 
-    @staticmethod
-    def _steer_active_subagents(running_agent: Any, text: str) -> int:
-        """Queue *text* into every live child of *running_agent*; returns how many accepted it.
-
-        A parent blocked inside ``delegate_task`` only drains its own steer queue after the tool
-        returns, i.e. after the child finishes — so a steer aimed at a looping child would sit
-        unread for the whole delegation (#112095, Telegram). Children are the parent's own
-        ``_active_children`` (identity-scoped, same snapshot ``interrupt()`` fans out to)."""
-        children = getattr(running_agent, "_active_children", None)
-        if not isinstance(children, (list, tuple, set)) or not children:
-            return 0
-        lock = getattr(running_agent, "_active_children_lock", None)
-        try:
-            with lock if lock is not None else contextlib.nullcontext():
-                snapshot = list(children)
-        except Exception:
-            return 0
-        accepted = 0
-        for child in snapshot:
-            steer = getattr(child, "steer", None)
-            if not callable(steer):
-                continue
-            try:
-                accepted += bool(steer(text))
-            except Exception as exc:
-                logger.warning("Steer into subagent %r failed: %s", getattr(child, "_delegate_id", child), exc)
-        return accepted
-
     def _steer_running_agent(self, running_agent: Any, text: str) -> bool:
-        """``running_agent.steer(text)`` plus fan-out to its active subagents (see
-        :meth:`_steer_active_subagents`); True when the parent or any child queued it."""
-        accepted = bool(running_agent.steer(text))
-        return bool(self._steer_active_subagents(running_agent, text)) or accepted
+        """Steer only the addressed session. Child instructions require explicit delegation control.
+
+        A human talking to the parent is not addressing every running child; automatic fan-out
+        leaks conversational context and can change work the parent has deliberately isolated.
+        """
+        return bool(running_agent.steer(text))
 
     async def _session_has_compression_in_flight(self, session_key: str) -> bool:
         """True when a compression lock is held for this session's id (callers demote interrupt →
@@ -589,8 +563,7 @@ class GatewayBusySessionMixin:
         origin = self._typed_steer_origin(event)
         steer = getattr(running_agent, "steer", None)
         if origin is not None and callable(steer) and _accepts_keyword(steer, "origin"):
-            accepted = bool(steer(text, origin=origin))
-            return bool(self._steer_active_subagents(running_agent, text)) or accepted
+            return bool(steer(text, origin=origin))
         return self._steer_running_agent(
             running_agent, self._steer_text_with_origin(text, event) if event is not None else text)
 

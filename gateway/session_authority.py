@@ -1080,8 +1080,8 @@ class SessionAuthority:
             if any(row['status'] == 'unknown' for row in pending):
                 raise RuntimeStoreError('unknown_execution')
             # A notice held for the next user turn is never a head on its own (hermes_state_wake).
-            from hermes_state_wake import claimable
-            first = next((row for row in pending if claimable(row)), None)
+            from hermes_state_wake import next_claimable
+            first = next_claimable(pending)
             from gateway.config import Platform
             if live.source.platform == Platform.LOCAL:
                 # A reasoning command or a model pick made while the previous turn ran lands here, at the
@@ -1233,12 +1233,12 @@ class SessionAuthority:
                         if await settle_unattended_unknown(self, ref):
                             continue
                     if exc.reason == 'admission_conflict':
-                        from hermes_state_wake import claimable
+                        from hermes_state_wake import next_claimable
                         # A verdict on the head alone (its route or binding moved under it) that every drain
                         # repeats: pausing behind it strands the FIFO for good. Refused only once the same
                         # head conflicted twice, read after each: never a successor a cancel advanced to.
-                        head = next((row['admission_id'] for row in list_session_admissions(
-                            self.db, session_id=ref.session_id) if claimable(row)), None)
+                        first = next_claimable(list_session_admissions(self.db, session_id=ref.session_id))
+                        head = first['admission_id'] if first is not None else None
                         if head is not None and head != conflicted:
                             conflicted = head
                             continue

@@ -254,10 +254,11 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
             raise RuntimeStoreError('unknown_execution')
         if blocked or workers:
             return None
-        from hermes_state_wake import CLAIMABLE_SQL, hand_held_to_claim, is_user_turn
-        # A notice held for the next user turn is never a head on its own (hermes_state_wake).
-        row = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' AND "
-                           + CLAIMABLE_SQL + " ORDER BY seq LIMIT 1", (session_id,)).fetchone()
+        from hermes_state_wake import CLAIMABLE_SQL, hand_held_to_claim, is_user_turn, next_claimable
+        # Preflight and claim share user priority; seq remains FIFO within each input class.
+        rows = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' AND "
+                            + CLAIMABLE_SQL + " ORDER BY seq", (session_id,)).fetchall()
+        row = next_claimable(dict(item) for item in rows)
         if head is not _ANY_HEAD and (row['admission_id'] if row is not None else None) != head:
             return False
         if row is None:

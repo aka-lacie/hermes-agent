@@ -98,12 +98,91 @@ def snapshot_destination(adapter, delivery):
     return result
 
 
+def delivery_binding(envelope):
+    """The signed delivery id a wake borrowing *envelope* answers: a signed webhook admission names
+    itself, an automation row the delivery it was bound to; None for any other envelope. The wake's
+    reply leg resolves its destination through it (``_signed_rows``), never through its own identity."""
+    if not isinstance(envelope, dict) or (envelope.get('source') or {}).get('platform') != 'webhook':
+        return None
+    if 'automation' in envelope:
+        return envelope['automation'].get('webhook_delivery_id')
+    if 'webhook_delivery' in envelope:
+        return envelope['event'].get('message_id')
+    return None
+
+
+def local_delivery_binding(payloads, chat_id):
+    """The binding fields of a local wake on webhook chat *chat_id* (a conversation its chat moved
+    past, ``gateway/session_detached.py``) admitted behind *payloads*, its owner's admissions in FIFO
+    order: the chat always, the delivery of the newest row on that chat that names one."""
+    binding = {'webhook_chat_id': chat_id}
+    for payload in reversed(payloads):
+        native, local = payload.get('native_text_v1'), payload.get('local_automation_v1') or {}
+        if native is not None and (native.get('source') or {}).get('chat_id') == chat_id:
+            delivery = delivery_binding(native)
+        elif local.get('webhook_chat_id') == chat_id:
+            delivery = local.get('webhook_delivery_id')
+        else:
+            continue
+        if delivery:
+            binding['webhook_delivery_id'] = delivery
+        break
+    return binding
+
+
+_SIGNED_OR_AUTOMATION = """SELECT payload_json, status, seq, target_session_id FROM session_admissions
+    WHERE json_extract(payload_json, '$.native_text_v1.source.chat_id')=?
+      AND json_extract(payload_json, '$.native_text_v1.source.platform')='webhook'"""
+_LOCAL_AUTOMATION = """SELECT payload_json FROM session_admissions
+    WHERE json_extract(payload_json, '$.local_automation_v1.webhook_chat_id')=?"""
+
+
+def _answers(identity, route, context):
+    """True when the final in *context* was ledgered against the admission ``(identity, route)``."""
+    if context.get('_webhook_delivery_id'):
+        return identity == context['_webhook_delivery_id']
+    from gateway.delivery_ledger import compute_obligation_id
+    return compute_obligation_id(route, str(identity or ''), context['content']) == context['_webhook_obligation_id']
+
+
+def _answered_automation(candidates, automation, chat_id, context):
+    """``(found, binding)`` of the automation admission whose final *context* carries: its
+    descriptor's bound signed delivery id (None for a row admitted before binding existed)."""
+    descriptors = [(native['automation'], native['route']) for native in automation]
+    for authority in candidates:
+        for row in authority.db._read_all(_LOCAL_AUTOMATION, (chat_id,)):
+            descriptor = json.loads(row['payload_json'])['local_automation_v1']
+            descriptors.append((descriptor, descriptor.get('route')))
+    for descriptor, route in descriptors:
+        if _answers(descriptor.get('identity'), route, context):
+            return True, descriptor.get('webhook_delivery_id')
+    return False, None
+
+
+def _ledgered_rows(rows, automation, candidates, chat_id, context):
+    """The signed rows the ledgered final in *context* answers. A signed delivery's own final names
+    it; a wake's final (process/watch/delegate completion, route wake) names its automation identity,
+    which resolves through the delivery that wake was bound to at admission. A legacy unbound wake
+    resolves only on a per-delivery chat, whose id already names its one delivery."""
+    own = [pair for pair in rows if _answers(pair[2]['event'].get('message_id'), pair[2]['route'], context)]
+    if own:
+        return own
+    found, binding = _answered_automation(candidates, automation, chat_id, context)
+    if not found:
+        return []
+    from gateway.platforms.webhook_session_keys import is_keyed_chat_id
+    if binding is None:
+        return [] if is_keyed_chat_id(chat_id) else rows
+    return [pair for pair in rows if pair[2]['event'].get('message_id') == binding]
+
+
 def _signed_rows(adapter, chat_id):
     """``(runner, rows)``: the signed ingress admissions of *chat_id* that can own its reply leg.
     Only the signed ingress admission carries the destination; later automation rows (process/watch
     completions) on the same chat share its source but never compete. A keyed chat
     (``webhook_session_keys``) holds one signed admission per delivery and its session FIFO runs them
-    one at a time: the reply leg belongs to the one executing now, else the newest."""
+    one at a time: the reply leg belongs to the one executing now, else the newest. A ledgered final
+    names its admission exactly (``_ledgered_rows``)."""
     runner = adapter.gateway_runner or getattr(adapter._message_handler, '__self__', None)
     from gateway.session_authorities import active_authority, all_authorities, serving_authorities
     if not all_authorities(runner):
@@ -113,23 +192,18 @@ def _signed_rows(adapter, chat_id):
     # parked profile's retained store is not served: reading it could fail every other profile's).
     scoped = active_authority(runner)
     candidates = [scoped] if scoped is not None else serving_authorities(runner)
-    query = """SELECT payload_json, status, seq, target_session_id FROM session_admissions
-        WHERE json_extract(payload_json, '$.native_text_v1.source.chat_id')=?
-          AND json_extract(payload_json, '$.native_text_v1.source.platform')='webhook'
-          AND json_extract(payload_json, '$.native_text_v1.automation') IS NULL"""
-    rows = [(authority, row) for authority in candidates for row in authority.db._read_all(query, (chat_id,))]
-    if context := reply_context.get():
-        delivery_id = context.get('_webhook_delivery_id')
-        obligation = context.get('_webhook_obligation_id')
-        if delivery_id or obligation:
-            def matches(pair):
-                native = json.loads(pair[1]['payload_json'])['native_text_v1']
-                message_id = native['event'].get('message_id')
-                if delivery_id:
-                    return message_id == delivery_id
-                from gateway.delivery_ledger import compute_obligation_id
-                return compute_obligation_id(native['route'], str(message_id or ''), context['content']) == obligation
-            return runner, [pair for pair in rows if matches(pair)]
+    rows, automation = [], []
+    for authority in candidates:
+        for row in authority.db._read_all(_SIGNED_OR_AUTOMATION, (chat_id,)):
+            native = json.loads(row['payload_json'])['native_text_v1']
+            if 'automation' in native:
+                automation.append(native)
+            else:
+                rows.append((authority, row, native))
+    context = reply_context.get()
+    if context and (context.get('_webhook_delivery_id') or context.get('_webhook_obligation_id')):
+        return runner, [pair[:2] for pair in _ledgered_rows(rows, automation, candidates, chat_id, context)]
+    rows = [pair[:2] for pair in rows]
     from gateway.platforms.webhook_session_keys import is_keyed_chat_id
     if len(rows) > 1 and is_keyed_chat_id(chat_id):
         started = [pair for pair in rows if pair[1]['status'] == 'started']

@@ -17,6 +17,7 @@ from hermes_state_runtime import RuntimeStoreError, admit_session_input, get_ses
 
 _execution: ContextVar[tuple | None] = ContextVar('cron_owner_execution', default=None)
 _owners = {}
+_handoff_consumers = {}
 
 
 def bind_owner(authority):
@@ -26,6 +27,19 @@ def bind_owner(authority):
     # this owner serves are admitted through its producer path (gateway/delivery_owner_sink.py).
     from gateway.delivery_owner_sink import register
     register()
+    # Producers outside this process commit such events into the chat's own FIFO and signal this owner
+    # (gateway/session_automation_handoff.py); its pickup schedules their drain.
+    from gateway.session_automation_handoff import start_consumer
+    _stop_consumer(_handoff_consumers.pop(home, None))
+    _handoff_consumers[home] = (authority, start_consumer(authority, home))
+
+
+def _stop_consumer(consumer):
+    if consumer is None:
+        return
+    task = consumer[1]
+    if not task.get_loop().is_closed():
+        task.get_loop().call_soon_threadsafe(task.cancel)
 
 
 def unbind_owner(authority):
@@ -33,6 +47,9 @@ def unbind_owner(authority):
     bound = _owners.get(home)
     if bound is not None and bound[1] is authority:
         del _owners[home]
+    consumer = _handoff_consumers.get(home)
+    if consumer is not None and consumer[0] is authority:
+        _stop_consumer(_handoff_consumers.pop(home))
 
 
 def owner_for_home(home):

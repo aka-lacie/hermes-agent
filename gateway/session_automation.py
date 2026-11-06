@@ -528,12 +528,17 @@ def snapshot_automation(authority, adapter, event, identity):
         # The relay seal binds the source; restore_native verified it over the anchored source.
         from gateway.session_ingress_context import reseal_relay
         provenance = reseal_relay(adapter, source, provenance)
+    # A webhook wake's reply leg answers the signed delivery it borrows, never its own identity.
+    from gateway.platforms.webhook_delivery import delivery_binding
+    binding = delivery_binding(envelope)
     # Producer timestamps and platform reply IDs change on retry. Neither belongs
     # in the identity/fingerprint of the same immutable completion.
     envelope = {'source': source, 'route': entry.session_key,
         'timestamp': datetime.fromtimestamp(0, UTC).isoformat(),
         'event': {'message_id': identity}, 'provenance': provenance,
         'automation': {'identity': identity, 'owner': owner}}
+    if binding is not None:
+        envelope['automation']['webhook_delivery_id'] = binding
     envelope['automation'].update(notification)
     if getattr(event, '_heartbeat_session_id', None):
         envelope['automation']['heartbeat'] = event._heartbeat_session_id
@@ -596,6 +601,11 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
         descriptor['identities'] = sorted(set(event.metadata['automation_identities']))
     if getattr(event, '_heartbeat_session_id', None):
         descriptor['heartbeat'] = event._heartbeat_session_id
+    if event.source.platform == Platform.WEBHOOK:
+        # A webhook conversation its chat moved past still answers the delivery it was serving.
+        from gateway.platforms.webhook_delivery import local_delivery_binding
+        prior = list_session_admissions(authority.db, session_id=ref.session_id, pending_only=False)
+        descriptor.update(local_delivery_binding([row['payload'] for row in prior], event.source.chat_id))
     return {'text': event.text, 'local_automation_v1': descriptor}, entry
 
 

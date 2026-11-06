@@ -786,8 +786,9 @@ class GatewaySessionCommandsMixin:
         _checkpoint_required = _is_truthy(
             ((_load_cfg() or {}).get("compression") or {}).get("checkpoint_required"),
             default=False)
-        tmp_agent = AIAgent(**runtime_kwargs, model=model, max_iterations=4, quiet_mode=True,
-                            skip_memory=not _checkpoint_required, enabled_toolsets=["memory"],
+        from gateway.platforms.webhook_route_runtime import agent_runtime_kwargs
+        tmp_agent = AIAgent(**agent_runtime_kwargs(runtime_kwargs), model=model, max_iterations=4,
+                            quiet_mode=True, skip_memory=not _checkpoint_required, enabled_toolsets=["memory"],
                             session_id=session_id,
                             session_db=getattr(self._session_db, "_db", self._session_db))
         _seed_hygiene_system_prompt(tmp_agent, session_row)

@@ -379,10 +379,10 @@ def _drain_pass(db_path: str, session_id: str, parent_hint) -> None:
     try:
         store = DelegateSessionStore(db)
         from hermes_state_runtime import list_session_admissions
-        from hermes_state_wake import claimable
+        from hermes_state_wake import next_claimable
         missed = False
         for _ in range(64):  # bounded: ADMISSION_QUEUE_MAX plus margin
-            head = next((r for r in list_session_admissions(db, session_id=session_id) if claimable(r)), None)
+            head = next_claimable(list_session_admissions(db, session_id=session_id))
             if head is None or store.running_claim(session_id) is not None:
                 return
             parent, ctx = _launch_for(head["admission_id"])

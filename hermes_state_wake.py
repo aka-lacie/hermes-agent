@@ -43,6 +43,27 @@ def claimable(row) -> bool:
     return row.get('status') == 'queued' and row.get('wake_policy') != WAKE_WITH_NEXT_USER_TURN
 
 
+def next_claimable(rows):
+    """Choose user input ahead of queued background work, FIFO within each class.
+
+    Shared by the owner's preflight and the transactional claim so a newly arrived user
+    input cannot inherit authorization checked for a different background admission.
+    Held notices remain ineligible and still travel with the next user turn.
+    """
+    first = None
+    for row in rows:
+        if not claimable(row):
+            continue
+        if first is None:
+            first = row
+        payload = row.get('payload')
+        if payload is None:
+            payload = json.loads(row['payload_json'])
+        if is_user_turn(row['principal_id'], payload):
+            return row
+    return first
+
+
 def is_user_turn(principal_id, payload) -> bool:
     """Whether an admission is the session's user speaking (structure only, never text).
 

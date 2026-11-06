@@ -322,7 +322,9 @@ class WebhookAdapter(BasePlatformAdapter):
 
     async def send_final_ledgered(self, event, session_key, text_content, metadata, *,
                                   reply_to, is_ephemeral_response=False):
-        """Only the final-response seam may hand detached results to another agent."""
+        """Only the final-response seam may hand detached results to another agent. The stamped id
+        is the admission the final answers: a signed delivery, or a wake's automation identity, which
+        ``webhook_delivery._signed_rows`` resolves through the delivery that wake was bound to."""
         stamp = {**(metadata or {}), "_webhook_final_response": True,
                  "_webhook_delivery_id": getattr(event, "ledger_message_id", None) or getattr(event, "message_id", None)}
         return await super().send_final_ledgered(
