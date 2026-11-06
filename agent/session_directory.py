@@ -5,8 +5,12 @@ caller's default list (``scope="children"``) shows only
 
 - its own delegate spawns (``lineage_kind='delegate'`` whose parent is in the caller's conversation), and
 - sessions explicitly opted in from another source: a webhook/cron (or other non-delegate) session whose
-  ``delivery_target`` is ``{kind: "session", session_id: <caller>, attach: true}``, badged with its
-  ``lineage_kind``.
+  ``delivery_target`` is ``{kind: "session", session_id: <caller>, attach: true}`` or
+  ``{kind: "session", selector: <a selector the caller's conversation holds NOW>, attach: true}``, badged
+  with its ``lineage_kind``. A selector (``discord:dm:<id>``, ``discord``, ``bot-chat``, ...) is resolved at
+  list time (``gateway.session_selectors``), so after ``/new`` the opt-in follows the chat to its new session;
+  an unresolvable selector falls back to the session the opt-in was last bound to
+  (``sessions.attached_session_id``, the attach primitive: never ``parent_session_id``).
 
 Compression continuations (the same conversation), memory/background forks, branches/resets, standalone
 cron/webhook sessions and the caller's own lineage never appear. Grandchildren (d=2) never flatten into the
@@ -213,24 +217,72 @@ class _RowView(dict):
         return self.get(key)
 
 
+# ── attachment (literal or selector targets) ─────────────────────────────────
+
+def _column(row, key: str) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+class _Selectors:
+    """Per-call memo of selector resolutions (one list resolves each distinct selector once)."""
+
+    def __init__(self, db):
+        self.db, self._seen = db, {}
+
+    def resolve(self, selector: str) -> Optional[str]:
+        if selector not in self._seen:
+            from gateway.session_selectors import resolve_session_selector
+            try:
+                self._seen[selector] = resolve_session_selector(self.db, selector)
+            except Exception:  # health: allow BLE001 -- an unresolvable selector names no one (fails closed)
+                logger.warning("session selector %r could not be resolved", selector, exc_info=True)
+                self._seen[selector] = None
+        return self._seen[selector]
+
+
+def _target_held_by(row, target: Any, caller_lineage: set, selectors: Optional[_Selectors]) -> bool:
+    """True when ``kind=session`` *target* (of *row*) names the caller's conversation now: a literal id in it,
+    or a selector it currently holds (unresolvable: the conversation the row was last bound to)."""
+    if not (isinstance(target, dict) and target.get("kind") == "session"):
+        return False
+    if target.get("session_id"):
+        return target["session_id"] in caller_lineage
+    if not target.get("selector") or selectors is None:
+        return False
+    resolved = selectors.resolve(str(target["selector"]))
+    if resolved is not None:
+        return resolved in caller_lineage
+    return _column(row, "attached_session_id") in caller_lineage
+
+
+def attached_to(row, caller_lineage: set, selectors: Optional[_Selectors] = None) -> bool:
+    """The opt-in rule: *row*'s ``delivery_target`` is an ``attach: true`` session target the caller's
+    conversation holds (see :func:`_target_held_by`)."""
+    target = json_field(row["delivery_target"])
+    return isinstance(target, dict) and target.get("attach") is True and _target_held_by(
+        row, target, caller_lineage, selectors)
+
+
 # ── ACL ──────────────────────────────────────────────────────────────────────
 
-def _targets(row, caller_lineage: set) -> bool:
-    target = json_field(row["delivery_target"])
-    return (isinstance(target, dict) and target.get("kind") == "session"
-            and target.get("session_id") in caller_lineage)
+def _targets(row, caller_lineage: set, selectors: Optional[_Selectors] = None) -> bool:
+    return _target_held_by(row, json_field(row["delivery_target"]), caller_lineage, selectors)
 
 
 def default_session_acl(db, conn, caller_session_id: str, target_row) -> bool:
     """The default policy (plan §4.5): the caller may reach its descendants (any depth, through compression
     continuations of every ancestor) and any session whose ``delivery_target`` targets the caller's
-    conversation (how the main agent resumes webhook sessions delivering to it)."""
+    conversation (how the main agent resumes webhook sessions delivering to it), literally or through a
+    selector it holds now."""
     if target_row is None or not caller_session_id:
         return False
     mine = set(lineage(db, conn, caller_session_id))
     if target_row["id"] in mine:
         return False  # one's own lineage is not a child
-    if _targets(target_row, mine):
+    if _targets(target_row, mine, _Selectors(db)):
         return True
     current = target_row
     for _ in range(_MAX_TREE_DEPTH):
@@ -283,15 +335,12 @@ def _listed_kind(conn, row) -> Optional[str]:
     return "delegate" if _legacy_delegate(conn, row["id"]) is not None else None
 
 
-def _is_default_child(row, caller_lineage: set, conn=None) -> Optional[str]:
+def _is_default_child(row, caller_lineage: set, conn=None, selectors: Optional[_Selectors] = None) -> Optional[str]:
     """``"own"`` for a delegate spawn of the caller, ``"attached"`` for an explicit opt-in, else None."""
     kind = _listed_kind(conn, row) if conn is not None else _effective_kind(row)
     if kind == "delegate" and row["parent_session_id"] in caller_lineage:
         return "own"
-    target = json_field(row["delivery_target"])
-    if (kind not in _EXCLUDED_KINDS and kind != "delegate" and isinstance(target, dict)
-            and target.get("kind") == "session" and target.get("attach") is True
-            and target.get("session_id") in caller_lineage):
+    if kind not in _EXCLUDED_KINDS and kind != "delegate" and attached_to(row, caller_lineage, selectors):
         return "attached"
     return None
 
@@ -341,12 +390,18 @@ def list_sessions(db, conn, caller_session_id: str, *, scope: str = "children", 
     needle = str(query or "").strip().casefold()
     mine = lineage(db, conn, caller_session_id)
     mine_set = set(mine)
+    selectors = _Selectors(db)
     if scope == "children":
+        # Own spawns (parent link), literal opt-ins, opt-ins bound here (attach primitive) and every selector
+        # opt-in (resolved below: its selector may name this conversation since a /new).
         candidates = conn.execute(
             f"SELECT * FROM sessions WHERE parent_session_id IN ({_placeholders(mine)}) "
             f"UNION SELECT * FROM sessions WHERE delivery_target IS NOT NULL AND "
-            f"json_extract(delivery_target, '$.session_id') IN ({_placeholders(mine)})", (*mine, *mine)).fetchall()
-        picked = [(row, _is_default_child(row, mine_set, conn)) for row in candidates]
+            f"json_extract(delivery_target, '$.session_id') IN ({_placeholders(mine)}) "
+            f"UNION SELECT * FROM sessions WHERE attached_session_id IN ({_placeholders(mine)}) "
+            f"UNION SELECT * FROM sessions WHERE delivery_target IS NOT NULL AND "
+            f"json_extract(delivery_target, '$.selector') IS NOT NULL", (*mine, *mine, *mine)).fetchall()
+        picked = [(row, _is_default_child(row, mine_set, conn, selectors)) for row in candidates]
         picked = [(row, how) for row, how in picked if how]
     elif scope == "siblings":
         own = conn.execute("SELECT * FROM sessions WHERE id = ?", (logical_root(db, conn, caller_session_id),)).fetchone()

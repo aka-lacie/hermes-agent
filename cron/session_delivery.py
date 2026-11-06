@@ -2,10 +2,11 @@
 
 A job may declare ``delivery_target``:
 
-- ``{"kind": "session", "session_id": ..., "attach": ..., "wake_policy": ...}``: the run's final output is
-  admitted into that session exactly like a child completion: one ``role="user"`` system event
-  (``kind="cron"``, ``sender_kind="cron"``, ``sender_id="cron:<job id>"``), honouring the wake policy. No
-  platform message is sent.
+- ``{"kind": "session", "session_id": ... | "selector": ..., "attach": ..., "wake_policy": ...}``: the run's
+  final output is admitted into that session (a selector: the session its conversation holds at delivery
+  time) exactly like a child completion: one ``role="user"`` system event (``kind="cron"``,
+  ``sender_kind="cron"``, ``sender_id="cron:<job id>"``), honouring the wake policy. No platform message is
+  sent. The fire's session records the target (``scheduler_routes``), so ``attach: true`` lists it there.
 - ``{"kind": "platform", "platform": ..., "chat_id": ..., "thread_id": ...}``: the output goes to that channel
   only. No mirror and no seeded continuation session: nothing is written into any other session's transcript.
 - ``{"kind": "none"}``: nothing is delivered.
@@ -112,4 +113,4 @@ def deliver_to_session(job: dict, content: str, target: dict, *, db: Any = None)
             release(own)
     if receipt.delivered:
         return None
-    return f"cron delivery to session {target['session_id']} failed: {receipt.reason}"
+    return f"cron delivery to session {target.get('session_id') or target.get('selector')} failed: {receipt.reason}"

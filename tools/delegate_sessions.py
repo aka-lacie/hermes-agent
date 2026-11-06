@@ -347,8 +347,8 @@ def control(action, parent, *, session_id=None, message=None, model=None, query=
                                "subagents": records}, ensure_ascii=False)
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError(f"action='{action}' requires session_id from spawn or list.")
-        session_id = session_id.strip()
-        record = store.get(parent.session_id, session_id)
+        record = store.get(parent.session_id, session_id.strip())
+        session_id = record["session_id"]  # a selector names the session its conversation holds now
         if action == "observe":
             return json.dumps(store.observe(parent.session_id, session_id, limit=limit), ensure_ascii=False)
         if action == "close":
@@ -408,7 +408,7 @@ def resume(parent, store, record, message, model, background):
             store.release(record["session_id"], claim["token"], outcome="failed")
 
 
-def _resume_foreign(parent, store, record, message):
+def _resume_foreign(parent, store, record, message, action="resume"):
     """A non-delegate session the caller may address (a webhook/cron session delivering to it): the message is
     delivered to it as the parent's typed event, through the sink of whoever drains that session (the gateway
     owner, for keyed webhook sessions). Nothing is written when no owner in this process serves it."""
@@ -418,7 +418,7 @@ def _resume_foreign(parent, store, record, message):
     receipt = dispatch(store.db, None, event, target=session_target(record["session_id"], attach=False))
     if not receipt.delivered:
         raise ValueError(f"That session is not served by this process ({receipt.reason}); nothing was queued.")
-    return json.dumps({"action": "resume", "session_id": record["session_id"], "status": "queued",
+    return json.dumps({"action": action, "session_id": record["session_id"], "status": "queued",
                        "admission_id": receipt.admission_id, "sink": receipt.sink}, ensure_ascii=False)
 
 
@@ -437,6 +437,11 @@ def steer(parent, store, record, message):
     from tools.delegate_session_store import runtime_epoch
     if not isinstance(message, str) or not message.strip():
         raise ValueError("action='steer' requires a non-empty 'message' describing the course correction.")
+    if record.get("lineage_kind") != "delegate":
+        # A session that is not this process's child (an attached webhook/cron session) is driven by its own
+        # owner: the steer reaches it as the parent's typed message through that owner's sink, never as a
+        # write into a FIFO this runner does not drain.
+        return _resume_foreign(parent, store, record, message.strip(), action="steer")
     sid = record["session_id"]
     admission = store.admit(parent.session_id, sid, message, intent="steer")
     running = store.running_claim(sid)

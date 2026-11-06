@@ -10,6 +10,12 @@ FIFO cap). Policy (hop caps, sibling widening, presentation) belongs to the plug
 - ``admit(caller_session_id, target_session_id, text, *, sender_kind="peer", kind="peer_message", meta=None,
   intent="queue", wake_policy=None)`` — one typed system-event admission on the target's FIFO through the
   delivery sinks (a delegate FIFO directly, a gateway chat through its owner).
+- ``resolve(selector, profile=None)`` — the session a logical selector (``discord:dm:<id>``, ``discord``,
+  ``bot-chat``, ``webhook:<route>:<key>``, ``session:<id>``, ...) names right now, or None
+  (``gateway.session_selectors.resolve_session_selector``).
+
+``observe`` and ``admit`` also take a selector wherever they take a session id (resolved first; the ACL
+applies to the session it resolves to).
 """
 
 from __future__ import annotations
@@ -26,6 +32,10 @@ class SessionsAPI:
         from tools.delegate_session_store import DelegateSessionStore
         return DelegateSessionStore(self.db).list(caller_session_id, query=query, limit=limit, scope=scope)
 
+    def resolve(self, selector: str, *, profile: Optional[str] = None) -> Optional[str]:
+        from gateway.session_selectors import resolve_session_selector
+        return resolve_session_selector(self.db, selector, profile=profile)
+
     def observe(self, caller_session_id: str, session_id: str, *, limit: int = 20, max_chars: int = 12000) -> dict:
         from tools.delegate_session_store import DelegateSessionStore
         return DelegateSessionStore(self.db).observe(caller_session_id, session_id, limit=limit, max_chars=max_chars)
@@ -37,6 +47,8 @@ class SessionsAPI:
         LookupError when the ACL does not let the caller reach the target."""
         from agent import session_directory as directory
         from gateway.delivery_targets import DeliveryEvent, dispatch, session_target
+        from tools.delegate_session_store import DelegateSessionStore
+        target_session_id = DelegateSessionStore(self.db).resolve_ref(target_session_id)
         with self.db._read_ctx() as conn:
             row = conn.execute("SELECT * FROM sessions WHERE id = ?", (target_session_id,)).fetchone()
             if row is None or not directory.allowed(self.db, conn, caller_session_id, row):

@@ -123,8 +123,20 @@ class DelegateSessionStore:
             raise DelegateSessionError("unavailable", "The parent conversation is unavailable.")
         return caller
 
+    def resolve_ref(self, ref: str) -> str:
+        """*ref* as a session id: a literal id, or (no such row) a logical selector the conversation holds now
+        (``discord:dm:<id>``, ``webhook:<route>:<key>``, ``bot-chat``, ...; ``gateway.session_selectors``).
+        An unresolvable selector stays as given (the ACL then refuses it like any unknown id)."""
+        if not isinstance(ref, str) or self.db._read_one("SELECT 1 FROM sessions WHERE id = ?", (ref,)):
+            return ref
+        from gateway.session_selectors import is_selector, resolve_session_selector
+        if not is_selector(ref):
+            return ref
+        return resolve_session_selector(self.db, ref) or ref
+
     def get(self, caller: str, session_id: str) -> dict:
         self._caller(caller)
+        session_id = self.resolve_ref(session_id)
         with self.db._read_ctx() as conn:
             self._owned_row(conn, caller, session_id)
         self._reconcile(session_id)
@@ -150,7 +162,7 @@ class DelegateSessionStore:
         return [_public(row) for row in rows]
 
     def observe(self, caller: str, session_id: str, *, limit=20, max_chars=12000) -> dict:
-        self.get(caller, session_id)
+        session_id = self.get(caller, session_id)["session_id"]
         with self.db._read_ctx() as conn:
             observed = directory.observe(self.db, conn, caller, session_id, limit=limit, max_chars=max_chars)
         observed["session"] = _public(observed["session"])
