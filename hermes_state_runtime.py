@@ -164,7 +164,7 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
     digest = admission_fingerprint(canonical_target=session_id, payload={'input': json.loads(encoded), 'intent': intent})
     def write(conn):
         _epoch(conn, epoch)
-        _session(conn, session_id)
+        session = _session(conn, session_id)
         old = conn.execute('''SELECT * FROM session_admissions
             WHERE principal_id=? AND target_session_id=? AND request_id=?''', (principal_id, session_id, request_id)).fetchone()
         if old is not None:
@@ -175,6 +175,10 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
             if _replay_guard is not None:
                 _replay_guard(conn)
             return _row(old)
+        # New work and retirement serialize on this write transaction. Receipt-only retries above
+        # retain their original identity, but can never create work on a closed conversation.
+        if session['status'] == 'closed':
+            raise RuntimeStoreError('closed')
         queued = conn.execute('''SELECT COUNT(*) FROM session_admissions WHERE target_session_id=?
             AND status='queued' ''', (session_id,)).fetchone()[0]
         # Main's cap holds in both states: a FIFO paused behind an unknown turn runs every accepted
@@ -239,6 +243,8 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
         if _guard is not None:
             _guard(conn)
         session = _session(conn, session_id)
+        if session['status'] == 'closed':
+            return None  # retirement and claim publication share the writer lock
         blocked = conn.execute("SELECT status FROM session_admissions WHERE target_session_id=? AND status IN ('started','unknown')", (session_id,)).fetchall()
         if any(row[0] == 'unknown' for row in blocked):
             raise RuntimeStoreError('unknown_execution')

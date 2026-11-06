@@ -75,7 +75,7 @@ def _overlap(monkeypatch, rig, calls):
             outputs[i] = {"receipt": call(SessionsAPI(rig.db))}
         except SessionAdmissionError as exc:
             outputs[i] = {"error": exc.to_dict()}
-        except BaseException as exc:  # noqa: BLE001 - reported, then asserted absent
+        except BaseException as exc:  # reported, then asserted absent
             outputs[i] = {"unexpected": repr(exc)}
 
     workers = [threading.Thread(target=run, args=(i, c), name=f"admit-{i}") for i, c in enumerate(calls)]
@@ -140,6 +140,27 @@ def test_a_serial_retry_returns_the_original_and_a_changed_one_conflicts(rig, ch
         _admit({**_BASE, **_CHANGES[change]})(api)
     assert refused.value.code == "request_conflict" and refused.value.to_dict()["field"] == "request_id"
     assert [r["admission_id"] for r in _rows(rig.db)] == [first["admission_id"]]
+
+
+# ── JSON types are caller fields too (Python bool == int is not request identity) ──
+
+@pytest.mark.parametrize("left,right", [({"flag": True}, {"flag": 1}),
+                                      ({"nested": [False]}, {"nested": [0]})])
+def test_boolean_numeric_metadata_conflicts_serially_and_concurrently(rig, monkeypatch, left, right):
+    from agent.sessions_api import SessionAdmissionError, SessionsAPI
+    first, second = {**_BASE, "meta": left}, {**_BASE, "meta": right}
+    outputs, preflights = _overlap(monkeypatch, rig, [_admit(first), _admit(second)])
+    assert list(preflights.values()) == [None, None]
+    assert sum("receipt" in out for out in outputs) == 1, outputs
+    assert [out["error"]["error"] for out in outputs if "error" in out] == ["request_conflict"]
+    winner = first if "receipt" in outputs[0] else second
+    loser = second if winner is first else first
+    api = SessionsAPI(rig.db)
+    assert _admit(winner)(api)["admission_id"] == _rows(rig.db)[0]["admission_id"]
+    with pytest.raises(SessionAdmissionError) as refused:
+        _admit(loser)(api)
+    assert refused.value.code == "request_conflict"
+    assert len(_rows(rig.db)) == 1
 
 
 # ── the store contract the facade relies on ─────────────────────────────────

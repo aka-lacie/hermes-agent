@@ -387,7 +387,9 @@ _GENERATED_EVENT_FIELDS = ("sent_at",)
 def _same_request(stored: Mapping[str, Any], fresh: Mapping[str, Any]) -> bool:
     """*stored* and *fresh* are the same event request apart from producer-generated fields."""
     def strip(event):
-        return {k: v for k, v in dict(event).items() if k not in _GENERATED_EVENT_FIELDS}
+        # JSON identity must distinguish true/1 and false/0, including nested caller metadata.
+        return json.dumps({k: v for k, v in dict(event).items() if k not in _GENERATED_EVENT_FIELDS},
+                          sort_keys=True, separators=(",", ":"))
     return strip(stored) == strip(fresh)
 
 
@@ -400,8 +402,10 @@ def _same_payload(stored_payload: Mapping[str, Any], payload: Mapping[str, Any])
     stored, fresh = event_from_payload(stored_payload), payload.get(EVENT_PAYLOAD_KEY)
     if stored is None or not isinstance(fresh, Mapping) or not _same_request(stored, fresh):
         return False
-    return ({k: v for k, v in stored_payload.items() if k != EVENT_PAYLOAD_KEY}
-            == {k: v for k, v in payload.items() if k != EVENT_PAYLOAD_KEY})
+    return (json.dumps({k: v for k, v in stored_payload.items() if k != EVENT_PAYLOAD_KEY},
+                       sort_keys=True, separators=(",", ":"))
+            == json.dumps({k: v for k, v in payload.items() if k != EVENT_PAYLOAD_KEY},
+                          sort_keys=True, separators=(",", ":")))
 
 
 def _exact_retry(db, principal: str, session_id: str, request: str, payload: dict, intent: str) -> Optional[dict]:

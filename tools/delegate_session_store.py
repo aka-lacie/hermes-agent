@@ -93,7 +93,9 @@ def _settled_write(session_id: str, status: Optional[str], *, only_if: Optional[
         conn.execute("DELETE FROM state_meta WHERE key IN (?, ?)",
                      (_RUNNER_PREFIX + row["admission_id"], _UNSTAMPED_PREFIX + row["admission_id"]))
         if status is not None:
-            conn.execute("UPDATE sessions SET status = ? WHERE id = ?" + (" AND status = ?" if only_if else ""),
+            # Retirement is permanent, including a late cleanup/recovery from an older runner.
+            conn.execute("UPDATE sessions SET status = ? WHERE id = ? AND status IS NOT 'closed'"
+                         + (" AND status = ?" if only_if else ""),
                          (status, session_id, *((only_if,) if only_if else ())))
     return write
 
@@ -325,10 +327,6 @@ class DelegateSessionStore:
 
         return _public(self.db._execute_write(write))
 
-    def _set_status(self, session_id: str, status: str, *, only_if: Optional[str] = None) -> None:
-        sql = "UPDATE sessions SET status = ? WHERE id = ?" + (" AND status = ?" if only_if else "")
-        self.db._write_rowcount(sql, (status, session_id, *((only_if,) if only_if else ())))
-
     def _clear_runner(self, admission_id: str) -> None:
         self.db._write_rowcount("DELETE FROM state_meta WHERE key = ?", (_RUNNER_PREFIX + admission_id,))
 
@@ -356,6 +354,8 @@ class DelegateSessionStore:
                 self.db, epoch=runtime_epoch(self.db), principal_id=parent_principal(owner), session_id=session_id,
                 request_id=request_id or uuid.uuid4().hex, payload=payload, intent=intent, wake_policy=wake_policy)
         except RuntimeStoreError as exc:
+            if exc.reason == "closed":
+                raise DelegateSessionError("closed", "This child is closed; start a new delegation.") from exc
             if exc.reason == "queue_full":
                 raise DelegateSessionError("queue_full", "This child already has the maximum queued assignments.") from exc
             raise
@@ -460,14 +460,20 @@ class DelegateSessionStore:
         return True
 
     def close(self, caller: str, session_id: str) -> dict:
+        """Retire atomically with admission/claim: busy refuses; queued work is cancelled, never revived."""
         info = self.get(caller, session_id)
-        if info["status"] == "running":
-            raise DelegateSessionError("busy", "Stop the running child before closing it.")
-        from hermes_state_runtime import cancel_session_input, list_session_admissions
-        for row in list_session_admissions(self.db, session_id=session_id):
-            if row["status"] == "queued":
-                cancel_session_input(self.db, epoch=runtime_epoch(self.db), admission_id=row["admission_id"])
-        self._set_status(session_id, "closed")
+        from hermes_state_runtime_workers import worker_states
+
+        def write(conn):
+            row = self._owned_row(conn, caller, session_id)
+            active = conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id = ? "
+                                  "AND status IN ('started', 'unknown') LIMIT 1", (session_id,)).fetchone()
+            if row["status"] == "running" or active or worker_states(conn, session_id):
+                raise DelegateSessionError("busy", "Stop the running child before closing it.")
+            conn.execute("UPDATE session_admissions SET status = 'terminal', outcome = 'cancelled' "
+                         "WHERE target_session_id = ? AND status = 'queued'", (session_id,))
+            conn.execute("UPDATE sessions SET status = 'closed' WHERE id = ?", (session_id,))
+        self.db._execute_write(write)
         return {**info, "status": "closed"}
 
     def set_route_model(self, session_id: str, model: str) -> None:

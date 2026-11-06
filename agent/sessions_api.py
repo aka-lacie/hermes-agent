@@ -57,6 +57,7 @@ def _store_db(db):
 
 # The state authority's refusal reasons, as the facade's codes (anything else: ``refused``).
 _STORE_REFUSALS = {
+    "closed": ("closed", "That session is closed."),
     "admission_conflict": ("request_conflict", "This request_id was already used for a different message."),
     "queue_full": ("queue_full", "That session already has the maximum queued inputs."),
     "not_found": ("unavailable", "No session with that session_id is reachable from this conversation."),
