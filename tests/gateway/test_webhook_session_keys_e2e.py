@@ -118,6 +118,9 @@ async def probe(peer, url, phase):
                     'started', 'queued')
                 peer.release.set()
                 await async_wait_until(lambda: settled('d1', 'd2'), timeout=60, what='both keyed deliveries')
+                # Serialization is a property of ONE keyed session: measure it before d3 (another key) and
+                # d4 (unkeyed) are posted, since those are independent sessions and may legitimately overlap.
+                out['max_in_flight'] = peer.max_in_flight
                 await post(client, {'text': 'PR two', 'repo': 'o/r', 'number': 2}, 'd3')
                 await post(client, {'text': 'unkeyed event'}, 'd4')
                 await async_wait_until(lambda: settled('d3', 'd4'), timeout=60, what='the other deliveries')
@@ -141,7 +144,7 @@ async def probe(peer, url, phase):
                 last = [r for r in peer.requests if r.get('model') == FALLBACK][-1]
                 out['saw_history'] = 'second look at PR one' in json.dumps(last)
             out['models'] = [r.get('model') for r in peer.all_requests if 'messages' in r]
-            out['max_in_flight'] = peer.max_in_flight
+            out.setdefault('max_in_flight', peer.max_in_flight)
             out['keyed_chat'] = keyed_chat_id(None, 'pr', 'o/r#1')
     finally:
         peer.release.set()
