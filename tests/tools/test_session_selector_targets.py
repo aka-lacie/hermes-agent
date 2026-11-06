@@ -234,9 +234,13 @@ def test_selectors_name_sessions_in_delegate_lookups_and_bot_chat_opt_ins(state,
     db._write_sql("UPDATE sessions SET title = 'Bot Chat' WHERE id = 'bot'")
     _webhook(db, "inbox", {"kind": "session", "selector": "bot-chat", "attach": True})
     assert "inbox" in _listed(store, "bot")
-    from agent.sessions_api import SessionsAPI
-    receipt = SessionsAPI(db).admit("bot", "inbox", "Check the thread")  # a peer message to the attached one
-    assert receipt.delivered and captured[-1]["target_id"] == "inbox"
+    from agent.sessions_api import SessionAdmissionError, SessionsAPI
+    # The main chat addresses the webhook session attached to it as its parent-side sender (a peer message
+    # is siblings-only: the opt-in is not a sibling of the chat).
+    receipt = SessionsAPI(db).admit("bot", "inbox", "Check the thread", sender_kind="parent", kind="parent_message")
+    assert receipt["delivered"] and captured[-1]["target_id"] == "inbox"
+    with pytest.raises(SessionAdmissionError):
+        SessionsAPI(db).admit("bot", "inbox", "as a peer")
 
 
 def test_cron_opt_in_by_selector_is_recorded_bound_and_delivered_to_the_current_session(state, captured):

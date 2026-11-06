@@ -27,6 +27,7 @@ CALL_CAP = 120
 RESULT_CAP = 160
 CALLS_PER_MESSAGE = 3
 FROM_CAP = 64
+_TARGET_ARGS = ("path", "file_path", "command", "url", "query", "session_id", "action", "name")
 
 LIST_TITLE_CAP = 48
 LIST_ASSIGNMENT_CAP = 64
@@ -97,6 +98,10 @@ def call_summary(call: Any, cap: int = CALL_CAP) -> Optional[str]:
             arguments = json.loads(arguments)
         except (ValueError, RecursionError):
             pass
+    if isinstance(arguments, dict):
+        # What the call acts on first (path, command, url, ...), so a short preview names its target.
+        arguments = {**{k: arguments[k] for k in _TARGET_ARGS if k in arguments},
+                     **{k: v for k, v in arguments.items() if k not in _TARGET_ARGS}}
     if isinstance(arguments, (dict, list)):
         try:
             arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))

@@ -535,12 +535,3 @@ def observe(db, conn, caller_session_id: str, session_id: str, *, limit: Optiona
     rollup = views.children_rollup(subs, lambda sub: views.latest_step(_latest_message(db, conn, sub["session_id"])),
                                    inherit_model=info.get("model"))
     return {"session": views.session_brief(info), "messages": tail, "truncated": truncated, **rollup}
-
-
-def _text_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(part.get("text", "") for part in content
-                         if isinstance(part, dict) and isinstance(part.get("text"), str))
-    return "" if content is None else str(content)

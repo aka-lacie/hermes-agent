@@ -1,6 +1,6 @@
-"""Tool-heavy observation regressions for aka-lacie/hermes-plugins#3."""
+"""Tool-heavy observation regressions for aka-lacie/hermes-plugins#3, under the bounded observe contract
+(agent/session_views.py: newest N messages, capped previews, never raw arguments or multi-KB blobs)."""
 import json
-import re
 
 import pytest
 
@@ -30,42 +30,36 @@ def test_tool_heavy_window_keeps_steps_and_headers_without_changing_history(hist
     before = db.get_messages('child')
     session = store.get('parent', 'child')
     result = store.observe('parent', 'child', limit=20)
-    assert len(result['messages']) == 10
-    assert result['truncated']
+    assert len(result['messages']) == 10 and not result['truncated']  # every step fits the window
     for i in range(5):
         call, output = result['messages'][i * 2:i * 2 + 2]
-        assert call['tool_calls'] == [{'name': 'terminal', 'command_preview': f'cat file-{i}.txt'}]
-        assert output['tool_name'] == 'terminal'
-        assert len(output['content']) <= 1500
-        assert output['content'].startswith(f'HEADER-{i}\n')
-        assert output['content'].endswith(f'\nSTATUS-{i}')
-        marker = re.search(r'\n\[([0-9]+) chars omitted\]\n', output['content'])
-        assert marker
-        assert len(output['content']) - len(marker[0]) + int(marker[1]) == len(before[i * 2 + 1]['content'])
+        assert call['calls'] == [f'terminal({{"command":"cat file-{i}.txt"}})']
+        assert output['tool'] == 'terminal' and output['kind'] == 'tool_result'
+        assert len(output['text']) <= 160
+        assert output['text'].startswith(f'HEADER-{i}') and output['text'].endswith(f'STATUS-{i}')
+        assert output['chars'] == len(before[i * 2 + 1]['content'])
+    assert len(json.dumps(result)) < 4000
     assert db.get_messages('child') == before
     assert store.get('parent', 'child') == session
 
 
-@pytest.mark.parametrize('budget', [1, 20, 50, 12000])
-def test_observe_bounds_metadata_and_preserves_generous_prose(history, budget):
+def test_observe_previews_prose_and_arguments_without_their_payloads(history):
     db, store = history
     prose = 'Introduction\n' + 'p' * 3000 + '\nConclusion'
     db.append_message('child', 'assistant', prose, tool_calls=[{
         'function': {'name': 'write_file', 'arguments': json.dumps({
-            'path': '/project/DESIGN.md', 'content': 'private payload' * 10000})}},
+            'content': 'private payload' * 10000, 'path': '/project/DESIGN.md'})}},
         {'function': {'name': 'broken', 'arguments': '{invalid'}},
     ])
-    result = store.observe('parent', 'child', max_chars=budget)
-    row = result['messages'][0]
-    metadata = {k: v for k, v in row.items() if k not in {'role', 'content', 'timestamp'}}
-    assert len(row['content']) + (len(json.dumps(metadata, ensure_ascii=False)) if metadata else 0) <= budget
-    assert 'private payload' not in json.dumps(result)
-    if budget == 12000:
-        assert row['content'] == prose
-        assert row['tool_calls'] == [{'name': 'write_file', 'target': '/project/DESIGN.md'}, {'name': 'broken'}]
-        assert not result['truncated']
-    else:
-        assert result['truncated']
+    result = store.observe('parent', 'child', max_chars=12000)  # max_chars is accepted; caps are fixed
+    row = result['messages'][-1]
+    assert row['text'].startswith('Introduction') and row['text'].endswith('Conclusion')
+    assert len(row['text']) <= 300 and row['chars'] == len(prose)
+    write, broken = row['calls']
+    assert write.startswith('write_file({"path":"/project/DESIGN.md","content":"private payload')  # target first
+    assert len(write) <= 120 and broken == 'broken({invalid)'
+    assert 'private payload' * 8 not in json.dumps(result)
+    assert len(json.dumps(result)) < 2000
 
 
 def test_many_large_tool_calls_stay_bounded(history):
@@ -73,9 +67,8 @@ def test_many_large_tool_calls_stay_bounded(history):
     db.append_message('child', 'assistant', '', tool_calls=[{
         'function': {'name': 'terminal', 'arguments': {'command': 'echo ' + 'x' * 10000}}}
         for _ in range(100)])
-    result = store.observe('parent', 'child', max_chars=1000)
-    row = result['messages'][0]
-    assert 0 < len(row['tool_calls']) < 100
-    assert len(json.dumps({'tool_calls': row['tool_calls']}, ensure_ascii=False)) <= 1000
-    assert all(len(call['command_preview']) <= 200 for call in row['tool_calls'])
-    assert result['truncated']
+    result = store.observe('parent', 'child')
+    row = result['messages'][-1]
+    assert len(row['calls']) == 3 and row['more_calls'] == 97
+    assert all(len(call) <= 120 and call.startswith('terminal({"command":"echo xxx') for call in row['calls'])
+    assert len(json.dumps(result)) < 1500
