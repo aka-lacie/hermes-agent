@@ -70,8 +70,8 @@ def test_pinned_job_with_declared_chain_failure_notice_mentions_backups(monkeypa
 
 
 @pytest.mark.parametrize(("job", "route"), [
-    (_job(**PINNED, fallback_providers=DECLARED), {**PINNED, "fallback_providers": DECLARED}),
-    (_job(**PINNED), PINNED),
+    (_job(**PINNED, fallback_providers=DECLARED), {"v": 1, "kind": "declared", **PINNED, "fallback_providers": DECLARED}),
+    (_job(**PINNED), {"v": 1, "kind": "declared", **PINNED}),
     (_job(), None),
 ])
 def test_fire_session_records_the_credential_free_route(job, route):
@@ -94,7 +94,7 @@ def test_fire_session_route_lands_in_the_sessions_row(tmp_path):
         row = db._read_one("SELECT lineage_kind, route FROM sessions WHERE id='cron-session'")
         assert row["lineage_kind"] == "cron"
         assert row["route"] == ('{"fallback_providers":[{"model":"claude-sonnet-5","provider":"anthropic"}],'
-                                '"model":"gpt-6.1-sol","provider":"openai-codex"}')
+                                '"kind":"declared","model":"gpt-6.1-sol","provider":"openai-codex","v":1}')
         stamp_cron_session_route(None, "cron-session", _job())  # no store: nothing to do, never raises
     finally:
         db.close()

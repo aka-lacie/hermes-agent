@@ -14,12 +14,13 @@ from gateway.config import PlatformConfig
 from gateway.platforms import webhook_route_runtime as runtime_mod
 from gateway.platforms.webhook import WebhookAdapter
 from gateway.run import GatewayRunner
-from hermes_cli.session_route import declared_route, rehydrate_chain, route_fallback_chain, route_pinned
+from agent.session_routes import declared_route, rehydrate_chain, route_fallback_chain, route_pinned
 from hermes_state import SessionDB
 
 PROFILE_CHAIN = [{"provider": "openrouter", "model": "z-ai/glm-5.2"}]
 DECLARED = [{"provider": "cliproxy-claude", "model": "claude-opus-5-5", "key_env": "CLIPROXY_KEY"}]
-STORED = [{"provider": "cliproxy-claude", "model": "claude-opus-5-5"}]
+# Stored form (agent/session_routes.py): key_env names a variable, never a value, so it is kept.
+STORED = [{"provider": "cliproxy-claude", "model": "claude-opus-5-5", "key_env": "CLIPROXY_KEY"}]
 PINNED_ROUTE = {"prompt": "{text}", "provider": "openai-codex", "model": "gpt-6.1-sol", "fallback_providers": DECLARED}
 
 
@@ -59,14 +60,15 @@ def _build_agent(turn_env):
 def test_declared_chain_reaches_the_first_agent_and_is_stored_credential_free(webhook_turn):
     _turn, built = _build_agent(webhook_turn)
     assert built["fallback_model"] == DECLARED  # key_env re-attached from the live route config
-    assert _stored(webhook_turn.db) == {"provider": "openai-codex", "model": "gpt-6.1-sol", "fallback_providers": STORED}
+    assert _stored(webhook_turn.db) == {"v": 1, "kind": "declared", "provider": "openai-codex", "model": "gpt-6.1-sol",
+                                    "fallback_providers": STORED}
 
 
 def test_next_delivery_keeps_the_stored_route_after_a_config_edit(webhook_turn):
     _build_agent(webhook_turn)
     webhook_turn.adapter._routes["pr"] = {"prompt": "{text}", "model": "other"}  # chain removed from config
     turn, built = _build_agent(webhook_turn)
-    assert built["fallback_model"] == STORED  # stored route wins; no credential reference left to attach
+    assert built["fallback_model"] == STORED  # stored route wins; only the stored key_env reference is left
     agent = SimpleNamespace(_fallback_chain=[], _fallback_model=None, _fallback_activated=False)
     GatewayRunner._apply_fallback_chain_to_agent(agent, turn._turn_fallback_chain())  # cached-agent refresh
     assert agent._fallback_chain == STORED
@@ -140,9 +142,10 @@ def test_declared_route_is_credential_free_and_capped():
     route = declared_route(provider="openai-codex", model=" gpt ", base_url="https://x/v1/", fallback_providers=chain)
     assert route["model"] == "gpt" and "base_url" not in route and len(route["endpoint_sha256"]) == 64
     assert len(route["fallback_providers"]) == 8
-    assert all(set(e) == {"provider", "model"} for e in route["fallback_providers"])
+    assert all(set(e) == {"provider", "model", "key_env"} for e in route["fallback_providers"])
+    assert "sk" not in [v for e in route["fallback_providers"] for v in e.values()]
     assert declared_route() is None and declared_route(fallback_providers=None) is None
-    assert declared_route(fallback_providers=[]) == {"fallback_providers": []}
+    assert declared_route(fallback_providers=[]) == {"v": 1, "kind": "declared", "fallback_providers": []}
     assert route_pinned(route) and not route_pinned({"fallback_providers": []}) and not route_pinned(None)
 
 

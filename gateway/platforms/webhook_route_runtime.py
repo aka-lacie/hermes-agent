@@ -1,7 +1,7 @@
 """Turn-time route of a webhook session: the route's model pin and its declared fallback chain.
 
 A webhook route may pin ``provider`` / ``model`` and declare ``fallback_providers``
-(``[{provider, model}]``, ``[]`` = none). The credential-free route (hermes_cli/session_route.py) is
+(``[{provider, model}]``, ``[]`` = none). The credential-free route (agent/session_routes.py) is
 stored in ``sessions.route`` of the session once (``webhook_session_keys.stamp_admitted_session``;
 re-derived and stamped here when a turn starts before that stamp landed), and every turn of the
 session reads it back, so a keyed session's next delivery keeps the same primary and chain:
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def declared_route_for(route_config: Any) -> Optional[dict]:
     """The credential-free route a webhook route config declares, else None."""
-    from hermes_cli.session_route import declared_route
+    from agent.session_routes import declared_route
     if not isinstance(route_config, dict):
         return None
     extra = {"fallback_providers": route_config["fallback_providers"]} if "fallback_providers" in route_config else {}
@@ -98,7 +98,7 @@ def _walk_chain(route: dict, config: Optional[dict], exc: Exception) -> tuple[di
     from gateway.run import _runtime_agent_kwargs
     from hermes_cli.fallback_config import effective_runtime_provider, resolve_entry_api_key
     from hermes_cli.runtime_provider import resolve_runtime_provider
-    from hermes_cli.session_route import rehydrate_chain
+    from agent.session_routes import rehydrate_chain
     chain = rehydrate_chain(route.get("fallback_providers"), (config or {}).get("fallback_providers") or ())
     for entry in chain or ():
         kwargs = {"requested": entry["provider"], "target_model": entry["model"]}
@@ -120,7 +120,7 @@ def pinned_runtime(runner: Any, source: Any, session_key: Optional[str], model: 
                    runtime_kwargs: dict) -> tuple[str, dict]:
     """``(model, runtime_kwargs)`` for this turn: unchanged unless *source* is a webhook session whose
     stored route pins a provider and/or model."""
-    from hermes_cli.session_route import route_pinned
+    from agent.session_routes import route_pinned
     if _webhook_route_name(source) is None:
         return model, runtime_kwargs
     route, config = stored_route(runner, source, _session_id_for_key(runner, session_key))
@@ -149,6 +149,6 @@ def turn_fallback_chain(runner: Any, source: Any, session_id: Optional[str],
     route, config = stored_route(runner, source, session_id)
     if route is None:
         return inherited()
-    from hermes_cli.session_route import route_fallback_chain
+    from agent.session_routes import route_fallback_chain
     return route_fallback_chain(route, inherited(), owner=f"webhook route {_webhook_route_name(source)}",
                                 current=(config or {}).get("fallback_providers") or ())

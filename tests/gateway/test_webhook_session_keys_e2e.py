@@ -49,9 +49,14 @@ def test_keyed_webhook_session_serializes_shares_history_and_keeps_its_failover_
     # Pinned primary first, then the declared chain, on each of the two keyed deliveries.
     assert first["models"][:2] == [PRIMARY, FALLBACK]
     assert first["models"].count(FALLBACK) >= 3 and set(first["models"]) == {PRIMARY, FALLBACK}
+    # The one stored-route shape (agent/session_routes.py): the chain entry's endpoint is kept only as its
+    # digest and rehydrated from the route config at every turn (phase 2 proves it survives a restart).
+    from agent.session_routes import endpoint_fingerprint
     assert json.loads(first["stored_route"]) == {
-        "provider": "custom", "model": PRIMARY,
-        "fallback_providers": [{"provider": "custom", "model": FALLBACK, "base_url": first["peer_url"]}]}
+        "v": 1, "kind": "declared", "provider": "custom", "model": PRIMARY,
+        "fallback_providers": [{"provider": "custom", "model": FALLBACK, "key_env": "OPENAI_API_KEY",
+                                "endpoint_sha256": endpoint_fingerprint(first["peer_url"])}]}
+    assert first["peer_url"] not in first["stored_route"]
     again = _run_phase(tmp_path, "restart", port)
     assert again["session"] == first["session"]
     assert again["models"][:2] == [PRIMARY, FALLBACK]  # the stored route reached the fresh agent
