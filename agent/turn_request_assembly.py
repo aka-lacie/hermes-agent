@@ -207,6 +207,9 @@ def assemble_api_request(
 
     # Normalize whitespace and tool-call JSON for bit-perfect prefixes across turns
     # (KV-cache reuse on local servers, better cloud cache hits); API copy only.
+    # Only ``content`` is touched: an adapter-owned row's ``_parts`` are already final. The merge above typed
+    # each untyped side from this same normalized text (``message_parts.untyped_content``, also SessionDB's
+    # load lens), so live and replayed rows reach the adapter with identical parts.
     for am in api_messages:
         if isinstance(am.get("content"), str):
             am["content"] = am["content"].strip()

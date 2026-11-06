@@ -22,7 +22,9 @@ from agent.message_sanitization import (
 from agent.message_metadata import (
     TOOL_CALL_UIDS, merge_tool_call_uids, per_occurrence_tool_call_uids, record_absorbed_message)
 from agent.interrupt_control import drained_steer_inputs
-from agent.message_parts import MESSAGE_PARTS, RENDERED, merge as merge_parts, parts_mergeable, stands_alone
+from agent.message_parts import (
+    MESSAGE_PARTS, RENDERED, has_parts, join_user_content, merge as merge_parts, parts_mergeable, stands_alone,
+    untyped_content)
 from agent.cache_bounds import publish_lru
 from agent.prompt_builder import STEER_DISPLAY_KIND, steer_user_row
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
@@ -698,13 +700,16 @@ def _merge_consecutive_users(messages: list[dict]) -> tuple[list[dict], int]:
                 prev[MERGED_DURABLE_ROWS] = int(prev.get(MERGED_DURABLE_ROWS) or 1) + 1
             else:
                 prev.pop(MERGED_DURABLE_ROWS, None)
+            # The text *prev* contributes to the merged row: a typed merge types an untyped prev from its
+            # normalized content (``untyped_content``), so the persist override's prefix must be that text.
+            prev_view = prev_content if has_parts(prev) else untyped_content(prev)
             # Typed rows concatenate their parts (same merged text: the parts' plain view); else join text.
             if not (typed := merge_parts(prev, msg)):
                 prev["content"] = merged_content
             # The clean-text persist override must replace only the absorbed turn, never the
             # unanswered text before it; kept across replay passes (an empty turn absorbs too).
             if prev_content:
-                prev[MERGED_TURN_PREFIX] = prev_content
+                prev[MERGED_TURN_PREFIX] = prev_view if typed else prev_content
             # Merged content invalidates the api_content sidecar; drop it so replay cannot use stale bytes.
             drop_stale_api_content(prev)
             # A display-marker row (e.g. a model-switch marker persisted as role=user on purpose, #48338)
@@ -1191,15 +1196,8 @@ def try_recover_primary_transport(
 def _merge_user_content(prev_content: Any, cur_content: Any) -> Any:
     """Merged content for two adjacent user messages (``_UNMERGEABLE`` for unknown shapes):
     string+string joins with a blank line; list sides append as separate blocks."""
-    if isinstance(prev_content, str) and isinstance(cur_content, str):
-        return prev_content + ("\n\n" if prev_content and cur_content else "") + cur_content
-    if isinstance(prev_content, list) and isinstance(cur_content, list):
-        return list(prev_content) + list(cur_content)
-    if isinstance(prev_content, list) and isinstance(cur_content, str):
-        return list(prev_content) + ([{"type": "text", "text": cur_content}] if cur_content else [])
-    if isinstance(prev_content, str) and isinstance(cur_content, list):
-        return ([{"type": "text", "text": prev_content}] if prev_content else []) + list(cur_content)
-    return _UNMERGEABLE
+    joined = join_user_content(prev_content, cur_content)
+    return _UNMERGEABLE if joined is None else joined
 
 
 _UNMERGEABLE = object()
@@ -1242,7 +1240,8 @@ def drop_thinking_only_and_merge_users(
             merged.append(m)
         else:
             # Copy so caller dicts are never mutated. The parts merge reads each side's OWN content (an untyped
-            # side joins as the parts its columns give it), so the joined text is written only afterwards.
+            # side joins as the parts its columns give it) and, on a rendered clone, writes the joined content
+            # from the same normalized sides its parts hold; only a text merge writes the joined text here.
             survivor = dict(prev)
             if not merge_parts(survivor, m):
                 survivor["content"] = content

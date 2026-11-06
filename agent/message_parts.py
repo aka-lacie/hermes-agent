@@ -54,7 +54,7 @@ PART_TYPES = frozenset({HUMAN, SYSTEM_EVENT, INJECTION, MEDIA})
 _TEXT_PART_TYPES = frozenset({HUMAN, SYSTEM_EVENT})
 # Set by the wire renderer on a per-call clone whose ``content`` is already the rendered wire text and
 # whose ``_parts`` stay on for a provider adapter (``agent.wire_render``): a merge then concatenates the
-# parts and leaves the caller's join of the rendered text alone.
+# parts (typing an untyped side from its columns) and joins each side's wire text itself.
 RENDERED = "_wire_rendered"
 _PART_KEYS = {
     HUMAN: frozenset({"type", "v", "text", "delivery", "origin"}),
@@ -102,6 +102,13 @@ _HARNESS_NOTICE_EVENT_TEXT = {
     "pre_llm_call_blocked": "The turn was blocked by a pre-LLM plugin check.",
     "pending_tool_result": "The turn ended while a tool result was pending.",
 }
+
+# Host capability for provider adapters (a structural flag, never inferred from text): on a rendered wire
+# clone (``RENDERED``) ``_parts`` accounts for every input the row carries. The renderer keeps a typed row's
+# own parts; every merge with an untyped row types that side from its columns (:func:`untyped_parts`) or
+# keeps the pair as two rows (:func:`parts_mergeable`). An adapter reads ``_parts`` alone and never
+# recovers provenance from ``content``.
+RENDERED_PARTS_COMPLETE = True
 
 _DB_PERSISTED_MARKER = "_db_persisted"  # agent.context_compressor._DB_PERSISTED_MARKER (import-light here)
 _COMPRESSED_SUMMARY_KEY = "_compressed_summary"  # agent.context_compressor.COMPRESSED_SUMMARY_METADATA_KEY
@@ -315,10 +322,18 @@ def has_parts(msg: Any) -> bool:
     return isinstance(msg, Mapping) and isinstance(msg.get(MESSAGE_PARTS), list)
 
 
+def is_plain_view(content: Any, parts: Iterable[Mapping[str, Any]]) -> bool:
+    """*content* (a string) is the parts' plain view, as written or as ``SessionDB`` loads it: a loaded
+    user row's string loses its outer whitespace while its parts keep theirs, so a typed row reloaded
+    from state.db (and re-written from that load) still holds the same parts it was sent with live."""
+    plain = plain_text(parts)
+    return content == plain or content == plain.strip()
+
+
 def parts_consistent(msg: Mapping[str, Any]) -> bool:
     """``content`` is still the plain view of the parts (multimodal list content is never compared)."""
     content = msg.get("content")
-    return not isinstance(content, str) or content == plain_text(msg[MESSAGE_PARTS])
+    return not isinstance(content, str) or is_plain_view(content, msg[MESSAGE_PARTS])
 
 
 # ── mutation helpers (the only code that edits parts) ─────────────────────────
@@ -356,32 +371,44 @@ def _parts_or_legacy(msg: Mapping[str, Any]) -> Optional[list]:
 _TEXT_BLOCK_TYPES = frozenset({"text", "input_text"})
 
 
+def untyped_content(msg: Mapping[str, Any]) -> Any:
+    """An UNTYPED user row's content as every reader of it sees it: a string loses its outer whitespace
+    (the same normalization ``SessionDB`` applies when it loads a user row and the send path applies to
+    every row's string content), so a side typed live and the same row typed after a reload carry the
+    same text. List content is never normalized (neither the loader nor the send path touches it)."""
+    content = msg.get("content")
+    return content.strip() if isinstance(content, str) else content
+
+
 def untyped_parts(msg: Mapping[str, Any]) -> Optional[list]:
     """The parts an UNTYPED user row joins typed parts with, from its columns and role semantics only
     (never by parsing its text): a compaction summary (the compressor's structured flag) is the
     ``compaction`` system event it is; otherwise :func:`build_parts` with ``type_untyped`` (its
     ``sender_kind`` / ``part_kind`` columns when stored, else a display kind's event, else the human turn a
-    legacy plain user row has always been). A text-only multimodal list types block by block, each as
-    the row's own kind; a list holding media (no stored digest/path to type it with) is None, so the
-    caller keeps it out of a parts merge rather than losing or reclassifying it."""
+    legacy plain user row has always been). The text is :func:`untyped_content`, so live and replay type
+    the row identically. A text-only multimodal list types block by block, each as the row's own kind; a
+    list holding media (no stored digest/path to type it with) is None, so the caller keeps it out of a
+    parts merge rather than losing or reclassifying it."""
     if msg.get("role") != "user":
         return None
-    content = msg.get("content")
+    content = untyped_content(msg)
     if isinstance(content, list):
-        texts = [b.get("text") for b in content if isinstance(b, dict)]
-        if len(texts) != len(content) or not all(
-                isinstance(b, dict) and b.get("type") in _TEXT_BLOCK_TYPES and isinstance(b.get("text"), str)
-                for b in content):
+        if not all(isinstance(b, dict) and b.get("type") in _TEXT_BLOCK_TYPES and isinstance(b.get("text"), str)
+                   for b in content):
             return None
         out: list = []
-        for text in texts:
-            out.extend(untyped_parts({**msg, "content": text}) or [])
+        for block in content:
+            out.extend(_untyped_text_parts(msg, str(block["text"])) or [])
         return out
     if not isinstance(content, str):
         return None
+    return _untyped_text_parts(msg, content)
+
+
+def _untyped_text_parts(msg: Mapping[str, Any], text: str) -> Optional[list]:
     if msg.get(_COMPRESSED_SUMMARY_KEY) and msg.get("sender_kind") is None:
-        return [system_event(COMPACTION_EVENT_KIND, content)]
-    return build_parts(msg, type_untyped=True)
+        return [system_event(COMPACTION_EVENT_KIND, text)]
+    return build_parts({**msg, "content": text}, type_untyped=True)
 
 
 def append_parts(msg: MutableMapping[str, Any], parts: list) -> MutableMapping[str, Any]:
@@ -394,26 +421,29 @@ def append_parts(msg: MutableMapping[str, Any], parts: list) -> MutableMapping[s
 
 
 def merge(prev: MutableMapping[str, Any], msg: Mapping[str, Any]) -> bool:
-    """Fold user message *msg* into *prev* by concatenating parts; True when it did.
+    """Fold user message *msg* into *prev* by concatenating parts; True when it did (parts and content).
 
     Returns False (nothing touched) when neither side is typed, so the caller's legacy text merge runs
-    unchanged, or when an untyped side holds non-text content. An untyped plain side is typed as the
-    human turn it was rendered as. *prev* keeps its row-level provenance; each part keeps its own type.
+    unchanged, or when an untyped side holds non-text content. An untyped side is typed from its columns
+    (:func:`untyped_parts`). *prev* keeps its row-level provenance; each part keeps its own type.
     The persisted stamp is the caller's to manage (the merge keeps its own durable-row bookkeeping).
     """
     if not (has_parts(prev) or has_parts(msg)):
         return False
     if prev.get(RENDERED) or msg.get(RENDERED):
-        # A rendered wire clone (adapter-owned route): content is already wire text, so the caller's text
-        # join stands; the adapter still sees every part of BOTH sides, in order. An untyped side joins as
-        # the parts its columns give it (:func:`untyped_parts`); one that has none was kept out of the
-        # merge by the caller (:func:`parts_mergeable`) and is left untouched here.
+        # A rendered wire clone (adapter-owned route): the adapter sees every part of BOTH sides, in order,
+        # and nothing but them (:data:`RENDERED_PARTS_COMPLETE`). An untyped side joins as the parts its
+        # columns give it; one that has none (media) was kept out of the merge by the caller
+        # (:func:`parts_mergeable`) and is left untouched here. ``content`` joins each side's wire view: a
+        # typed side's rendered text, an untyped side's :func:`untyped_content` (the text its parts hold).
         left, right = _wire_side_parts(prev), _wire_side_parts(msg)
-        if left is None or right is None:
+        content = join_user_content(_wire_side_content(prev), _wire_side_content(msg))
+        if left is None or right is None or content is None:
             return False
         prev[MESSAGE_PARTS] = [*left, *right]
         prev[RENDERED] = True
-        return False
+        prev["content"] = content
+        return True
     left, right = _parts_or_legacy(prev), _parts_or_legacy(msg)
     if left is None or right is None:
         return False
@@ -421,10 +451,28 @@ def merge(prev: MutableMapping[str, Any], msg: Mapping[str, Any]) -> bool:
     return True
 
 
+def join_user_content(prev_content: Any, cur_content: Any) -> Any:
+    """Two adjacent user rows' content as one (None for a shape that cannot join): string+string joins
+    with :data:`PLAIN_TEXT_SEPARATOR`; a list side appends as separate text blocks."""
+    if isinstance(prev_content, str) and isinstance(cur_content, str):
+        return prev_content + (PLAIN_TEXT_SEPARATOR if prev_content and cur_content else "") + cur_content
+    if isinstance(prev_content, list) and isinstance(cur_content, list):
+        return list(prev_content) + list(cur_content)
+    if isinstance(prev_content, list) and isinstance(cur_content, str):
+        return list(prev_content) + ([{"type": "text", "text": cur_content}] if cur_content else [])
+    if isinstance(prev_content, str) and isinstance(cur_content, list):
+        return ([{"type": "text", "text": prev_content}] if prev_content else []) + list(cur_content)
+    return None
+
+
 def _wire_side_parts(msg: Mapping[str, Any]) -> Optional[list]:
     if has_parts(msg):
         return copy.deepcopy(list(msg[MESSAGE_PARTS]))
     return untyped_parts(msg)
+
+
+def _wire_side_content(msg: Mapping[str, Any]) -> Any:
+    return msg.get("content", "") if has_parts(msg) else untyped_content(msg)
 
 
 def parts_mergeable(prev: Mapping[str, Any], msg: Mapping[str, Any]) -> bool:

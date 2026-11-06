@@ -48,7 +48,7 @@ from typing import Any, Mapping, Optional
 
 from agent.message_parts import (
     HUMAN, INJECTION, MEDIA, MESSAGE_PARTS, PLAIN_TEXT_SEPARATOR, PROVENANCE_FIELDS, RENDERED, SYSTEM_EVENT,
-    has_parts, plain_text,
+    has_parts, is_plain_view, plain_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -200,7 +200,7 @@ class WireRenderer:
         parts = msg[MESSAGE_PARTS]
         # Row provenance is persistence-only (the parts carry what the wire needs).
         base = {k: v for k, v in msg.items() if k != MESSAGE_PARTS and k not in PROVENANCE_FIELDS}
-        if isinstance(msg.get("content"), str) and msg["content"] != plain_text(parts):
+        if isinstance(msg.get("content"), str) and not is_plain_view(msg["content"], parts):
             # A later writer rewrote the text (a redaction, a sanitizer, an API-only append): content
             # wins, exactly as persistence stores such a row untyped, so nothing it removed comes back.
             logger.warning("typed row content diverged from its parts; rendering its content untyped")

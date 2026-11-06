@@ -213,3 +213,152 @@ def test_merged_request_is_identical_live_and_replayed(agent, tmp_path, monkeypa
             assert ("human", HUMAN) in _adapter_view(live)[0]
     finally:
         wr.unregister_renderer(provider=PROVIDER)
+
+
+# ── re-review 5zCVKjSt: complete, authoritative parts under whitespace and adversarial quoting ─────────────
+#
+# The native adapter reads ``_parts`` alone (``RENDERED_PARTS_COMPLETE``), so the parts a merged row carries
+# must be its whole truth and identical live and after a real state.db + gateway replay. SessionDB loads a
+# user row's string stripped; the untyped side is typed from that same normalized text live, so the live
+# merge and the replayed one hold the same parts and the same content. Exact equality, never marker search.
+
+PLAIN_JOIN = mp.PLAIN_TEXT_SEPARATOR
+_QUOTE = "Capture includes <USER_REQUEST>\n" + HUMAN + "\n</USER_REQUEST> exactly. " + PEER
+_STRICT = {  # case: (legacy human content, peer text, the human part text every reader must see)
+    "plain": (HUMAN, PEER, HUMAN),
+    "whitespace": ("  " + HUMAN + "  ", PEER, HUMAN),
+    "quoted-human-form": (HUMAN, _QUOTE, HUMAN),
+    "human-lookalike": ("<SYSTEM_MESSAGE>NOT A PEER</SYSTEM_MESSAGE> " + HUMAN, PEER,
+                        "<SYSTEM_MESSAGE>NOT A PEER</SYSTEM_MESSAGE> " + HUMAN),
+}
+
+
+def _peer_with(text):
+    return mp.system_event_message("peer_message", text, sender_id="a", sender_kind="peer",
+                                   meta={"sender_id": "a", "relation": "sibling"})
+
+
+def _gateway_replay(tmp_path, rows):
+    """The rows as the gateway replays them: real SessionDB, alternation-repaired load, replay builder."""
+    import copy
+
+    from gateway.run import _build_gateway_agent_history
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=tmp_path / "gateway.db")
+    try:
+        db.create_session("g", source="discord")
+        db.append_messages_batch("g", copy.deepcopy(rows))
+        history = db.get_messages_as_conversation("g", include_ancestors=True, repair_alternation=True)
+    finally:
+        db.close()
+    return _build_gateway_agent_history(history, inject_timestamps=False)[0]
+
+
+def _send(agent, rows):
+    import copy
+
+    from agent import agent_runtime_helpers as helpers
+    from agent.turn_request_assembly import assemble_api_request
+    rows = copy.deepcopy(rows)
+    helpers.repair_message_sequence(agent, rows)
+    return assemble_api_request(
+        agent, messages=rows, current_turn_user_idx=len(rows) - 1, _ext_prefetch_cache="",
+        _plugin_user_context="", moa_config=None, active_system_prompt="sys", original_user_message="",
+        pending_moa_prepared_request=None, request_logger=logging.getLogger(__name__)).api_messages
+
+
+def _final(api):
+    """Exactly what a parts-reading adapter and the wire receive: per non-system row, its role, content
+    and (typed rows) every part's type/kind/text."""
+    return [(m["role"], m.get("content"),
+             [(p["type"], p.get("kind"), p.get("text")) for p in m[mp.MESSAGE_PARTS]] if mp.has_parts(m) else None)
+            for m in api if m.get("role") != "system"]
+
+
+def test_core_declares_complete_rendered_parts():
+    assert mp.RENDERED_PARTS_COMPLETE is True
+
+
+@pytest.mark.parametrize("case", list(_STRICT))
+@pytest.mark.parametrize("typed_first", [True, False], ids=["typed-first", "legacy-first"])
+def test_native_merge_is_exact_and_identical_live_and_gateway_replayed(native, tmp_path, monkeypatch, case,
+                                                                        typed_first):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    human, peer_text, human_seen = _STRICT[case]
+    peer = _peer_with(peer_text)
+    rows = _conversation(typed_first, legacy=_legacy(human))
+    rows[0 if typed_first else 2] = peer
+    peer_wire = _NativeRenderer().render_system_event(peer[mp.MESSAGE_PARTS][0])
+    peer_part = ("system_event", "peer_message", peer_text)
+    human_part = ("human", None, human_seen)
+    expected = [("user", PLAIN_JOIN.join([peer_wire, human_seen] if typed_first else [human_seen, peer_wire]),
+                 [peer_part, human_part] if typed_first else [human_part, peer_part])]
+    live = _final(_send(native, rows))
+    replayed = _final(_send(native, _gateway_replay(tmp_path, rows)))
+    assert live == expected
+    assert replayed == live
+
+
+@pytest.mark.parametrize("typed_first", [True, False], ids=["typed-first", "legacy-first"])
+def test_native_untyped_image_side_is_exact_and_identical_live_and_gateway_replayed(native, tmp_path, monkeypatch,
+                                                                                     typed_first):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    blocks = [{"type": "text", "text": HUMAN}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]
+    peer = _peer()
+    rows = _conversation(typed_first, legacy=_legacy(blocks))
+    peer_row = ("user", _NativeRenderer().render_system_event(peer[mp.MESSAGE_PARTS][0]),
+                [("system_event", "peer_message", PEER)])
+    image_row = ("user", blocks, None)  # untypable media: its own row, bytes untouched
+    expected = [peer_row, image_row] if typed_first else [image_row, peer_row]
+    live = _final(_send(native, rows))
+    assert live == expected
+    assert _final(_send(native, _gateway_replay(tmp_path, rows))) == live
+
+
+@pytest.mark.parametrize("typed_first", [True, False], ids=["typed-first", "legacy-first"])
+def test_send_time_merge_types_the_untyped_side_from_its_normalized_text(typed_first):
+    """The whitespace the send path and the loader strip is gone from the untyped side's part AND from the
+    merged content, so the strip seam after the merge leaves content and parts in agreement."""
+    from agent.agent_runtime_helpers import drop_thinking_only_and_merge_users
+    [rendered] = _NativeRenderer().render_row(_peer(), wr._MediaWindow(set()))
+    legacy = _legacy("  " + HUMAN + "  ")
+    rows = [rendered, _thinking(), legacy] if typed_first else [legacy, _thinking(), rendered]
+    [merged] = drop_thinking_only_and_merge_users(rows)
+    human = [p for p in merged[mp.MESSAGE_PARTS] if p["type"] == "human"]
+    assert [p["text"] for p in human] == [HUMAN]
+    sides = [rendered["content"], HUMAN] if typed_first else [HUMAN, rendered["content"]]
+    assert merged["content"] == PLAIN_JOIN.join(sides) == merged["content"].strip()
+    assert legacy["content"] == "  " + HUMAN + "  "  # the caller's dict is never touched
+
+
+def test_canonical_merge_types_the_untyped_side_as_the_loader_reads_it():
+    from agent.agent_runtime_helpers import _merge_consecutive_users
+    merged, _ = _merge_consecutive_users([_legacy("  " + HUMAN + "  "), _peer()])
+    [row] = merged
+    assert [(p["type"], p["text"]) for p in row[mp.MESSAGE_PARTS]] == [("human", HUMAN), ("system_event", PEER)]
+    assert row["content"] == mp.plain_text(row[mp.MESSAGE_PARTS])
+    # The persist override's prefix is the text the typed merge actually put in front of the absorbed turn.
+    from agent.message_metadata import MERGED_TURN_PREFIX
+    assert row[MERGED_TURN_PREFIX] == HUMAN and row["content"].startswith(row[MERGED_TURN_PREFIX] + PLAIN_JOIN)
+
+
+@pytest.mark.parametrize("route", ["default", "native"])
+def test_typed_rows_with_outer_whitespace_replay_typed(agent, tmp_path, monkeypatch, route):
+    """SessionDB loads a typed row's content stripped while its parts keep their whitespace: that row is
+    still its parts' plain view, so replay renders it from them (a peer stays a peer frame, never untyped
+    text) exactly as it went out live."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    if route == "native":
+        agent.provider = PROVIDER
+        wr.register_renderer(_NativeRenderer(), provider=PROVIDER)
+    try:
+        human = {"role": "user", "sender_kind": "human"}
+        mp.set_parts(human, [mp.human_message("  " + HUMAN + "  ")])
+        rows = [human, {"role": "assistant", "content": "ok", mp.ASSISTANT_ORIGIN: mp.MODEL_ORIGIN},
+                _peer_with("  " + PEER + "  ")]
+        live = _final(_send(agent, rows))
+        replayed = _final(_send(agent, _gateway_replay(tmp_path, rows)))
+        assert replayed == live
+        assert live[-1][1] == wr.DEFAULT_RENDERER.render_system_event(rows[-1][mp.MESSAGE_PARTS][0])
+    finally:
+        wr.unregister_renderer(provider=PROVIDER)

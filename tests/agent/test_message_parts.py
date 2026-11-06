@@ -95,6 +95,22 @@ def test_merge_concatenates_parts_and_matches_the_legacy_text_join():
     assert mp.merge(typed, {"role": "user", "content": [{"type": "text", "text": "img"}]}) is False
 
 
+def test_a_loaded_typed_row_is_still_its_parts_plain_view():
+    """SessionDB loads a user row's string stripped; its parts keep their whitespace. That row is still
+    consistent (it is re-stored and rendered typed), while a real rewrite of its text is not."""
+    msg = mp.system_event_message("peer_message", "  from a peer  ", sender_id="a", sender_kind="peer")
+    loaded = {**msg, "content": msg["content"].strip()}
+    assert mp.parts_consistent(loaded) and mp.is_plain_view(loaded["content"], loaded["_parts"])
+    assert not mp.parts_consistent({**msg, "content": "from a"})
+
+
+def test_an_untyped_side_is_typed_from_the_text_every_reader_sees():
+    assert mp.untyped_content({"role": "user", "content": "  hi  "}) == "hi"
+    assert [p["text"] for p in mp.untyped_parts({"role": "user", "content": "  hi  "}) or []] == ["hi"]
+    blocks = [{"type": "text", "text": " a "}]  # list content is never normalized (neither loader nor send path)
+    assert [p["text"] for p in mp.untyped_parts({"role": "user", "content": blocks}) or []] == [" a "]
+
+
 def test_build_parts_reads_columns_never_text():
     # A legacy row whose text LOOKS like a cron envelope stays untyped: no text is parsed.
     legacy = {"role": "user", "content": "[Cron delivery: nightly]\nall good"}
