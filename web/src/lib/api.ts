@@ -1753,6 +1753,9 @@ export interface WebhookRoute {
   events: string[];
   deliver: string;
   deliver_only: boolean;
+  delivery_mode: "direct" | "internal_turn";
+  model?: string | null;
+  provider?: string | null;
   prompt: string;
   skills: string[];
   created_at: string | null;
@@ -1786,6 +1789,9 @@ export interface WebhookCreate {
   skills?: string[];
   deliver?: string;
   deliver_only?: boolean;
+  delivery_mode?: "direct" | "internal_turn";
+  model?: string;
+  provider?: string;
   deliver_chat_id?: string;
 }
 
@@ -2361,6 +2367,15 @@ export interface CronJobRepeat {
   completed?: number;
 }
 
+export type CronJobType = "agent" | "script" | "reminder";
+export type CronDeliveryMode = "direct" | "internal_turn";
+export type CronSessionDeliveryTarget =
+  | { kind: "session"; session_id: string; selector?: never; attach?: boolean; wake_policy?: string }
+  | { kind: "session"; selector: string; session_id?: never; attach?: boolean; wake_policy?: string };
+export type CronCanonicalDeliveryTarget = CronSessionDeliveryTarget
+  | { kind: "platform"; platform: string; chat_id?: string | null; thread_id?: string | null }
+  | { kind: "none" };
+
 export interface CronJobMutation {
   name?: string;
   prompt?: string;
@@ -2372,6 +2387,10 @@ export interface CronJobMutation {
   base_url?: string | null;
   script?: string | null;
   no_agent?: boolean;
+  job_type?: CronJobType;
+  delivery_mode?: CronDeliveryMode;
+  delivery_target?: CronCanonicalDeliveryTarget | null;
+  attach_to_session?: boolean;
   context_from?: string[] | null;
   enabled_toolsets?: string[] | null;
   workdir?: string | null;
@@ -2397,6 +2416,10 @@ export interface CronJob {
   provider?: string | null;
   base_url?: string | null;
   no_agent?: boolean | null;
+  job_type?: CronJobType | null;
+  delivery_mode?: CronDeliveryMode | null;
+  delivery_target?: CronCanonicalDeliveryTarget | null;
+  attach_to_session?: boolean | null;
   context_from?: string[] | string | null;
   enabled_toolsets?: string[] | null;
   workdir?: string | null;

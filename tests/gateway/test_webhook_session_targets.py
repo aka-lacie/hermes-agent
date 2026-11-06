@@ -37,7 +37,8 @@ def test_contract_shapes():
         "kind": "session", "selector": "discord:dm:7", "attach": True}
     for bad in ({"kind": "session"}, {"kind": "session", "session_id": "a", "selector": "bot-chat"},
                 {"kind": "session", "selector": "bot chat"}, {"kind": "session", "session_id": "a", "attach": "yes"}):
-        assert route_delivery_target({"delivery_target": bad}) is None
+        with pytest.raises(ValueError):
+            route_delivery_target({"delivery_target": bad})
         with pytest.raises(ValueError):
             validate_delivery_target("r", bad)
 
@@ -131,7 +132,7 @@ async def test_session_target_without_a_live_session_keeps_the_output_in_the_ses
     route = {**ROUTE, "delivery_target": {"kind": "session", "selector": "discord:dm:404", "attach": True}}
     stored, _sid, result, calls, attached = await _deliver(route, monkeypatch)
     assert stored == {"kind": "session", "selector": "discord:dm:404", "attach": True}
-    assert result.success and calls == [] and captured == [] and attached is None
+    assert not result.success and calls == [] and captured == [] and attached is None
 
 
 @pytest.mark.asyncio

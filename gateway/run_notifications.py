@@ -959,6 +959,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
         restore_completion_route(self, str(evt.get("session_key") or ""))  # watch notices and heartbeats too
         queued, evt = evt, await follow_detached_pin(self, evt)  # the drain reads its verdict off *queued*
+        if evt.get("type") in {"completion", "watch_match", "watch_timeout", "heartbeat"}:
+            verdict = await self._process_completion_target_verdict(evt)
+            if verdict != "deliver":
+                return False if verdict == "retry" else None
         source = await asyncio.to_thread(self._build_process_event_source, evt)
         if not source:
             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
@@ -1031,7 +1035,13 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 except RuntimeStoreError as exc:
                     raise WakeNotAccepted(str(exc), reason=exc.reason) from exc
             else:
-                await admit_internal_event(adapter, synth_event)
+                try:
+                    await admit_internal_event(adapter, synth_event)
+                except WakeNotAccepted as exc:
+                    from gateway.run_notifications_ownership import legacy_notification_route_mismatch
+                    if exc.reason is None and legacy_notification_route_mismatch(adapter, synth_event):
+                        exc.reason = "invalid_params"
+                    raise
             return True
         except WakeNotAccepted as exc:
             # Permanent only on proof: a pin the authority's state shows gone (/new, #141562) or a
@@ -1238,8 +1248,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         # can still fail closed inside the message pipeline AFTER the adapter accepted, which would falsely
         # acknowledge the durable row as delivered. Verify the target here, before acceptance, and give
         # drops an honest durable disposition.
-        verdict, claim.owner_session_id, claim.proven_session_id = await self._classify_completion_owner(
-            parent_session_id, str(evt.get("session_key") or ""))
+        verdict = await self._process_completion_target_verdict(evt) if evt_type == "completion" else "deliver"
+        if verdict == "deliver":
+            verdict, claim.owner_session_id, claim.proven_session_id = await self._classify_completion_owner(
+                parent_session_id, str(evt.get("session_key") or ""))
         if verdict == "terminal":
             if evt_type == "async_delegation":
                 logger.warning(
@@ -1785,48 +1797,6 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     chat_id, message_text, metadata=_non_conversational_metadata(send_meta, platform=platform_name),
                 )
 
-    @staticmethod
-    def _build_process_completion_event(watcher: dict, session, session_id: str) -> dict:
-        """Build the synthetic ``completion`` event for an agent-notify watcher."""
-        from gateway.run import _redact_gateway_user_facing_secrets
-        from agent.redact import redact_terminal_output
-        from tools.ansi_strip import strip_ansi
-        from tools.process_registry import transform_process_output
-        _command = getattr(session, "command", "") or ""
-        _raw = strip_ansi(session.output_buffer) if session.output_buffer else ""
-        _raw = transform_process_output(_raw, command=_command, returncode=session.exit_code,
-                                        task_id=getattr(session, "task_id", "") or "") if _raw else _raw
-        _raw = redact_terminal_output(_raw, _command)
-        # Keep the last ~2000 chars snapped to a line boundary, with a marker when cut.
-        _LIMIT = 2000
-        # Truncate at line boundaries so notifications never start mid-line (fixes #23284). Keep the last
-        # ~2000 chars but snap to the nearest preceding newline, then prepend a truncation marker when
-        # output was cut.
-        if len(_raw) > _LIMIT:
-            _tail = _raw[-_LIMIT:]
-            _nl = _tail.find("\n")
-            _tail = _tail[_nl + 1:] if _nl != -1 else _tail
-            _out = f"[… output truncated — showing last {len(_tail)} chars]\n{_tail}"
-        else:
-            _out = _raw
-        return {
-            "type": "completion",
-            "session_id": session_id,
-            **{k: watcher.get(k, "") for k in _WATCHER_ROUTE_FIELDS},
-            "owner_task_id": getattr(session, "owner_task_id", "") or "",
-            "task_id": getattr(session, "task_id", "") or "",
-            "message_id": str(watcher.get("message_id") or "").strip() or None,
-            "started_at": getattr(session, "started_at", None),
-            "command": _redact_gateway_user_facing_secrets(_command),
-            "exit_code": session.exit_code,
-            "completion_reason": getattr(session, "completion_reason", "exited"),
-            "termination_source": getattr(session, "termination_source", ""),
-            "output": _redact_gateway_user_facing_secrets(_out),
-            # Spawning session-db id: lets pre-flight drop this completion if the user /new'd first.
-            "parent_session_id": (
-                watcher.get("parent_session_id") or getattr(session, "parent_session_id", "") or ""
-            ),
-        }
 
     def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
         """Human-facing completion message. Every mode shares the one-line status header; the

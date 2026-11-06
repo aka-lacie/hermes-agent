@@ -60,7 +60,15 @@ def _validate_dashboard_cron_effective_job(job: dict[str, Any]) -> None:
     prompt = _cron_optional_text(job.get("prompt"))
     script = _cron_optional_text(job.get("script"))
     skills = _cron_string_list(job.get("skills")) or _cron_string_list(job.get("skill"))
-    if job.get("no_agent"):
+    from cron.jobs_invariants import normalize_job_type, validate_reminder_payload
+    try:
+        kind = normalize_job_type(job.get("job_type"), no_agent=bool(job.get("no_agent")))
+        validate_reminder_payload({**job, "job_type": kind})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if kind == "reminder":
+        return
+    if kind == "script":
         if not script:
             raise HTTPException(status_code=400, detail="no_agent=True requires a script")
         return
@@ -261,7 +269,7 @@ def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
             from cron.jobs import normalize_repeat_value
             repeat = normalize_repeat_value(repeat)
         _validate_dashboard_cron_effective_job(
-            {"prompt": body.prompt, "skills": skills, "script": script, "no_agent": no_agent})
+            {"prompt": body.prompt, "skills": skills, "script": script, "no_agent": no_agent, "job_type": body.job_type})
         return _mutate_cron_for_profile(
             profile_name,
             "create_job",
@@ -269,7 +277,7 @@ def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
             schedule=body.schedule,
             name=body.name,
             repeat=body.repeat,
-            deliver=_cron_optional_text(body.deliver) or "local",
+            deliver=(_cron_optional_text(body.deliver) or "local") if "deliver" in body.model_fields_set else None,
             skills=skills,
             model=_cron_optional_text(body.model),
             provider=_cron_optional_text(body.provider),
@@ -279,6 +287,10 @@ def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
             enabled_toolsets=_cron_string_list(body.enabled_toolsets),
             workdir=_cron_optional_text(body.workdir),
             no_agent=no_agent,
+            job_type=body.job_type,
+            delivery_mode=body.delivery_mode,
+            delivery_target=body.delivery_target,
+            attach_to_session=body.attach_to_session,
             timezone=_cron_optional_text(body.timezone),
             grace_minutes=body.grace_minutes,
             **{key: getattr(body, key) for key in ("paused", "paused_reason", "catch_up")

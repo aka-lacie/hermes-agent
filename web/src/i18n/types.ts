@@ -296,6 +296,14 @@ export interface Translations {
   // ── Cron page ──
   cron: {
     /** Optional — English fallback until translated. */
+    jobTypeLabel?: string;
+    jobTypes?: { agent: string; script: string; reminder: string; help: string };
+    reminderText?: string;
+    deliveryBehavior?: { label: string; direct: string; internalTurn: string; help: string; badge: string };
+    canonicalTargetLabel?: string;
+    canonicalTargetHelp?: string;
+    attachSessionLabel?: string;
+    /** Optional — English fallback until translated. */
     loadWhat?: string;
     scriptRequired?: string;
     confirmDeleteMessage: string;

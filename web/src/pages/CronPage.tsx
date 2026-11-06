@@ -26,6 +26,7 @@ import {
   cronSchedulerStaleAgeS,
   cronJobFormFromJob,
   cronLastResult,
+  cronTargetSupportsInternalTurn,
   focusCronField,
   type CronJobFormState,
 } from "@/lib/cron-job";
@@ -152,6 +153,10 @@ function emptyCronJobForm(): CronJobEditorState {
     base_url: "",
     script: "",
     no_agent: false,
+    job_type: "agent",
+    delivery_mode: "direct",
+    delivery_target: "",
+    attach_to_session: null,
     context_from: "",
     continuity: false,
     enabled_toolsets: [],
@@ -269,16 +274,7 @@ function CronAdvancedFields({
           />
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              className="accent-foreground"
-              checked={form.no_agent}
-              onChange={(e) => update("no_agent", e.target.checked)}
-            />
-            no_agent: run the script only and deliver stdout verbatim
-          </label>
+        {form.job_type !== "reminder" && (
           <div className="grid gap-1">
             <Label htmlFor={`${idPrefix}-script`}>Script</Label>
             <Input
@@ -288,7 +284,7 @@ function CronAdvancedFields({
               placeholder="relative/path/in/scripts"
             />
           </div>
-        </div>
+        )}
 
         <div className="grid gap-1">
           <Label htmlFor={`${idPrefix}-workdir`}>Workdir</Label>
@@ -353,6 +349,8 @@ function CronJobFormFields({
   onChange,
 }: CronJobFormFieldsProps) {
   const { t } = useI18n();
+  const jobTypes = t.cron.jobTypes ?? en.cron.jobTypes!;
+  const behavior = t.cron.deliveryBehavior ?? en.cron.deliveryBehavior!;
   const { availableSkills, availableToolsets, deliveryTargets, modelOptions } = resources;
   const update = <K extends keyof CronJobEditorState,>(
     key: K,
@@ -389,7 +387,25 @@ function CronJobFormFields({
       </div>
 
       <div className="grid gap-2">
-        <Label htmlFor={`${idPrefix}-prompt`}>{t.cron.prompt}</Label>
+        <Label htmlFor={`${idPrefix}-job-type`}>{t.cron.jobTypeLabel ?? en.cron.jobTypeLabel}</Label>
+        <Select id={`${idPrefix}-job-type`} value={form.job_type} onValueChange={(value) => {
+          const kind = value as CronJobEditorState["job_type"];
+          onChange({ ...form, job_type: kind, no_agent: kind === "script",
+            script: kind === "reminder" ? "" : form.script,
+            skills: kind === "reminder" ? [] : form.skills,
+            deliver: kind === "reminder" && form.deliver === "local" ? "origin" : form.deliver,
+            delivery_mode: kind === "reminder" ? "internal_turn" : form.delivery_mode,
+          });
+        }}>
+          <SelectOption value="agent">{jobTypes.agent}</SelectOption>
+          <SelectOption value="script">{jobTypes.script}</SelectOption>
+          <SelectOption value="reminder">{jobTypes.reminder}</SelectOption>
+        </Select>
+        <p className="text-xs text-muted-foreground">{jobTypes.help}</p>
+      </div>
+
+      <div className="grid gap-2">
+        <Label htmlFor={`${idPrefix}-prompt`}>{form.job_type === "reminder" ? t.cron.reminderText ?? en.cron.reminderText : t.cron.prompt}</Label>
         <textarea
           id={`${idPrefix}-prompt`}
           className="flex min-h-[80px] w-full border border-border bg-background/40 px-3 py-2 text-sm font-courier shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground/30 focus-visible:border-foreground/25"
@@ -422,6 +438,30 @@ function CronJobFormFields({
       </div>
 
       <div className="grid gap-2">
+        <Label htmlFor={`${idPrefix}-delivery-mode`}>{behavior.label}</Label>
+        <Select id={`${idPrefix}-delivery-mode`} value={form.delivery_mode}
+          onValueChange={(value) => update("delivery_mode", value as CronJobEditorState["delivery_mode"])}>
+          <SelectOption value="direct">{behavior.direct}</SelectOption>
+          <SelectOption value="internal_turn">{behavior.internalTurn}</SelectOption>
+        </Select>
+        <p className={cn("text-xs text-muted-foreground", form.delivery_mode === "internal_turn" && !form.delivery_target && !cronTargetSupportsInternalTurn(form.deliver) && "text-amber-500")}>
+          {behavior.help}
+        </p>
+      </div>
+
+      <div className="grid gap-2">
+        <Label htmlFor={`${idPrefix}-delivery-target`}>{t.cron.canonicalTargetLabel ?? en.cron.canonicalTargetLabel}</Label>
+        <textarea id={`${idPrefix}-delivery-target`} className="min-h-[64px] border border-border bg-background/40 px-3 py-2 text-xs font-courier"
+          value={form.delivery_target} onChange={(event) => update("delivery_target", event.target.value)} />
+        <p className="text-xs text-muted-foreground">{t.cron.canonicalTargetHelp ?? en.cron.canonicalTargetHelp}</p>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input type="checkbox" checked={form.attach_to_session ?? false}
+            onChange={(event) => update("attach_to_session", event.target.checked)} />
+          {t.cron.attachSessionLabel ?? en.cron.attachSessionLabel}
+        </label>
+      </div>
+
+      {form.job_type === "agent" && <div className="grid gap-2">
         <Label htmlFor={`${idPrefix}-skills`}>Skills (optional)</Label>
         <NameCheckboxPicker
           id={`${idPrefix}-skills`}
@@ -434,7 +474,7 @@ function CronJobFormFields({
           Selected skills are loaded before the prompt runs — the cron
           sets when, the skill sets how.
         </p>
-      </div>
+      </div>}
 
       <CronAdvancedFields
         idPrefix={`${idPrefix}-advanced`}
@@ -493,7 +533,8 @@ function getRepeatDisplay(job: CronJob): string {
 }
 
 function getJobMode(job: CronJob): string {
-  if (job.no_agent) return "no_agent";
+  if (job.job_type === "reminder") return "reminder";
+  if (job.job_type === "script" || job.no_agent) return "script";
   if (job.script) return "script+agent";
   return "agent";
 }
@@ -719,10 +760,13 @@ export default function CronPage() {
   }, [resourceProfile]);
 
   const handleCreate = async () => {
-    const payload = buildCronJobPayloadFromEditor(createForm);
+    let payload;
+    try { payload = buildCronJobPayloadFromEditor(createForm); }
+    catch (error) { showToast(errorMessage(error), "error"); return; }
     if (
       !payload.schedule ||
-      (!payload.no_agent && !cronJobHasExecutionContent(payload))
+      (payload.job_type === "agent" && !cronJobHasExecutionContent(payload)) ||
+      (payload.job_type === "reminder" && !payload.prompt?.trim())
     ) {
       showToast(`${t.cron.prompt} & ${t.cron.schedule} required`, "error");
       return;
@@ -748,10 +792,13 @@ export default function CronPage() {
 
   const handleEdit = async () => {
     if (!editJob) return;
-    const payload = buildCronJobPayloadFromEditor(editForm);
+    let payload;
+    try { payload = buildCronJobPayloadFromEditor(editForm); }
+    catch (error) { showToast(errorMessage(error), "error"); return; }
     if (
       !payload.schedule ||
-      (!payload.no_agent && !cronJobHasExecutionContent(payload))
+      (payload.job_type === "agent" && !cronJobHasExecutionContent(payload)) ||
+      (payload.job_type === "reminder" && !payload.prompt?.trim())
     ) {
       showToast(`${t.cron.prompt} & ${t.cron.schedule} required`, "error");
       return;
@@ -1167,6 +1214,12 @@ export default function CronPage() {
                     <Badge tone="outline">{profileLabel(profile)}</Badge>
                     {deliver && deliver !== "local" && (
                       <Badge tone="outline">{deliver}</Badge>
+                    )}
+                    {job.delivery_mode === "internal_turn" && (
+                      <Badge tone="secondary">{t.cron.deliveryBehavior?.badge ?? en.cron.deliveryBehavior!.badge}</Badge>
+                    )}
+                    {job.delivery_target && (
+                      <Badge tone="outline" title={JSON.stringify(job.delivery_target)}>{job.delivery_target.kind}</Badge>
                     )}
                     {Array.isArray(job.skills) && job.skills.length > 0 && (
                       <Badge tone="outline" title={job.skills.join(", ")}>

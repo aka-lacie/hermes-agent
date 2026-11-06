@@ -133,8 +133,11 @@ def validate_route_session_options(name: str, route: dict) -> None:
         if route.get(key) is not None and not (isinstance(route[key], str) and route[key].strip()):
             raise ValueError(f"[webhook] Route '{name}' {key} must be a non-empty string")
     validate_declared_chain(route.get("fallback_providers"), f"[webhook] Route '{name}'")
-    from gateway.platforms.webhook_session_targets import validate_delivery_target
+    from gateway.platforms.webhook_session_targets import validate_delivery_target, route_delivery_target
     validate_delivery_target(name, route.get("delivery_target"))
+    # Template addresses are rendered and validated again before admission. At startup only
+    # the platform/mode contract can be checked without a provider payload.
+    route_delivery_target({**route, "deliver_extra": {}})
 
 
 def _resolve_path(payload: Any, path: str) -> Optional[str]:
@@ -214,7 +217,17 @@ def stamp_admitted_session(authority: Any, receipt: Any, *, route_name: str, rou
     if db is None or not isinstance(session_id, str):
         return
     try:
-        stamp_session_meta(db, session_id, lineage_kind="webhook", route=declared_route_for(route_config),
+        admission = db._read_one("SELECT payload_json FROM session_admissions WHERE admission_id=?", (receipt.admission_id,))
+        import json
+        native = json.loads(admission['payload_json']).get('native_text_v1', {}) if admission else {}
+        selected = (native.get('webhook_delivery') or {}).get('worker_route')
+        # Legacy admissions need the caller's explicit migration/backfill selection; new
+        # admissions already froze it before the commit, under their owning profile scope.
+        if selected is None:
+            from gateway.run import _profile_runtime_scope
+            with _profile_runtime_scope(db.db_path.parent):
+                selected = declared_route_for(route_config)
+        stamp_session_meta(db, session_id, lineage_kind="webhook", route=selected,
                            delivery_target=route_delivery_target(route_config))
         bind_target(db, session_id)
     except Exception:

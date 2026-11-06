@@ -115,6 +115,10 @@ class GatewayTurnPrepareMixin:
             return _resolve_policy_agent_runtime(self, policy, fallback=fallback)
         skey = self._resolve_session_key_or_none(source, session_key)
         model = _resolve_gateway_model(user_config)
+        from gateway.platforms.webhook_route_runtime import early_pinned_runtime
+        webhook_runtime = early_pinned_runtime(self, source, skey, model)
+        if webhook_runtime is not None:
+            return webhook_runtime
         if skey:
             self._rehydrate_session_model_override(skey)
         _override_state = self._peek_session_state(skey) if skey else None
@@ -236,6 +240,7 @@ class GatewayTurnPrepareMixin:
         base_request_overrides = dict(runtime_kwargs.get("request_overrides") or {})
         route = {
             "model": model,
+            "webhook_runtime_pinned": runtime_kwargs.get('_webhook_runtime_pinned') is True,
             "runtime": runtime,
             "signature": (
                 model, runtime["provider"], runtime["requested_provider"], runtime["base_url"],

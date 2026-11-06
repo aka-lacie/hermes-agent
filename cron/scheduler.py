@@ -40,6 +40,7 @@ from cron.worker_bootstrap import WORKER_MARKER, finish_worker_boot
 from hermes_constants import get_hermes_home, hermes_home_key
 from hermes_cli.observability.shared_metrics_gateway import note_cron_execution, note_cron_skipped
 from cron.env_settings import cron_env_setting
+from cron.jobs_invariants import job_uses_agent
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import (
     load_config, load_config_readonly)
@@ -284,7 +285,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # no_agent jobs never reach a model, so provider errors are structurally impossible for them:
     # gate on job MODE before classifying, or a script's own wording ("429", "timed out") would
     # blame the wrong subsystem.
-    if not job.get("no_agent"):
+    if job_uses_agent(job):
         notice = provider_failure_notice(
             job_name, job_id, classify_cron_failure_reason(text),
             backup_provider_phrase=_fallback_chain_phrase(job), provider=job.get("provider"))
@@ -304,7 +305,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # cause + fix — never replace the raw error, which carries the failing symbol. Fail-safe: skew
     # is None on non-git/no-fingerprint; no_agent jobs excluded (a fresh subprocess resolves
     # imports against disk, so its ImportError is the script's own problem).
-    if not job.get("no_agent") and re.search(
+    if job_uses_agent(job) and re.search(
         r"cannot import name|modulenotfounderror|importerror", lower
     ):
         try:
@@ -2237,7 +2238,7 @@ def _prepare_job_prompt(
     injection block, empty prompt); otherwise ``prompt`` is set."""
     # Fail closed on a corrupt config.yaml: defaults would let auto-detection bill a provider the
     # user never chose. no_agent jobs are exempt. Escape hatch: HERMES_IGNORE_USER_CONFIG=1.
-    if not job.get("no_agent"):
+    if job_uses_agent(job):
         from hermes_cli.config import InvalidUserConfigError, require_parseable_user_config
 
         try:
@@ -2247,7 +2248,16 @@ def _prepare_job_prompt(
             return (False, f"# Cron Job: {job_name}\n\nError: {exc}\n", "", str(exc)), None
 
     # no_agent short-circuits BEFORE importing run_agent / opening SessionDB.
-    if job.get("no_agent"):
+    if job.get("job_type") == "reminder":
+        from cron.jobs_invariants import validate_reminder_payload
+        try:
+            validate_reminder_payload(job)
+        except ValueError as exc:
+            return (False, "", "", str(exc)), None
+        text = str(job.get("prompt") or "")
+        doc = _job_doc_header(job_name, job_id, _hermes_now().isoformat(), "reminder (no detached agent)")
+        return (True, f"{doc}\n---\n\n{text}\n", text, None), None
+    if job.get("no_agent") or job.get("job_type") == "script":
         return _run_no_agent_job(job, job_id, job_name, cancel_event), None
 
     # Legacy / hand-edited job with nothing to run: pause it instead of waking the LLM every fire.
@@ -2509,6 +2519,7 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         skip_memory=False,
         skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
         platform="cron",
+        instruction_role="subagent" if job.get("delivery_mode") == "internal_turn" else None,
         session_id=session_id,
         session_db=session_db,
     )
@@ -2561,7 +2572,7 @@ def run_job(
     owner_execution = current_execution()
     if owner_execution is not None and owner_execution[2:] != (job['id'], execution_id):
         owner_execution = None
-    if not job.get("no_agent") and owner_execution is None:
+    if job_uses_agent(job) and owner_execution is None:
         from cron.scheduler_authority import run_canonical_job
         return run_canonical_job(job, extra_prompt=extra_prompt, cancel_event=cancel_event,
                                  execution_id=execution_id)
@@ -2813,7 +2824,7 @@ def run_one_job(
     execution_id = str(job["execution_id"])
     note_cron_execution(job)
     external_owner = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER") == execution_id
-    if not external_owner:
+    if not external_owner and job.get("job_type") != "reminder":
         try:
             handed_off = _launch_external_cron_worker(job)
         except Exception as handoff_error:
@@ -3101,7 +3112,7 @@ def _save_compose_deliver(
                 "Job '%s': suppressing failure notice — automatic re-run pending", job["id"])
     # Not a substring check: bare "SILENT"/"NO_REPLY" or a report quoting "[SILENT]" must
     # not be swallowed; bracketed-prefix / trailing-line tolerance is kept.
-    if d.should_deliver and d.success and _is_cron_silence_response(deliver_content):
+    if d.should_deliver and d.success and job.get("job_type") != "reminder" and _is_cron_silence_response(deliver_content):
         # Cron silence suppression — see _is_cron_silence_response. Replaces the old `SILENT_MARKER in
         # ...upper()` substring check, which both leaked bracketless near-markers ("SILENT" / "NO_REPLY")
         # and wrongly swallowed a real report that merely quoted "[SILENT]" mid-sentence (#51438, #46917).
@@ -3115,15 +3126,18 @@ def _save_compose_deliver(
     if not d.should_deliver:
         return
     d.unresolved_origin = (
+        not job.get("delivery_target") and job.get("delivery_mode") != "internal_turn"
+        and
         _normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)) == "origin"
         and not _resolve_delivery_targets(job, for_failure=not d.success)
     )
     execution_id = job.get('execution_id')
-    if execution_id and not job.get('no_agent'):
+    if execution_id and job_uses_agent(job):
         from cron.delivery_queue import enqueue
         # Nothing to send: an origin-less job is ``not_configured``, never a queued "delivery".
-        if d.unresolved_origin or _normalize_deliver_value(
-                _delivery_lane_value(job, for_failure=not d.success)) == "local":
+        if (not job.get("delivery_target") and job.get("delivery_mode") != "internal_turn") and (
+                d.unresolved_origin or _normalize_deliver_value(
+                    _delivery_lane_value(job, for_failure=not d.success)) == "local"):
             return
         queued_job = dict(job)
         if d.failure_incident_id:
@@ -3262,7 +3276,7 @@ def _apply_agent_failure_marker(job: dict, success: bool, error, final_response)
     and notification routing instead of recording a false healthy result.
 
     Returns ``(success, error, agent_declared)``."""
-    if success and not job.get("no_agent"):
+    if success and job_uses_agent(job):
         marker_error = _cron_failure_marker_error(final_response)
         if marker_error is not None:
             return False, marker_error, True

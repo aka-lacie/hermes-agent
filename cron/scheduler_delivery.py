@@ -628,6 +628,7 @@ def _resolve_single_delivery_target(
                 "chat_id": str(origin["chat_id"]),
                 "thread_id": _origin_delivery_thread(origin),
                 "_resolved_from": "origin",  # provenance for _target_mirror_eligible
+                **{key: origin[key] for key in ("user_id", "chat_type") if origin.get(key) is not None},
             }
         # No origin (API/script job): fall back to a home channel instead of silently dropping.
         for platform_name in _iter_home_target_platforms():
@@ -680,6 +681,8 @@ def _resolve_single_delivery_target(
             "platform": platform_name,
             "chat_id": str(origin["chat_id"]),
             "thread_id": origin.get("thread_id"),
+            "user_id": origin.get("user_id"),
+            "chat_type": origin.get("chat_type"),
         }
     if not _is_known_delivery_platform(platform_name):
         return None

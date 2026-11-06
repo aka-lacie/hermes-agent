@@ -25,8 +25,10 @@ PINNED_ROUTE = {"prompt": "{text}", "provider": "openai-codex", "model": "gpt-6.
 
 
 @pytest.fixture
-def webhook_turn(tmp_path):
+def webhook_turn(tmp_path, monkeypatch):
     """A turn of webhook session ``wh-1`` on route ``pr`` over a real SessionDB."""
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {
+        "model": {"provider": "openai-codex", "default": "profile-model"}})
     db = SessionDB(db_path=tmp_path / "state.db")
     db.create_session("wh-1", source="webhook")
     adapter = WebhookAdapter(PlatformConfig(enabled=True, extra={"secret": "s", "routes": {"pr": dict(PINNED_ROUTE)}}))
@@ -156,3 +158,70 @@ def test_rehydrate_takes_credentials_only_from_matching_current_entries():
                                                 {"provider": "b", "model": "n"}]
     assert route_fallback_chain({"model": "m"}, PROFILE_CHAIN, owner="t") is None
     assert route_fallback_chain({}, PROFILE_CHAIN, owner="t") == PROFILE_CHAIN
+
+
+def test_platform_defaults_are_inherited_and_route_empty_chain_disables_them(webhook_turn):
+    assert runtime_mod.configured_route({"model": None, "provider": None, "fallback_providers": None},
+        {"model": "m", "provider": "p", "fallback_providers": DECLARED}) == {
+        "model": "m", "provider": "p", "fallback_providers": DECLARED}
+    webhook_turn.adapter.config.extra.update(provider="platform-provider", model="platform-model", fallback_providers=DECLARED)
+    webhook_turn.adapter._routes["pr"] = {"prompt": "work", "fallback_providers": []}
+    route, _config = runtime_mod.stored_route(webhook_turn.runner, webhook_turn.source, "wh-1")
+    assert route["provider"] == "platform-provider" and route["model"] == "platform-model"
+    assert route["fallback_providers"] == []
+    assert runtime_mod.turn_fallback_chain(webhook_turn.runner, webhook_turn.source, "wh-1", lambda: PROFILE_CHAIN) is None
+
+
+def test_model_only_pin_freezes_profile_provider_and_survives_profile_change(webhook_turn, monkeypatch):
+    webhook_turn.adapter._routes["pr"] = {"model": "worker-model"}
+    first, _config = runtime_mod.stored_route(webhook_turn.runner, webhook_turn.source, "wh-1")
+    assert first["model"] == "worker-model" and first["provider"] == "openai-codex"
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {"model": {"provider": "other", "default": "other-model"}})
+    assert runtime_mod.stored_route(webhook_turn.runner, webhook_turn.source, "wh-1")[0] == first
+
+
+def test_worker_provider_resolves_before_broken_default_runtime(webhook_turn, monkeypatch):
+    monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs", lambda: (_ for _ in ()).throw(AssertionError("default must not resolve")))
+    monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs_for_provider", lambda provider, **kw: {"provider": provider})
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._adapter_for_source = webhook_turn.runner._adapter_for_source
+    runner._session_db = webhook_turn.db
+    runner.session_store = webhook_turn.runner.session_store
+    runner._resolve_session_key_or_none = lambda source, key: "k"
+    monkeypatch.setattr("gateway.session_policy.policy_for_source", lambda *a: None)
+    model, runtime = runner._resolve_session_agent_runtime(user_config={}, source=webhook_turn.source, session_key="k")
+    assert (model, runtime["provider"]) == ("gpt-6.1-sol", "openai-codex")
+
+
+def test_corrupt_stored_worker_route_never_falls_back_to_mutable_config(webhook_turn):
+    webhook_turn.db._execute_write(lambda conn: conn.execute("UPDATE sessions SET route='not-json' WHERE id='wh-1'"))
+    with pytest.raises(ValueError):
+        runtime_mod.stored_route(webhook_turn.runner, webhook_turn.source, "wh-1")
+
+
+def test_cached_worker_on_fallback_is_rebuilt_on_its_pinned_primary(monkeypatch):
+    import threading
+    from gateway.session_execution import GatewaySessionAgentMixin
+    from unittest.mock import Mock
+    old = SimpleNamespace(_fallback_activated=True)
+    fresh = object()
+    found = SimpleNamespace(agent=old, reused=True, evicted=None)
+    runner = SimpleNamespace(_agent_cache_lock=threading.Lock(), _agent_cache={"k": (old,)},
+        _agent_config_signature=lambda *a, **kw: "signature", _extract_cache_busting_config=lambda *a: {},
+        _enforce_agent_cache_cap=lambda: None)
+    turn = GatewaySessionAgentMixin.__new__(GatewaySessionAgentMixin)
+    turn._runner = runner
+    turn._ctx = SimpleNamespace(source=SimpleNamespace(user_id="webhook:r"), session_key="k", session_id="wh",
+                                enabled_toolsets=[], user_config={}, interim_assistant_messages_enabled=False)
+    turn._skip_context_files = lambda *a: False
+    turn._cached_sid_is_dead = lambda *a: (None, False)
+    turn._current_message_count = lambda: 0
+    turn._lookup_cached_agent = lambda *a: found
+    turn._release_evicted_agent = Mock()
+    turn._build_fresh_agent = Mock(return_value=fresh)
+    monkeypatch.setattr("gateway.session_execution.api_runtime_locked", lambda: None)
+    agent, reused = turn._resolve_turn_agent({"model": "primary", "runtime": {}, "webhook_runtime_pinned": True},
+                                             "webhook", None, 4, None, {})
+    assert agent is fresh and reused is False
+    turn._release_evicted_agent.assert_called_once_with(old)
+    assert runner._agent_cache["k"][0] is fresh

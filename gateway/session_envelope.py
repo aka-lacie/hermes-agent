@@ -316,6 +316,10 @@ def restore_native(payload, runner=None):
                         message_type=MessageType(envelope.get('message_type', 'text')),
                         media_urls=restore_native_media(envelope.get('media', [])),
                         **deepcopy(envelope['event']))
+    if source.platform.value == 'webhook' and event.reply_expected is None:
+        # Pre-cutover detached receipts omitted this field. Replaying them does not
+        # turn an autonomous worker into a human-facing chat; explicit True still wins.
+        event.reply_expected = False
     if 'automation' in envelope:
         event.internal = True
         if envelope['automation'].get('heartbeat'):

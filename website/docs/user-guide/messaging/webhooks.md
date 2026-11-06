@@ -88,6 +88,7 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `toolsets` | No | List of toolset keys (e.g. `["terminal", "file", "web"]`) that **replaces** the platform-level webhook toolset for runs triggered by this route only. Manual config edit only — not settable via `hermes webhook subscribe`, so agent-created subscriptions cannot self-grant elevated tools. Names are validated the same way as `platform_toolsets` entries (unknown or platform-restricted names are dropped). See [Per-route toolsets](#per-route-toolsets). |
 | `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant` (plugin), `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
+| `delivery_mode` | No | Legacy `direct` (default) or `internal_turn`. The latter translates `deliver` / rendered `deliver_extra` into an immediate session handoff, suppresses nonfinal notices and never posts raw worker output to the platform. Requires an agent route and a conversation platform (not `log` or `github_comment`). CLI: `--delivery-mode internal_turn`; dashboard: **Wake agent**. |
 | `deliver_only` | No | If `true`, skip the agent entirely — the rendered `prompt` template becomes the literal message that gets delivered. Zero LLM cost, sub-second delivery. See [Direct Delivery Mode](#direct-delivery-mode) for use cases. Requires `deliver` to be a real target (not `log`). |
 | `cron_job` | No | Fire an existing cron job (by ID or name) on each event instead of starting a fresh webhook agent session. The rendered `prompt` becomes transient per-run context; the job's own prompt, skills, model, and delivery settings apply. Mutually exclusive with `deliver_only`. See [Event-Triggered Cron Jobs](#event-triggered-cron-jobs). |
 | `coalesce` | No | Debounce rapid distinct events on the same logical entity into one agent run. Block with a required `key` (payload field or template identifying the entity, e.g. `pull_request.number`), optional `window_seconds` (quiet window, default 30) and `max_wait_seconds` (dispatch cap, default 300). See [Event Coalescing](#event-coalescing). Mutually exclusive with `deliver_only` and `cron_job`. |
@@ -132,6 +133,29 @@ platforms:
               equals: "refs/heads/main"
           deliver: "telegram"
 ```
+
+### Handoffs and worker pins
+
+`delivery_mode: internal_turn` is compatibility input for a canonical `kind: session` target:
+`attach: false`, `wake_policy: immediate`, and a logical selector derived from the rendered
+`deliver` / `deliver_extra`. An explicit `delivery_target` takes precedence and preserves an explicit
+`attach` choice. An unresolved selector, invalid target, failed metadata stamp, or refused dispatch
+fails closed: no raw platform delivery is attempted. Only the final completion is handed off;
+status messages and silence markers are not. Handoff workers use subagent-scoped instructions,
+while the destination conversation keeps its own normal instructions.
+
+Unlike the old automatic-retention behavior, a handoff does **not** automatically put the worker in
+its destination's delegate list. Use an explicit session target with `attach: true` when desired.
+Existing automatic-retention records need an explicit migration decision; this is not silent parity.
+
+Worker `model`, `provider`, and `fallback_providers` can also be declared at `platforms.webhook.extra`
+as defaults. Supplied route fields win; an explicit route `fallback_providers: []` disables its chain.
+A partial primary pin freezes the missing provider/model from the owning profile. Stored primary and
+chain survive retries, resume and restart; credentials are re-resolved rather than stored. A pinned
+worker retries its primary on the next turn even if its previous turn activated a fallback.
+`hermes webhook subscribe --model ... --provider ...` creates or updates pins; omitted flags preserve
+them and empty strings clear them. Neither inbound payload fields nor the destination chat select
+the worker's provider.
 
 ### Keyed sessions {#keyed-sessions}
 

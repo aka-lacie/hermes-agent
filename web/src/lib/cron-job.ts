@@ -1,4 +1,4 @@
-import type { CronJob, CronJobMutation } from "./api";
+import type { CronJob, CronJobMutation, CronCanonicalDeliveryTarget, CronJobType, CronDeliveryMode } from "./api";
 
 export interface CronJobFormState {
   name: string;
@@ -11,6 +11,10 @@ export interface CronJobFormState {
   base_url: string;
   script: string;
   no_agent: boolean;
+  job_type: CronJobType;
+  delivery_mode: CronDeliveryMode;
+  delivery_target: string;
+  attach_to_session: boolean | null;
   context_from: string;
   continuity: boolean;
   enabled_toolsets: string[];
@@ -25,6 +29,25 @@ export function splitCronList(value: unknown): string[] {
       ? value.split(/[\n,]/)
       : [];
   return items.map((item) => String(item).trim()).filter(Boolean);
+}
+
+/** Internal delivery names one conversation, never a broadcast or a save-only destination. */
+export function cronTargetSupportsInternalTurn(deliver: unknown): boolean {
+  const targets = splitCronList(deliver);
+  return targets.length === 1 && !["local", "all"].includes(targets[0].toLowerCase())
+    && !targets[0].toLowerCase().startsWith("bot-chat:") && !targets[0].toLowerCase().startsWith("room:");
+}
+
+function canonicalTarget(form: CronJobFormState): CronCanonicalDeliveryTarget | null {
+  if (!form.delivery_target.trim()) return null;
+  const target = JSON.parse(form.delivery_target);
+  if (!target || Array.isArray(target) || !["session", "platform", "none"].includes(target.kind)) {
+    throw new Error("delivery_target must be a session, platform, or none target object");
+  }
+  if (target.kind === "session" && form.attach_to_session !== null) {
+    target.attach = form.attach_to_session;
+  }
+  return target;
 }
 
 /** Trim to a non-empty string, or null. Optionally strip trailing slashes
@@ -52,7 +75,7 @@ export function buildCronJobPayload(form: CronJobFormState): CronJobMutation {
   const enabledToolsets = form.enabled_toolsets.filter(Boolean);
   return {
     name: form.name.trim(),
-    prompt: form.prompt.trim(),
+    prompt: form.job_type === "reminder" ? form.prompt : form.prompt.trim(),
     schedule: form.schedule.trim(),
     deliver: form.deliver.trim() || "local",
     skills: form.skills.filter(Boolean),
@@ -60,7 +83,11 @@ export function buildCronJobPayload(form: CronJobFormState): CronJobMutation {
     model: optionalText(form.model),
     base_url: optionalText(form.base_url, true),
     script: optionalText(form.script),
-    no_agent: Boolean(form.no_agent),
+    no_agent: form.job_type === "script",
+    job_type: form.job_type,
+    delivery_mode: form.delivery_mode,
+    delivery_target: canonicalTarget(form),
+    ...(form.attach_to_session !== null ? { attach_to_session: form.attach_to_session } : {}),
     context_from: contextFrom.length > 0 ? contextFrom : null,
     enabled_toolsets: enabledToolsets.length > 0 ? enabledToolsets : null,
     workdir: optionalText(form.workdir),
@@ -106,6 +133,11 @@ export function cronJobFormFromJob(job: CronJob): CronJobFormState {
     base_url: asString(job.base_url),
     script: asString(job.script),
     no_agent: Boolean(job.no_agent),
+    job_type: job.job_type ?? (job.no_agent ? "script" : "agent"),
+    delivery_mode: job.delivery_mode ?? "direct",
+    delivery_target: job.delivery_target ? JSON.stringify(job.delivery_target, null, 2) : "",
+    attach_to_session: job.delivery_target?.kind === "session"
+      ? job.delivery_target.attach ?? false : job.attach_to_session ?? null,
     context_from: externalRefs.join("\n"),
     continuity,
     enabled_toolsets: splitCronList(job.enabled_toolsets),

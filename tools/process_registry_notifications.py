@@ -8,6 +8,15 @@ from dataclasses import dataclass
 from contextlib import suppress
 
 _DONE = ("completed", "success")
+_SNIPPET_CHARS = 120
+
+
+def _snippet(text, limit: int = _SNIPPET_CHARS) -> str:
+    """The parent holds the full assignment already; a header only identifies it."""
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+
 _REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start"}
 
 
@@ -177,7 +186,9 @@ def _format_task_failure_notice(evt: dict, deleg_id: str) -> str:
     """One child of a still-running fan-out failed: say which, why, and that the batch goes on."""
     (r,) = (evt.get("results") or [{}])[:1] or [{}]
     goals, idx, n = evt.get("goals") or [], r.get("task_index", 0), evt.get("n_tasks") or len(evt.get("goals") or [])
-    goal = goals[idx] if idx < len(goals) else r.get("goal", "")
+    goal = _snippet(goals[idx] if idx < len(goals) else r.get("goal", ""))
+    if r.get("session_id"):
+        goal = f"session_id={r['session_id']} · {goal}" if goal else f"session_id={r['session_id']}"
     err = str(r.get("error") or "").strip().replace("\n", " ")[:400]
     lines = [
         f"[ASYNC DELEGATION TASK FAILED — {deleg_id}, task {idx + 1}/{n}]",
@@ -235,9 +246,12 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
     for r in sorted(results, key=lambda x: x.get("task_index", 0)):
         idx, r_truncated = r.get("task_index", 0), _is_truncated(r)
         r_status, r_summary, r_error = r.get("status", "?"), r.get("summary"), r.get("error")
-        r_goal = goals[idx] if idx < len(goals) else r.get("goal", "")
+        r_goal = _snippet(goals[idx] if idx < len(goals) else r.get("goal", ""))
+        r_title = _snippet(r.get("title") or "", 80)
         icon = "⚠" if r_truncated else ("✓" if r_status in _DONE else "✗")
-        header = (f"--- {icon} TASK {idx + 1}/{n}" + (f": {r_goal}" if r_goal else "") + f"  (status={r_status}"
+        ident = (f" session_id={r['session_id']}" if r.get("session_id") else "") + (f' "{r_title}"' if r_title else "")
+        show_goal = r_goal and (not r_title or r.get("resumed"))
+        header = (f"--- {icon} TASK {idx + 1}/{n}" + ident + (f": {r_goal}" if show_goal else "") + f"  (status={r_status}"
                   + (f", api_calls={r['api_calls']}" if r.get("api_calls") else "")
                   + (f", {r['duration_seconds']}s" if r.get("duration_seconds") is not None else "")
                   + (", TRUNCATED: hit max_iterations — work may be incomplete" if r_truncated else ""))

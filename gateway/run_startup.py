@@ -486,9 +486,14 @@ class GatewayStartupMixin:
             if adapter is None:
                 continue
             content = row["content"]
-            if row.get("needs_marker"):
+            if row.get("needs_marker") and row["platform"] != "webhook":
                 content = row.get("marker", RECOVERED_MARKER) + content
             metadata = {"thread_id": row["thread_id"]} if row.get("thread_id") else None
+            if row["platform"] == "webhook":
+                # This is a ledgered final, not a progress notice. The adapter matches its
+                # obligation digest to the exact signed admission (keyed chats share an address).
+                metadata = {**(metadata or {}), "_webhook_final_response": True,
+                            "_webhook_obligation_id": row["obligation_id"]}
             try:
                 result = await adapter.send(chat_id=row["chat_id"], content=content, metadata=metadata)
             except Exception as send_err:

@@ -45,27 +45,105 @@ def validate_delivery_target(name: str, target: Any) -> None:
 
 
 def route_delivery_target(route_config: dict) -> Optional[dict]:
-    """The contract-shaped ``sessions.delivery_target`` value a route declares, else None."""
-    target = route_config.get("delivery_target") if isinstance(route_config, dict) else None
-    if not isinstance(target, dict):
+    """Canonical target, or None only when no target was declared.
+
+    Legacy internal_turn is an immediate, unattached session delivery, never permission to
+    send raw worker text. Call with rendered deliver_extra at ingress to freeze each reply leg.
+    Malformed declarations raise, so callers cannot mistake invalid for direct delivery.
+    """
+    from gateway.delivery_targets import DeliveryTargetError, parse_delivery_target
+    if not isinstance(route_config, dict):
+        raise DeliveryTargetError("a webhook route must be an object")
+    mode = route_config.get("delivery_mode", "direct")
+    if mode not in ("direct", "internal_turn"):
+        raise DeliveryTargetError("delivery_mode must be direct or internal_turn")
+    target = route_config.get("delivery_target")
+    if target is None and mode == "internal_turn":
+        if route_config.get("deliver_only") or route_config.get("cron_job"):
+            raise DeliveryTargetError("internal_turn requires an agent completion")
+        target = legacy_session_target(route_config)
+    if target is None:
         return None
+    if not isinstance(target, dict):
+        raise DeliveryTargetError("delivery_target must be an object")
     kind = target.get("kind")
     if kind == "session":
-        from gateway.delivery_targets import DeliveryTargetError, parse_delivery_target
-        shaped = {"kind": "session", "attach": target.get("attach", False)}
+        shaped = {"kind": kind, "attach": target.get("attach", False)}
         for key in ("session_id", "selector", "wake_policy"):
-            if target.get(key) not in (None, ""):
-                shaped[key] = str(target[key]) if key == "session_id" else target[key]
-        try:
-            return parse_delivery_target(shaped)
-        except DeliveryTargetError:
-            return None
+            if key in target:
+                shaped[key] = target[key]
+        if mode == "internal_turn":
+            shaped.setdefault("wake_policy", "immediate")
+        return parse_delivery_target(shaped)
     if kind == "platform":
-        shaped = {"kind": "platform", "platform": str(target["platform"]), "chat_id": str(target["chat_id"])}
-        if target.get("thread_id") not in (None, ""):
-            shaped["thread_id"] = str(target["thread_id"])
-        return shaped
-    return {"kind": "none"} if kind == "none" else None
+        if mode == "internal_turn":
+            raise DeliveryTargetError("internal_turn requires a session target")
+        return _platform_target(target)
+    if mode == "internal_turn":
+        raise DeliveryTargetError("internal_turn requires a session target")
+    return parse_delivery_target(target)
+
+
+def _platform_target(target: dict) -> dict:
+    from gateway.delivery_targets import DeliveryTargetError
+    shaped = {"kind": "platform"}
+    for key in ("platform", "chat_id", "thread_id"):
+        if key in target and not (key == "thread_id" and target[key] is None):
+            value = target[key]
+            if not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value).strip():
+                raise DeliveryTargetError(f"platform target needs a valid {key}")
+            shaped[key] = str(value)
+    if not shaped.get("platform") or not shaped.get("chat_id"):
+        raise DeliveryTargetError("platform target needs platform and chat_id")
+    return shaped
+
+
+def legacy_session_target(route_config: dict) -> dict:
+    """Translate old deliver/deliver_extra into the canonical logical selector grammar."""
+    from gateway.delivery_targets import DeliveryTargetError, parse_delivery_target
+    from gateway.platforms.webhook import _is_known_platform
+    platform = route_config.get("deliver")
+    extra = route_config.get("deliver_extra", {})
+    if not isinstance(platform, str) or not _is_known_platform(platform) or not isinstance(extra, dict):
+        raise DeliveryTargetError("internal_turn requires a live gateway messaging platform")
+    chat = extra.get("chat_id")
+    thread = extra.get("message_thread_id") or extra.get("thread_id")
+    for value in (chat, thread):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int))
+                                  or not str(value).strip() or any(c in str(value) for c in "{}\n\r")):
+            raise DeliveryTargetError("internal_turn needs rendered chat/thread identifiers")
+    if chat in (None, ""):
+        if thread is not None:
+            raise DeliveryTargetError("an internal_turn thread needs a chat_id")
+        selector = f"home:{platform}"
+    else:
+        from gateway.config import Platform, load_gateway_config
+        from gateway.session import SessionSource, build_session_key
+        cfg = load_gateway_config()
+        source = SessionSource(platform=Platform(platform), chat_id=str(chat),
+                               thread_id=str(thread) if thread is not None else None,
+                               chat_type=str(extra.get("chat_type") or "dm"), user_id=extra.get("user_id"))
+        selector = build_session_key(source, group_sessions_per_user=cfg.group_sessions_per_user,
+                                     thread_sessions_per_user=cfg.thread_sessions_per_user).split(":", 2)[2]
+    return parse_delivery_target({"kind": "session", "selector": selector,
+                                  "attach": False, "wake_policy": "immediate"})
+
+
+def worker_instruction_role(runner: Any, source: Any) -> Optional[str]:
+    """A handoff worker uses scoped subagent instructions; its receiving chat never does."""
+    from gateway.config import Platform
+    if source is None or getattr(source, "platform", None) != Platform.WEBHOOK:
+        return None
+    adapter = runner._adapter_for_source(source)
+    name = str(getattr(source, "user_id", "") or "").removeprefix("webhook:")
+    config = adapter._routes.get(name) or {}
+    target = config.get("delivery_target") or {}
+    if config.get("delivery_mode") != "internal_turn" and target.get("kind") != "session":
+        return None
+    from gateway.platforms.webhook_delivery import retained_destination
+    delivery = retained_destination(adapter, source.chat_id)
+    declared = route_delivery_target(delivery)
+    return "subagent" if declared and declared["kind"] == "session" else None
 
 
 def platform_destination(target: dict, profile: Optional[str]) -> dict:

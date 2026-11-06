@@ -131,7 +131,8 @@ def _create(authority, actor, params):
         # guard keeps its exact retry above, and run history files it by its stored policy.
         raise RuntimeStoreError('invalid_params')
     job = get_job(jid)
-    if job is None or job.get('no_agent'):
+    from cron.jobs import job_uses_agent
+    if job is None or not job_uses_agent(job):
         raise RuntimeStoreError('not_found')
     config = _load_gateway_config()
     private = {}

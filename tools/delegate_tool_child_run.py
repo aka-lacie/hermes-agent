@@ -102,11 +102,16 @@ def _fabricated_entry(idx: int, status: str, error: str, child: Any, duration: f
         entry["route"] = route
     return entry
 
+def _steer_snippet(text: str, limit: int = 120) -> str:
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+
 def _append_missed_steer(entry: dict[str, Any], late_steer: Optional[str]) -> None:
     """Record steer text that won the race with the child's failure/timeout."""
     if late_steer:
         entry["missed_steer"] = late_steer
-        entry["error"] += (" [steer did not land before the subagent stopped: " f"{late_steer}]")
+        entry["error"] += (" [steer did not land before the subagent stopped: " f"{_steer_snippet(late_steer)}]")
 
 def _close_child(child: Any, log_message: str) -> None:
     """Best-effort ``child.close()`` (tool sandboxes, browser daemons, httpx clients)."""
@@ -724,7 +729,7 @@ def _build_result_entry(
     _missed_steer = result.get("pending_steer")
     if isinstance(_missed_steer, str) and _missed_steer.strip():
         entry["missed_steer"] = _missed_steer
-        _miss_note = ("[steer did not land — the subagent finished before it could " f"be delivered: {_missed_steer}]")
+        _miss_note = ("[steer did not land — the subagent finished before it could " f"be delivered: {_steer_snippet(_missed_steer)}]")
         entry["summary"] = f"{summary}\n\n{_miss_note}" if summary else _miss_note
     return entry
 

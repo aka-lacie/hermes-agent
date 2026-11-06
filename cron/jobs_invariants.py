@@ -7,6 +7,46 @@ from typing import Optional
 
 from hermes_constants import display_hermes_home
 
+
+def normalize_job_type(value, *, no_agent=False) -> str:
+    text = str(value or "").strip().lower() or ("script" if no_agent else "agent")
+    if text not in {"agent", "script", "reminder"}:
+        raise ValueError(f"Unknown cron job_type {value!r}; expected agent, script, or reminder.")
+    return text
+
+
+def job_uses_agent(job: dict) -> bool:
+    """Literal reminders and script jobs never need inference or canonical agent admission."""
+    return not job.get("no_agent") and normalize_job_type(job.get("job_type")) == "agent"
+
+
+def normalize_delivery_mode(value) -> str:
+    text = str(value or "direct").strip().lower() or "direct"
+    if text not in {"direct", "internal_turn"}:
+        raise ValueError(f"Unknown cron delivery_mode {value!r}; expected direct or internal_turn.")
+    return text
+
+
+def normalize_execution_update(job: dict, updates: dict) -> None:
+    if "job_type" in updates:
+        kind = normalize_job_type(updates["job_type"], no_agent=bool(updates.get("no_agent", job.get("no_agent"))))
+        if updates.get("no_agent") and kind != "script":
+            raise ValueError("no_agent=True is only compatible with job_type='script'.")
+        updates.update(job_type=kind, no_agent=kind == "script")
+    elif "no_agent" in updates:
+        updates["job_type"] = "script" if updates["no_agent"] else "agent"
+    if "delivery_mode" in updates:
+        updates["delivery_mode"] = normalize_delivery_mode(updates["delivery_mode"])
+
+
+def validate_reminder_payload(job: dict) -> None:
+    if job.get("job_type") != "reminder":
+        return
+    if not str(job.get("prompt") or "").strip():
+        raise ValueError("job_type='reminder' requires reminder text in prompt.")
+    if job.get("script") or job.get("skills") or job.get("skill"):
+        raise ValueError("Reminder jobs cannot use script or skills; they emit their prompt directly.")
+
 NO_AGENT_WITHOUT_SCRIPT_ERROR = (
     "no_agent=True requires a script — with no agent and no script "
     "there is nothing for the job to run."
@@ -23,6 +63,7 @@ def _validate_job_mode_invariants(
     monitor_url: Optional[str],
     no_agent: bool,
     script: Optional[str],
+    job_type: Optional[str] = None,
 ) -> None:
     """Execution-mode invariants shared by create_job and update_job (no bypass via the update
     door)."""
@@ -37,6 +78,8 @@ def _validate_job_mode_invariants(
             "based on source changes. Use a plain no_agent script job instead.")
     if no_agent and not script:
         raise ValueError(NO_AGENT_WITHOUT_SCRIPT_ERROR)
+    if (monitor_script or monitor_url) and job_type not in (None, "agent"):
+        raise ValueError("monitor_script/monitor_url can only be combined with job_type='agent'.")
     if script and _script_is_command_line(script):
         raise ValueError(SCRIPT_IS_COMMAND_LINE_ERROR.format(
             scripts_dir=display_hermes_home() + "/scripts/", script=script))

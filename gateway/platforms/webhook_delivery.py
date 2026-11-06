@@ -1,7 +1,10 @@
 """Validated webhook destinations live in the owner's admitted input, not a TTL cache."""
 from copy import deepcopy
+from contextvars import ContextVar
 import hashlib
 import json
+
+reply_context: ContextVar[dict | None] = ContextVar('webhook_reply_context', default=None)
 
 from hermes_state_runtime import RuntimeStoreError
 
@@ -23,7 +26,7 @@ def validate_destination(delivery):
     from gateway.platforms.webhook import _is_known_platform, _REPO_RE
     if (not isinstance(delivery, dict)
             or not {'deliver', 'deliver_extra'} <= set(delivery)
-            or set(delivery) - {'deliver', 'deliver_extra', 'profile', 'mirror', 'route'}
+            or set(delivery) - {'deliver', 'deliver_extra', 'profile', 'mirror', 'route', 'delivery_mode', 'delivery_target', 'route_name', 'delivery_id', 'worker_route'}
             or (delivery.get('profile') is not None and not isinstance(delivery['profile'], str))
             or not isinstance(delivery.get('mirror', False), bool)
             or (delivery.get('route') is not None and not isinstance(delivery['route'], str))):
@@ -51,6 +54,27 @@ def validate_destination(delivery):
         result['mirror'] = True
         if delivery.get('route'):
             result['route'] = delivery['route']  # the mirror's label only
+    from gateway.platforms.webhook_session_targets import route_delivery_target
+    target = route_delivery_target(delivery)
+    if target is not None:
+        result['delivery_target'] = target
+    if delivery.get('delivery_mode') == 'internal_turn':
+        if target is None or target['kind'] != 'session':
+            raise RuntimeStoreError('invalid_params')
+        result['delivery_mode'] = 'internal_turn'
+        for key in ('user_id', 'chat_type'):
+            if extra.get(key) is not None:
+                if not isinstance(extra[key], str):
+                    raise RuntimeStoreError('invalid_params')
+                result['deliver_extra'][key] = extra[key]
+        for key in ('route_name', 'delivery_id'):
+            if key in delivery:
+                if not isinstance(delivery[key], str):
+                    raise RuntimeStoreError('invalid_params')
+                result[key] = delivery[key]
+    if delivery.get('worker_route') is not None:
+        from agent.session_routes import validate_route
+        result['worker_route'] = validate_route(delivery['worker_route'])
     return result
 
 
@@ -58,6 +82,12 @@ def snapshot_destination(adapter, delivery):
     from gateway.config import Platform
 
     result = validate_destination(delivery)
+    route_name = delivery.get('route')
+    if route_name in adapter._routes:
+        from gateway.platforms.webhook_route_runtime import configured_route, declared_route_for
+        route = declared_route_for(configured_route(adapter._routes[route_name], adapter.config.extra))
+        if route is not None:
+            result['worker_route'] = route  # captured in the admission's owning profile scope, before commit
     if result['deliver'] not in {'log', 'github_comment'} and not result['deliver_extra'].get('chat_id'):
         profile = result.get('profile')
         with adapter._profile_scope(profile):
@@ -88,6 +118,18 @@ def _signed_rows(adapter, chat_id):
           AND json_extract(payload_json, '$.native_text_v1.source.platform')='webhook'
           AND json_extract(payload_json, '$.native_text_v1.automation') IS NULL"""
     rows = [(authority, row) for authority in candidates for row in authority.db._read_all(query, (chat_id,))]
+    if context := reply_context.get():
+        delivery_id = context.get('_webhook_delivery_id')
+        obligation = context.get('_webhook_obligation_id')
+        if delivery_id or obligation:
+            def matches(pair):
+                native = json.loads(pair[1]['payload_json'])['native_text_v1']
+                message_id = native['event'].get('message_id')
+                if delivery_id:
+                    return message_id == delivery_id
+                from gateway.delivery_ledger import compute_obligation_id
+                return compute_obligation_id(native['route'], str(message_id or ''), context['content']) == obligation
+            return runner, [pair for pair in rows if matches(pair)]
     from gateway.platforms.webhook_session_keys import is_keyed_chat_id
     if len(rows) > 1 and is_keyed_chat_id(chat_id):
         started = [pair for pair in rows if pair[1]['status'] == 'started']
@@ -119,12 +161,27 @@ def retained_session_target(adapter, chat_id):
     store and the reply leg's admission, for the dispatcher), or None (no ledger, no admission, or no
     target declared)."""
     _runner, rows = _signed_rows(adapter, chat_id)
+    delivery = retained_destination(adapter, chat_id)
+    declared = delivery.get('delivery_target')
     if not rows or len(rows) != 1:
+        if declared is not None or delivery.get('delivery_mode') == 'internal_turn':
+            raise RuntimeStoreError('not_found')
         return None
     authority, row = rows[0]
-    from hermes_state_session_meta import session_meta
     sid = authority.logical_owner(row['target_session_id'])
-    target = session_meta(authority.db, sid).get('delivery_target')
-    if not isinstance(target, dict):
+    raw = authority.db._read_one('SELECT delivery_target FROM sessions WHERE id=?', (sid,))
+    from gateway.delivery_targets import parse_delivery_target
+    target = parse_delivery_target(raw['delivery_target']) if raw and raw['delivery_target'] is not None else None
+    if declared is not None:
+        if target is None:
+            raise RuntimeStoreError('admission_conflict')  # stamp failed or has not landed yet: never raw egress
+        target = declared  # the executing delivery owns its rendered destination, not the newest request
+    if target is None:
+        from gateway.platforms.webhook import _WebhookDeliveryIdentity
+        config = adapter._routes.get(_WebhookDeliveryIdentity.route_from_chat_id(chat_id), {})
+        if config.get('delivery_target') is not None or config.get('delivery_mode') == 'internal_turn':
+            raise RuntimeStoreError('admission_conflict')
         return None
+    from gateway.platforms.webhook_session_targets import route_delivery_target
+    target = route_delivery_target({'delivery_target': target})
     return {'id': sid, 'delivery_target': target, 'db': authority.db, 'admission_seq': row['seq']}

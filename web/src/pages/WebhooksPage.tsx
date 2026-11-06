@@ -75,6 +75,7 @@ export default function WebhooksPage() {
   const [events, setEvents] = useState("");
   const [deliver, setDeliver] = useState("log");
   const [deliverOnly, setDeliverOnly] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState<"direct" | "internal_turn">("direct");
   const [prompt, setPrompt] = useState("");
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<CreatedWebhook | null>(null);
@@ -181,6 +182,7 @@ export default function WebhooksPage() {
     setEvents("");
     setDeliver("log");
     setDeliverOnly(false);
+    setDeliveryMode("direct");
     setPrompt("");
   }, []);
 
@@ -201,6 +203,7 @@ export default function WebhooksPage() {
         events: eventsList.length ? eventsList : undefined,
         deliver,
         deliver_only: deliverOnly,
+        delivery_mode: deliveryMode,
         prompt: prompt.trim() || undefined,
       });
       showToast("Created ✓", "success");
@@ -405,7 +408,10 @@ export default function WebhooksPage() {
                     <Select
                       id="webhook-deliver"
                       value={deliver}
-                      onValueChange={(v) => setDeliver(v)}
+                      onValueChange={(v) => {
+                        setDeliver(v);
+                        if (v === "log" || v === "github_comment") setDeliveryMode("direct");
+                      }}
                     >
                       <SelectOption value="log">Log</SelectOption>
                       <SelectOption value="telegram">Telegram</SelectOption>
@@ -425,13 +431,32 @@ export default function WebhooksPage() {
                         id="webhook-deliver-only"
                         type="checkbox"
                         checked={deliverOnly}
-                        onChange={(e) => setDeliverOnly(e.target.checked)}
+                        onChange={(e) => {
+                          setDeliverOnly(e.target.checked);
+                          if (e.target.checked) setDeliveryMode("direct");
+                        }}
                       />
                       Skip the agent, deliver payload directly
                     </label>
                   </div>
                 </div>
 
+                {!deliverOnly && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="webhook-delivery-mode">How the agent result arrives</Label>
+                    <Select id="webhook-delivery-mode" value={deliveryMode}
+                      onValueChange={(value) => setDeliveryMode(value as "direct" | "internal_turn")}>
+                      <SelectOption value="direct">Deliver directly</SelectOption>
+                      {deliver !== "log" && deliver !== "github_comment" && (
+                        <SelectOption value="internal_turn">Wake agent</SelectOption>
+                      )}
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Wake agent starts a second turn in the destination conversation, which may act, reply or stay silent.
+                      The background worker is not automatically attached to its delegate list.
+                    </p>
+                  </div>
+                )}
                 <div className="grid gap-2">
                   <Label htmlFor="webhook-prompt">Prompt</Label>
                   <textarea
@@ -554,6 +579,7 @@ export default function WebhooksPage() {
                   {sub.deliver_only && (
                     <Badge tone="secondary">deliver only</Badge>
                   )}
+                  {sub.delivery_mode === "internal_turn" && <Badge tone="secondary">wakes agent</Badge>}
                   {!sub.enabled && <Badge tone="warning">disabled</Badge>}
                 </div>
 

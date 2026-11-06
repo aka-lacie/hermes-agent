@@ -255,6 +255,18 @@ def _cmd_subscribe(args):
         route["script"] = script
     if args.deliver_chat_id:
         route["deliver_extra"] = {"chat_id": args.deliver_chat_id}
+    route["delivery_mode"] = getattr(args, "delivery_mode", None) or existing.get("delivery_mode", "direct")
+    for key in ("model", "provider", "fallback_providers", "session_key", "delivery_target"):
+        value = getattr(args, key, None)
+        value = existing.get(key) if value is None else value
+        if value not in (None, ""):
+            route[key] = value
+    from gateway.platforms.webhook_session_keys import validate_route_session_options
+    try:
+        validate_route_session_options(name, route)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
     try:
         route = _replace_subscription(name, route, expected)
     except SubscriptionMutationConflict as exc:
@@ -267,6 +279,11 @@ def _cmd_subscribe(args):
     print(f"  Secret: {secret}")
     print(f"  Events: {', '.join(events) or '(all)'}")
     print(f"  Deliver: {route['deliver']}")
+    if route.get("delivery_mode") == "internal_turn":
+        print("  Completion: wake agent (second agent turn)")
+    for key in ("model", "provider"):
+        if route.get(key):
+            print(f"  Worker {key}: {route[key]}")
     if route.get("deliver_only"):
         print("  Mode: direct delivery (no agent, zero LLM cost)")
     if route.get("mirror_to_session"):
@@ -308,6 +325,8 @@ def _cmd_list(args):
         deliver = route.get("deliver", "log")
         if route.get("deliver_only"):
             deliver = f"{deliver} (direct — no agent)"
+        elif route.get("delivery_mode") == "internal_turn":
+            deliver = f"{deliver} (wakes agent; second agent turn)"
         if route.get("cron_job"):
             deliver = f"cron job '{route['cron_job']}'"
         desc = route.get("description", "")

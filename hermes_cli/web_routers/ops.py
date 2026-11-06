@@ -144,6 +144,8 @@ def _webhook_route_summary(name: str, route: dict[str, Any], base_url: str) -> d
         "events": list(route.get("events") or []),
         "deliver": route.get("deliver", "log"),
         "deliver_only": bool(route.get("deliver_only")),
+        "delivery_mode": route.get("delivery_mode", "direct"),
+        "model": route.get("model"), "provider": route.get("provider"),
         "prompt": route.get("prompt", ""),
         "script": route.get("script", ""),
         "skills": list(route.get("skills") or []),
@@ -234,6 +236,20 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
         route["deliver_only"] = True
     if body.deliver_chat_id:
         route["deliver_extra"] = {"chat_id": body.deliver_chat_id}
+    existing = expected if isinstance(expected, dict) else {}
+    route["delivery_mode"] = body.delivery_mode if "delivery_mode" in body.model_fields_set else existing.get("delivery_mode", "direct")
+    for key in ("fallback_providers", "session_key", "delivery_target"):
+        if key in existing:
+            route[key] = existing[key]
+    for key in ("model", "provider"):
+        value = getattr(body, key) if key in body.model_fields_set else existing.get(key)
+        if value not in (None, ""):
+            route[key] = value
+    from gateway.platforms.webhook_session_keys import validate_route_session_options
+    try:
+        validate_route_session_options(name, route)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def _save():
         try:

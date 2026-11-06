@@ -59,6 +59,8 @@ def _normalize_dashboard_cron_updates(updates: dict[str, Any], profile_home: Pat
     core functions already accept.
     """
     normalized = dict(updates or {})
+    from cron.jobs_invariants import normalize_execution_update
+    normalize_execution_update({}, normalized)
     for key in ("model", "provider", "workdir"):
         if key in normalized:
             normalized[key] = _cron_optional_text(normalized[key])
@@ -651,7 +653,7 @@ def _doc_matches_session(doc_ts: float, session: dict[str, Any], grace_seconds: 
     return start - grace_seconds <= doc_ts <= end + grace_seconds
 
 
-_EXECUTION_FIELDS = {"prompt", "skill", "skills", "script", "no_agent"}
+_EXECUTION_FIELDS = {"prompt", "skill", "skills", "script", "no_agent", "job_type"}
 
 
 def _update_cron_job_sync(job_id: str, body: CronJobUpdate, profile: Optional[str] = None):
@@ -769,7 +771,11 @@ async def get_cron_delivery_targets(profile: Optional[str] = None):
         from cron.scheduler_delivery import cron_delivery_targets
 
         with _config_profile_scope(profile):
-            targets.extend(cron_delivery_targets())
+            platform_targets = cron_delivery_targets()
+            targets.append({"id": "origin", "name": "Profile home conversation",
+                            "home_target_set": any(t.get("home_target_set") for t in platform_targets),
+                            "home_env_var": None})
+            targets.extend(platform_targets)
     except HTTPException:
         raise  # an unknown ?profile= is the scope's 404, not a missing platform list
     except Exception:

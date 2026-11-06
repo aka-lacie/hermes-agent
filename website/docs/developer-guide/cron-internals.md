@@ -13,6 +13,8 @@ The cron subsystem provides scheduled task execution — from simple one-shot de
 | File | Purpose |
 |------|---------|
 | `cron/jobs.py` | Job model, storage, atomic read/write to `jobs.json` |
+| `cron/jobs_invariants.py` | Execution type, delivery mode and reminder payload validation |
+| `cron/session_delivery.py` | Canonical session targets and legacy internal-turn selector synthesis |
 | `cron/jobs_time.py` | Per-job `timezone` / `grace_minutes` knobs: validation, tolerant reads, due-scan zone |
 | `cron/scheduler.py` | Scheduler loop — due-job detection, execution, repeat tracking |
 | `tools/cronjob_tools.py` | Model-facing `cronjob_manage` tool registration and handler |
@@ -30,7 +32,31 @@ Four schedule formats are supported:
 | **Cron expression** | `0 9 * * *` | Standard 5-field cron syntax (minute, hour, day, month, weekday) |
 | **ISO timestamp** | `2025-01-15T09:00:00` | One-shot, fires at the exact time |
 
-The model-facing surface is a single `cronjob_manage` tool with action-style operations: `create`, `list`, `update`, `pause`, `resume`, `run`, `remove`.
+The model-facing surface is a single `cronjob_manage` tool with action-style operations: `create`, `list`, `update`, `pause`, `resume`, `run`, `cancel`, `remove`.
+
+## Execution and delivery types
+
+`job_type` is `agent`, `script`, or `reminder`; absent legacy records infer `script` from
+`no_agent=true`, otherwise `agent`. `job_uses_agent` gates canonical agent admission,
+provider failure classification and headless-agent refusal. Reminder runs return the literal
+prompt before config/provider resolution or agent DB construction, and execute inline rather
+than spawning an external cron worker. They retain the ordinary fire claim, execution ledger,
+output archive and delivery bookkeeping. `[SILENT]` is literal reminder text, not an agent marker.
+
+`delivery_mode` is `direct` (agent/script default) or `internal_turn` (reminder default).
+The latter uses `gateway.delivery_targets.dispatch`, not a parallel internal-turn service.
+`session_delivery.legacy_session_target` synthesizes one profile-relative conversation selector
+from origin/deliver and the canonical `build_session_key`; home fallback uses `home:<platform>`.
+The target defaults to `attach=false`, overridden by explicit `attach_to_session`, and immediate
+wake. Authored `delivery_target` objects are validated at create/update and preserved in
+`JOB_DEFINITION_FIELDS`. Explicit targets override legacy delivery addresses. An address/mode
+edit refreshes an inferred target while retaining independently chosen canonical targets.
+
+At delivery, missing/malformed internal targets fail closed. Script workers that lack a live
+session-owner sink hand session delivery to the existing durable gateway queue using their own
+execution ID. A failure override still routes independently (including `local` suppression).
+Direct platform/room/Bot Chat sends and upstream cancellation, timezone, catch-up, media and
+session-route behavior are unchanged.
 
 ## Per-job timezone
 

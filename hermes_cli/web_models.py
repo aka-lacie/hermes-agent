@@ -343,6 +343,10 @@ class CronJobCreate(BaseModel):
     enabled_toolsets: Optional[list[str]] = None
     workdir: Optional[str] = None
     no_agent: bool = False
+    job_type: Optional[Literal["agent", "script", "reminder"]] = None
+    delivery_mode: Optional[Literal["direct", "internal_turn"]] = None
+    delivery_target: Optional[dict[str, Any]] = None
+    attach_to_session: Optional[StrictBool] = None
     # Validated in cron.jobs.create_job (unknown IANA zone / out-of-range grace -> 400).
     timezone: Optional[str] = None
     grace_minutes: Optional[int | str] = None
@@ -403,6 +407,9 @@ class WebhookCreate(BaseModel):
     deliver: str = "log"
     deliver_only: bool = False
     deliver_chat_id: Optional[str] = None
+    delivery_mode: Literal["direct", "internal_turn"] = "direct"
+    model: Optional[str] = None
+    provider: Optional[str] = None
     secret: Optional[str] = None  # omit to auto-generate
 
 class WebhookEnabledToggle(BaseModel):

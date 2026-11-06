@@ -12,6 +12,18 @@ def _flag(parser, *names, help, **kw):
     parser.add_argument(*names, action="store_true", help=help, **kw)
 
 
+def _add_delivery_behavior(parser) -> None:
+    from gateway.delivery_targets import parse_delivery_target
+    parser.add_argument("--job-type", choices=("agent", "script", "reminder"),
+        help="agent runs an isolated agent; script runs --script only; reminder emits literal prompt text.")
+    parser.add_argument("--delivery-mode", choices=("direct", "internal_turn"),
+        help="Send output directly or admit it into the destination session. Reminders default to internal_turn.")
+    parser.add_argument("--delivery-target", type=parse_delivery_target, metavar="JSON",
+        help='Canonical target JSON, e.g. {"kind":"session","selector":"discord:dm:42"}.')
+    parser.add_argument("--attach-to-session", action=argparse.BooleanOptionalAction, default=None,
+        help="Attach the cron run to its destination session (default false for synthesized session targets).")
+
+
 def _catch_up_flag(value: str) -> bool:
     if value not in ("on", "off"):
         raise argparse.ArgumentTypeError("use 'on' (run missed runs once) or 'off' (skip them)")
@@ -53,6 +65,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "follow --deliver.")
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     _add_catch_up(cron_create)
+    _add_delivery_behavior(cron_create)
     cron_create.add_argument("--skill", dest="skills", action="append",
         help="Attach a skill. Repeat to add multiple skills.")
     cron_create.add_argument("--script",
@@ -128,6 +141,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "'local' suppresses; '' clears the override)")
     cron_edit.add_argument("--repeat", type=int, help="New repeat count")
     _add_catch_up(cron_edit)
+    _add_delivery_behavior(cron_edit)
     cron_edit.add_argument("--skill", dest="skills", action="append",
         help="Replace the job's skills with this set. Repeat to attach multiple skills.")
     cron_edit.add_argument("--add-skill", dest="add_skills", action="append",

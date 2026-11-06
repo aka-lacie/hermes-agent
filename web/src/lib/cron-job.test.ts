@@ -5,6 +5,7 @@ import {
   cronJobHasExecutionContent,
   cronJobFormFromJob,
   cronLastResult,
+  cronTargetSupportsInternalTurn,
   cronAgoLabel,
   cronNextRunOverdueMs,
   cronSchedulerStaleAgeS,
@@ -25,6 +26,10 @@ function form(overrides: Partial<CronJobFormState> = {}): CronJobFormState {
     base_url: "",
     script: "",
     no_agent: false,
+    job_type: "agent",
+    delivery_mode: "direct",
+    delivery_target: "",
+    attach_to_session: null,
     context_from: "",
     continuity: false,
     enabled_toolsets: [],
@@ -40,6 +45,40 @@ describe("splitCronList", () => {
       "terminal",
       "file",
     ]);
+  });
+});
+
+describe("reminder and canonical delivery controls", () => {
+  it("preserves literal text and serializes execution independently from delivery", () => {
+    const payload = buildCronJobPayload(form({ prompt: "  remember\n", job_type: "reminder", deliver: "origin", delivery_mode: "internal_turn" }));
+    expect(payload).toMatchObject({ prompt: "  remember\n", job_type: "reminder", no_agent: false, delivery_mode: "internal_turn" });
+    expect(buildCronJobPayload(form({ job_type: "script", script: "watch.py" })).no_agent).toBe(true);
+  });
+
+  it("roundtrips canonical targets and applies an explicit attachment choice", () => {
+    const original: CronJob = { id: "job", enabled: true, job_type: "reminder", delivery_mode: "internal_turn",
+      delivery_target: { kind: "session", selector: "discord:dm:42", attach: false, wake_policy: "immediate" } };
+    const state = cronJobFormFromJob(original);
+    expect(buildCronJobPayload(state).delivery_target).toEqual(original.delivery_target);
+    expect(buildCronJobPayload({ ...state, attach_to_session: true }).delivery_target).toMatchObject({ attach: true });
+  });
+
+  it("keeps legacy script aliases and distinguishes unset attachment from false", () => {
+    const state = cronJobFormFromJob({ id: "old", enabled: true, no_agent: true });
+    expect(state.job_type).toBe("script");
+    expect(state.delivery_mode).toBe("direct");
+    expect(buildCronJobPayload(state)).not.toHaveProperty("attach_to_session");
+    expect(buildCronJobPayload({ ...state, attach_to_session: false }).attach_to_session).toBe(false);
+  });
+
+  it("rejects invalid canonical JSON and identifies single conversation destinations", () => {
+    expect(() => buildCronJobPayload(form({ delivery_target: "not json" }))).toThrow();
+    expect(() => buildCronJobPayload(form({ delivery_target: "[]" }))).toThrow();
+    expect(cronTargetSupportsInternalTurn("origin")).toBe(true);
+    expect(cronTargetSupportsInternalTurn("bot-chat")).toBe(true);
+    for (const target of ["local", "all", "discord,telegram", "bot-chat:other", "room:42"]) {
+      expect(cronTargetSupportsInternalTurn(target)).toBe(false);
+    }
   });
 });
 

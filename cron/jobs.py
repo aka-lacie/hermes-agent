@@ -34,7 +34,9 @@ from agent.deadline import poll_until
 from hermes_constants import get_hermes_home
 from cron.constants import CLAIM_TTL_INACTIVITY_HEADROOM, FIRE_CLAIM_SKEW_SECONDS, FIRE_CLAIM_TTL_SECONDS
 from cron.env_settings import cron_env_setting
-from cron.jobs_invariants import _validate_job_mode_invariants, validate_schedule_knobs
+from cron.jobs_invariants import (
+    _validate_job_mode_invariants, validate_schedule_knobs, job_uses_agent,
+    normalize_job_type, normalize_delivery_mode, normalize_execution_update, validate_reminder_payload)
 from cron.jobs_model_pin import _main_model_pin
 from cron import jobs_time
 from cron.scheduler_ownership import _claim_owner_is_dead
@@ -471,7 +473,7 @@ def _coerce_job_text(value: Any, fallback: str = "") -> str:
 
 
 # Fields whose presence in an update can turn a runnable job into an empty one.
-_PAYLOAD_FIELDS = frozenset({"prompt", "script", "skill", "skills", "no_agent"})
+_PAYLOAD_FIELDS = frozenset({"prompt", "script", "skill", "skills", "no_agent", "job_type"})
 
 EMPTY_PAYLOAD_ERROR = (
     "Cron job has nothing to run: the prompt is blank and no script or "
@@ -510,6 +512,8 @@ def _normalize_job_record(job: dict[str, Any]) -> dict[str, Any]:
     normalized = _apply_skill_fields(job)
     job_id = normalized["id"] = _coerce_job_text(normalized.get("id"), "unknown")
     prompt = normalized["prompt"] = _coerce_job_text(normalized.get("prompt"))
+    normalized["job_type"] = normalize_job_type(normalized.get("job_type"), no_agent=bool(normalized.get("no_agent")))
+    normalized["delivery_mode"] = normalize_delivery_mode(normalized.get("delivery_mode"))
     name = _coerce_job_text(normalized.get("name")).strip()
     if not name:
         label_source = (
@@ -1835,6 +1839,9 @@ def create_job(
     interpreter: Optional[str] = None,
     timezone: Optional[str] = None,
     grace_minutes: Optional[int] = None,
+    job_type: Optional[str] = None,
+    delivery_mode: Optional[str] = None,
+    delivery_target: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Create a new cron job and return the stored record.
 
@@ -1862,7 +1869,7 @@ def create_job(
     if parsed_schedule["kind"] == "once" and repeat is None:
         repeat = 1
     if deliver is None:
-        deliver = "origin" if origin else "local"
+        deliver = "origin" if origin or str(job_type or "").strip().lower() == "reminder" else "local"
     job_id = uuid.uuid4().hex[:12]
     now = _hermes_now().isoformat()
 
@@ -1872,9 +1879,18 @@ def create_job(
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
     normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
 
-    _validate_job_mode_invariants(f["monitor_script"], f["monitor_url"], f["no_agent"], f["script"])
+    kind = normalize_job_type(job_type, no_agent=f["no_agent"])
+    if f["no_agent"] and kind != "script":
+        raise ValueError("no_agent=True is only compatible with job_type='script'.")
+    f["no_agent"] = kind == "script"
+    mode = normalize_delivery_mode(delivery_mode or ("internal_turn" if kind == "reminder" else "direct"))
+
+    _validate_job_mode_invariants(f["monitor_script"], f["monitor_url"], f["no_agent"], f["script"], kind)
     validate_schedule_knobs(parsed_schedule, f["timezone"], f["grace_minutes"])
-    prompt_text = _coerce_job_text(prompt).strip()
+    prompt_text = _coerce_job_text(prompt)
+    if kind != "reminder":
+        prompt_text = prompt_text.strip()
+    validate_reminder_payload({"job_type": kind, "prompt": prompt_text, "script": f["script"], "skills": normalized_skills})
     if not prompt_text and not f["script"] and not normalized_skills:
         raise ValueError(EMPTY_PAYLOAD_ERROR)
     # Reject gateway-lifecycle commands (respawn loops) here, not just in the CLI: covers the tool.
@@ -1904,6 +1920,8 @@ def create_job(
         "base_url": f["base_url"],
         "script": f["script"],
         "no_agent": f["no_agent"],
+        "job_type": kind,
+        "delivery_mode": mode,
         "monitor_script": f["monitor_script"],
         "monitor_url": f["monitor_url"],
         "monitor_state": None,
@@ -1942,6 +1960,11 @@ def create_job(
     ):
         if value is not None:
             job[key] = value
+
+    from cron.session_delivery import normalize_job_delivery
+    if delivery_target is not None:
+        job["delivery_target"] = delivery_target
+    normalize_job_delivery(job)
 
     with _jobs_lock():
         save_jobs(load_jobs() + [job])
@@ -2037,6 +2060,7 @@ def _apply_pin_update(job: dict[str, Any], updates: dict[str, Any]) -> None:
 def _normalize_job_updates(job: dict[str, Any], updates: dict[str, Any]) -> None:
     """Normalize updates in place like create_job; invalid values raise BEFORE the merge. ``repeat``
     accepts the stored dict or a bare value (coerced, completed counter preserved)."""
+    normalize_execution_update(job, updates)
     for key, norm in _UPDATE_FIELD_NORMALIZERS.items():
         if key in updates:
             updates[key] = norm(updates[key])
@@ -2130,12 +2154,16 @@ def update_job(job_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]
         updated = _apply_skill_fields({**job, **updates})
         _reject_terminal_activation(job, updated, job_id)
         # Re-check on the MERGED record; scoped to changed fields so legacy records keep loading.
-        if {"monitor_script", "monitor_url", "no_agent", "script"}.intersection(updates):
+        if {"monitor_script", "monitor_url", "no_agent", "script", "job_type"}.intersection(updates):
             _validate_job_mode_invariants(
                 updated.get("monitor_script") or None,
                 updated.get("monitor_url") or None,
                 bool(updated.get("no_agent")),
-                _normalize_job_optional_text(updated.get("script")))
+                _normalize_job_optional_text(updated.get("script")), updated.get("job_type"))
+        validate_reminder_payload(updated)
+        if {"delivery_target", "delivery_mode", "deliver", "origin", "attach_to_session"}.intersection(updates):
+            from cron.session_delivery import normalize_job_delivery_update
+            normalize_job_delivery_update(job, updated, updates)
         if any(k in updates for k in _PAYLOAD_FIELDS) and job_payload_is_empty(updated):
             raise ValueError(EMPTY_PAYLOAD_ERROR)
         if {"timezone", "grace_minutes"}.intersection(updates):

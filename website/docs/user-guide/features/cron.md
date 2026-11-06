@@ -19,6 +19,7 @@ Cron jobs can:
 - deliver results back to the origin chat, local files, or configured platform targets
 - run in fresh agent sessions with the normal static tool list
 - run in **no-agent mode** — a script on a schedule, its stdout delivered verbatim, zero LLM involvement (see the [no-agent mode](#no-agent-mode-script-only-jobs) section below)
+- emit a literal **reminder** without running a detached agent, and wake the destination session for a contextual follow-up
 - fire on **external events** — a webhook route with `cron_job` set fires the job the moment something happens (a PR gets feedback, a service posts an alert) instead of waiting for the next scheduled tick. See [Event-Triggered Cron Jobs](../messaging/webhooks.md#event-triggered-cron-jobs).
 
 All of this is available to Hermes itself through the `cronjob_manage` tool, so you can create, pause, edit, and remove jobs by asking in plain language — no CLI required.
@@ -57,6 +58,46 @@ when their completed result is recovered. `hermes cron run` exits nonzero for a 
 execution failure; background dispatch is not a terminal success/failure verdict.
 
 ## Creating scheduled tasks
+
+### Job types and delivery behavior
+
+`job_type` chooses what runs: `agent` starts an isolated cron agent, `script` runs a
+disk-backed script without an LLM (the legacy `no_agent=true` alias), and `reminder`
+emits the exact `prompt` text. Reminders require nonblank text and cannot use scripts,
+skills, or monitors. They do not create a detached LLM run; only a receiving session's
+contextual turn may use model tokens.
+
+`delivery_mode` is independent: `direct` sends the result through the ordinary delivery
+lane (the default for agent/script jobs); `internal_turn` admits it into the destination
+session as a typed automated event. Reminders default to `internal_turn`. An agent job
+using `internal_turn` still has its isolated production run, then a separate contextual
+turn in the destination; its worker uses the profile's subagent instructions.
+
+Internal delivery uses a canonical `delivery_target`. If omitted, Hermes derives one
+session selector from `origin`/`deliver`, preserving chat, thread and participant identity.
+Synthesized targets default to `attach=false` and `wake_policy="immediate"`;
+`attach_to_session=true` opts the cron run into the destination's attached-run list.
+Explicit canonical targets may instead name a literal `session_id` or a conversation
+`selector`, and may set their own attachment and wake policy. Selectors follow the
+conversation's current session after rollover/compression. Unresolved targets are recorded
+as delivery failures, never sent directly or routed to a guessed session.
+
+```bash
+hermes cron create "in 30m" "Check the customer reply" --job-type reminder \
+  --delivery-target '{"kind":"session","selector":"discord:dm:42"}'
+hermes cron edit follow-up --delivery-mode internal_turn --attach-to-session
+hermes cron edit follow-up --no-attach-to-session
+```
+
+The dashboard exposes the same **Job type**, **Delivery behavior**, canonical target JSON,
+and attachment controls. The model-facing tool accepts `job_type`, `delivery_mode`, and
+`delivery_target` too. Internal delivery names one session, not `local`, `all`, or a
+comma-combined broadcast. An explicit session target can still be used when the legacy
+`deliver` field is `local`. Bare `bot-chat` maps to that profile's canonical session;
+cross-profile `bot-chat:<profile>` and `room:<room>` remain direct-delivery destinations.
+
+Direct jobs without a canonical target keep the existing platform fan-out, Bot Chat,
+Group Chat, transcript mirroring, failure routing, silence and media behavior.
 
 ### In chat with `/cron`
 

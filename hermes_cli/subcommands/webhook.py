@@ -21,6 +21,10 @@ def build_webhook_parser(subparsers, *, cmd_webhook: Callable) -> None:
     wh_sub.add_argument("--events", default="", help="Comma-separated event types to accept")
     wh_sub.add_argument("--description", default="", help="What this subscription does")
     wh_sub.add_argument("--skills", default="", help="Comma-separated skill names to load")
+    wh_sub.add_argument("--model", default=None, help="Worker model; omitted preserves, empty clears")
+    wh_sub.add_argument("--provider", default=None, help="Worker provider; omitted preserves, empty clears")
+    wh_sub.add_argument("--delivery-mode", choices=("direct", "internal_turn"), default=None,
+                        help="Deliver directly or wake the destination agent with the final completion")
     wh_sub.add_argument(
         "--deliver", default="log", help="Delivery target: log, telegram, discord, slack, etc.")
     wh_sub.add_argument(

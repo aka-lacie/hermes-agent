@@ -1,6 +1,7 @@
 """Terminal bookkeeping phases shared by scheduler execution paths."""
 
 from typing import Optional
+from cron.jobs_invariants import job_uses_agent
 
 EMPTY_RESPONSE_ERROR = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
@@ -56,6 +57,11 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
     ``cron.scheduler`` facade, which is where tests and the receipt-recovery path patch them."""
     from cron import scheduler
     job = d.job
+    lane = scheduler._normalize_deliver_value(scheduler._delivery_lane_value(job, for_failure=not d.success))
+    from cron.session_delivery import job_delivery_target
+    target = job_delivery_target(job) if job.get("delivery_target") is not None else None
+    if target and not (not d.success and job.get("failure_deliver")):
+        lane = "local" if target.get("kind") == "none" else target.get("kind", lane)
     if not d.should_deliver and job.get("last_delivery_queued"):
         from cron.jobs import update_job
         update_job(job["id"], {"last_delivery_queued": None})
@@ -63,7 +69,7 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
     mark_kwargs: dict = {"delivery_error": d.delivery_error}
     from cron.scheduler_authority import journal_path
     journal = journal_path(job['id'], execution_id)
-    if not job.get('no_agent'):
+    if job_uses_agent(job):
         mark_kwargs['execution_id'] = execution_id
     if not d.success and job.pop("_model_unreachable", False):
         # Never-reached-the-model failure: schedule the Cowork-style bounded re-run
@@ -99,8 +105,7 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         should_deliver=d.should_deliver,
         unresolved_origin=d.unresolved_origin,
         # Read the lane the notice was actually routed through (failure_deliver on failure).
-        normalized_deliver=scheduler._normalize_deliver_value(
-            scheduler._delivery_lane_value(job, for_failure=not d.success)),
+        normalized_deliver=lane,
         incident_acked=d.incident_acked,
         success=d.success,
     )

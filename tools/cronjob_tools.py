@@ -679,7 +679,9 @@ def _action_create(a: dict[str, Any]) -> str:
     if not a["schedule"]:
         return tool_error("schedule is required for create", success=False)
     canonical_skills = _canonical_skills(a["skill"], a["skills"])
-    _no_agent = bool(a["no_agent"])
+    from cron.jobs_invariants import normalize_job_type
+    kind = normalize_job_type(a["job_type"], no_agent=bool(a["no_agent"]))
+    _no_agent = bool(a["no_agent"]) or kind == "script"
     # no_agent=True -> the script IS the job (prompt/skills optional); else prompt or skills.
     if _no_agent:
         if not script:
@@ -713,11 +715,15 @@ def _action_create(a: dict[str, Any]) -> str:
         context_from = _apply_continuity(context_from, a["continuity"])
 
     from cron.scheduler import CronSchedulerRegistrationError, create_job_with_scheduler_registration
+    target = a["delivery_target"]
+    origin = _origin_from_env(a["schedule"])
+    if target is None and deliver is None and not origin and a["session_id"] and (kind == "reminder" or a["delivery_mode"] == "internal_turn"):
+        origin = {"session_id": str(a["session_id"])}
     try:
         job = create_job_with_scheduler_registration(
             prompt=prompt or "", schedule=a["schedule"], name=a["name"], repeat=a["repeat"],
             deliver=_resolve_cron_context_deliver(deliver),
-            origin=_origin_from_env(a["schedule"]),
+            origin=origin,
             skills=canonical_skills,
             model=_normalize_optional_job_value(a["model"]), provider=_normalize_optional_job_value(a["provider"]),
             base_url=_normalize_optional_job_value(a["base_url"], strip_trailing_slash=True),
@@ -726,6 +732,8 @@ def _action_create(a: dict[str, Any]) -> str:
             enabled_toolsets=a["enabled_toolsets"] if a["enabled_toolsets"] is not None else None,
             workdir=_normalize_optional_job_value(a["workdir"]),
             no_agent=_no_agent, attach_to_session=a["attach_to_session"],
+            job_type=a["job_type"], delivery_mode=a["delivery_mode"],
+            delivery_target=target,
             monitor_script=_normalize_optional_job_value(a["monitor_script"]),
             monitor_url=_normalize_optional_job_value(a["monitor_url"]),
             # CLI-only lane: absent from CRONJOB_SCHEMA and the model dispatch (models don't pick models).
@@ -942,6 +950,9 @@ def _update_context_from(job: dict[str, Any], a: dict[str, Any], updates: dict[s
 
 def _update_run_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[str, Any]) -> Optional[str]:
     """enabled_toolsets / attach_to_session / workdir / no_agent / repeat / schedule."""
+    for field in ("job_type", "delivery_mode", "delivery_target"):
+        if a[field] is not None:
+            updates[field] = a[field]
     if a["enabled_toolsets"] is not None:
         # [] is an explicit zero-tool allowlist, not a clear back to the unrestricted default (#82010).
         updates["enabled_toolsets"] = a["enabled_toolsets"]
@@ -1079,7 +1090,10 @@ def cronjob(
     pinned: Optional[bool] = None,
     interpreter: Optional[str] = None,
     timezone: Optional[str] = None,
-    grace_minutes: Optional[int | str] = None) -> str:
+    grace_minutes: Optional[int | str] = None,
+    job_type: Optional[str] = None,
+    delivery_mode: Optional[str] = None,
+    delivery_target: Optional[dict] = None) -> str:
     """Unified cron job management tool."""
     a = dict(locals())
     del a["task_id"]  # unused but kept for handler signature compatibility
@@ -1122,7 +1136,7 @@ CRONJOB_SCHEMA = {
     "name": "cronjob_manage",
     "description": """Schedule recurring or one-off agent tasks (cron jobs): create, list, edit, run. action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only); 'cancel' stops a job's LIVE run without touching its schedule (a no-op when nothing is in flight).
 
-Jobs run in a fresh session with no current-chat context, so prompts must be self-contained, and the agent's FINAL RESPONSE is what gets delivered — cron runs are autonomous and cannot ask questions. Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless the user pins one. Prefer updating an existing job over creating near-duplicates.""",
+Agent jobs run in a fresh session with no current-chat context, so prompts must be self-contained, and the agent's FINAL RESPONSE is what gets delivered — cron runs are autonomous and cannot ask questions. Agent jobs run on the main agent model unless the user pins one. Reminder jobs emit prompt literally without a detached LLM and default to a contextual turn in the destination session. Prefer updating an existing job over creating near-duplicates.""",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1142,7 +1156,7 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             },
             "prompt": {
                 "type": "string",
-                "description": "For create/update: the full self-contained prompt (when it runs goes in 'schedule'; data windows like 'since yesterday' stay here; paired with any skills as the task instruction). For run: optional transient context for that single fire (never persisted)."
+                "description": "For create/update: the full self-contained agent prompt, or literal reminder text for job_type='reminder'. Timing goes in schedule. For run: optional transient agent context for that single fire (never persisted)."
             },
             "schedule": {
                 "type": "string",
@@ -1181,6 +1195,18 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             "monitor": {
                 "type": "string",
                 "description": "Optional change-detector that gates the agent: an http(s) URL (fetched each tick) or a script path (same rules as `script`, run each tick) — cheap, no LLM. Output identical to the previous tick skips the agent run entirely; changed output wakes the agent with a diff injected into the prompt. First tick always runs (baseline). Output must be deterministic (no timestamps) or every tick looks changed. Incompatible with no_agent. On update, '' clears."
+            },
+            "job_type": {
+                "type": "string", "enum": ["agent", "script", "reminder"],
+                "description": "agent runs an isolated agent (default); script runs the script without an LLM; reminder emits prompt literally with no detached agent. Prefer reminder for alarms and deferred follow-ups."
+            },
+            "delivery_mode": {
+                "type": "string", "enum": ["direct", "internal_turn"],
+                "description": "direct sends output as-is (default for agent/script). internal_turn admits it into the destination session for a contextual turn (default for reminder), attach=false and immediate wake by default."
+            },
+            "delivery_target": {
+                "type": "object",
+                "description": "Optional canonical target: {kind:'session', selector:'discord:dm:<chat_id>' or session_id:'<id>', attach:false, wake_policy:'immediate'} (exactly one selector/session_id). direct also accepts {kind:'platform',platform:'...',chat_id:'...'} or {kind:'none'}. Omit to derive internal_turn's selector from origin/deliver."
             },
             "no_agent": {
                 "type": "boolean",
@@ -1241,7 +1267,7 @@ def check_cronjob_requirements() -> bool:
 _HANDLER_FORWARDED_ARGS = (
     "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills", "reason",
     "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session",
-    "paused_reason", "pinned", "timezone", "grace_minutes", "catch_up")
+    "paused_reason", "pinned", "timezone", "grace_minutes", "catch_up", "job_type", "delivery_mode", "delivery_target")
 
 
 def _cronjob_handler(args, **kw):

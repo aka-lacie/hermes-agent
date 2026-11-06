@@ -244,8 +244,9 @@ def _job_rows(job: dict[str, Any]) -> list[tuple[str, str]]:
         ("Monitor", f"{monitor_source} (agent runs only on output change)" if monitor_source
          else ""),
         ("Changed", mon_state.get("last_changed_at") if monitor_source else ""),
-        ("Mode", color("no-agent", Colors.DIM) + " (script stdout delivered directly)"
-         if job.get("no_agent") else ""),
+        ("Mode", job.get("job_type") or ("script" if job.get("no_agent") else "agent")),
+        ("Delivery mode", job.get("delivery_mode") or "direct"),
+        ("Delivery target", json.dumps(job["delivery_target"], ensure_ascii=False) if job.get("delivery_target") else ""),
         ("Timezone", job.get("timezone")),
         ("Grace", f"{job['grace_minutes']} min" if job.get("grace_minutes") is not None else ""),
         ("Workdir", job.get("workdir")),
@@ -774,6 +775,8 @@ def cron_doctor() -> int:
 
 
 _JOB_ARG_FIELDS = (("name", "name"), ("deliver", "deliver"), ("failure_deliver", "failure_deliver"),
+                   ("job_type", "job_type"), ("delivery_mode", "delivery_mode"),
+                   ("delivery_target", "delivery_target"), ("attach_to_session", "attach_to_session"),
                    ("repeat", "repeat"), ("script", "script"), ("workdir", "workdir"),
                    ("model", "model"), ("provider", "model_provider"), ("pinned", "pinned"),
                    ("monitor_script", "monitor_script"), ("monitor_url", "monitor_url"),
@@ -791,7 +794,7 @@ _JOB_DETAIL_LINES = (
     ("script", "  Script: {}"),
     ("monitor_script", "  Monitor: {} (agent runs only on output change)"),
     ("monitor_url", "  Monitor: {} (agent runs only on output change)"),
-    ("no_agent", "  Mode: no-agent (script stdout delivered directly)"),
+
     ("continuity", "  Continuity: on (each run sees the previous run's output)"),
     ("timezone", "  Timezone: {} (schedule runs on this zone's wall clock)"),
     ("workdir", "  Workdir: {}"),
@@ -803,6 +806,10 @@ def _print_job_details(job_data: dict[str, Any]) -> None:
     for key, template in _JOB_DETAIL_LINES:
         if job_data.get(key):
             print(template.format(job_data[key]))
+    print(f"  Mode: {job_data.get('job_type') or ('script' if job_data.get('no_agent') else 'agent')}")
+    print(f"  Delivery mode: {job_data.get('delivery_mode') or 'direct'}")
+    if job_data.get("delivery_target") is not None:
+        print(f"  Delivery target: {json.dumps(job_data['delivery_target'], ensure_ascii=False)}")
 
 
 def cron_create(args):

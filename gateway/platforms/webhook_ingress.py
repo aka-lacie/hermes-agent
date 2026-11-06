@@ -258,6 +258,20 @@ async def _webhook_retry(authority, event, payload, rows):
             payload['native_text_v1'].pop('webhook_route')
             if 'provenance' not in retained:
                 payload['native_text_v1'].pop('provenance', None)
+        # New target snapshots and detached-silence flags must not invalidate an exact
+        # retry of a pre-cutover admission. Never retrofit them into its retained payload.
+        previous_delivery = retained.get('webhook_delivery') or {}
+        candidate_delivery = payload['native_text_v1'].get('webhook_delivery') or {}
+        if previous_delivery.get('delivery_mode') == 'internal_turn' and 'delivery_target' not in previous_delivery:
+            candidate_delivery.pop('delivery_target', None)
+        if 'worker_route' not in previous_delivery:
+            candidate_delivery.pop('worker_route', None)
+        if 'webhook_runtime' in retained:
+            payload['native_text_v1']['webhook_runtime'] = retained['webhook_runtime']
+        previous_event = retained.get('event') or {}
+        candidate_event = payload['native_text_v1'].get('event') or {}
+        if 'reply_expected' not in previous_event and candidate_event.get('reply_expected') is False:
+            candidate_event.pop('reply_expected')
         same = row['payload'] == payload
     if len(rows) != 1 or not same:
         raise RuntimeStoreError('admission_conflict')

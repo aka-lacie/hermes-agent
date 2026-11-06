@@ -151,6 +151,7 @@ class GatewaySessionAgentMixin:
     def _build_fresh_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations,
                            reasoning_config, pr, skip_context_files):
         from gateway.run import _checkpoint_agent_kwargs
+        from gateway.platforms.webhook_session_targets import worker_instruction_role
         ctx = self._ctx
         runner = self._runner
         src = ctx.source
@@ -171,6 +172,7 @@ class GatewaySessionAgentMixin:
             provider_sort=pr.get("sort"), provider_require_parameters=pr.get("require_parameters", False),
             provider_data_collection=pr.get("data_collection"),
             session_id=ctx.session_id, platform=platform_key,
+            instruction_role=worker_instruction_role(runner, src),
             user_id=src.user_id, user_id_alt=src.user_id_alt, user_name=src.user_name,
             chat_id=src.chat_id, chat_name=src.chat_name, chat_type=src.chat_type, thread_id=src.thread_id,
             gateway_session_key=ctx.session_key,
@@ -218,7 +220,7 @@ class GatewaySessionAgentMixin:
         # (disk I/O under the lock stalls the idle-sweep watcher and Discord heartbeats). A chain
         # configured after caching must reach the next turn; per-session serialization keeps it safe.
         locked = api_runtime_locked() is not None
-        if found.reused and agent is not None and locked and getattr(agent, "_fallback_activated", False):
+        if found.reused and agent is not None and (locked or turn_route.get('webhook_runtime_pinned')) and getattr(agent, "_fallback_activated", False):
             # A cached agent already moved onto a fallback provider cannot serve a confirmed lock.
             found.evicted, found.reused, agent = agent, False, None
             with cache_lock:

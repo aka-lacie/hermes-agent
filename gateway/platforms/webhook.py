@@ -221,6 +221,8 @@ class WebhookAdapter(BasePlatformAdapter):
         self._host: Optional[str] = extra.get("host", DEFAULT_HOST) or None
         self._port: int = int(extra.get("port", DEFAULT_PORT))
         self._global_secret: str = extra.get("secret", "")
+        validate_route_session_options("<platform defaults>", {
+            key: extra[key] for key in ("model", "provider", "fallback_providers") if key in extra})
         self._static_routes: dict[str, dict] = extra.get("routes", {})
         self._dynamic_routes: dict[str, dict] = {}
         self._dynamic_routes_stat: Optional[tuple] = None
@@ -318,8 +320,26 @@ class WebhookAdapter(BasePlatformAdapter):
         self._mark_disconnected()
         logger.info("[webhook] Disconnected")
 
+    async def send_final_ledgered(self, event, session_key, text_content, metadata, *,
+                                  reply_to, is_ephemeral_response=False):
+        """Only the final-response seam may hand detached results to another agent."""
+        stamp = {**(metadata or {}), "_webhook_final_response": True,
+                 "_webhook_delivery_id": getattr(event, "ledger_message_id", None) or getattr(event, "message_id", None)}
+        return await super().send_final_ledgered(
+            event, session_key, text_content, stamp,
+            reply_to=reply_to, is_ephemeral_response=is_ephemeral_response)
+
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
                    metadata: Optional[dict[str, Any]] = None) -> SendResult:
+        from gateway.platforms.webhook_delivery import reply_context
+        token = reply_context.set({**(metadata or {}), "content": content})
+        try:
+            return await self._send_response(chat_id, content, reply_to=reply_to, metadata=metadata)
+        finally:
+            reply_context.reset(token)
+
+    async def _send_response(self, chat_id: str, content: str, reply_to: Optional[str] = None,
+                             metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Deliver the agent's response to the destination stored for its opaque ``chat_id`` —
         read with ``.get()``, never popped."""
         # Autonomous lane (no human reader): the loose marker matcher shared with cron (marker on its own
@@ -334,6 +354,8 @@ class WebhookAdapter(BasePlatformAdapter):
         except Exception:
             logger.warning("[webhook] Destination unavailable for %s", chat_id, exc_info=True)
             return SendResult(success=False, error="Webhook destination unavailable or unauthorized")
+        if delivery.get("delivery_mode") == "internal_turn" and not (metadata or {}).get("_webhook_final_response"):
+            return SendResult(success=True)
         routed = await self._deliver_to_declared_target(chat_id, content, delivery)
         return routed if routed is not None else await self._deliver_to(delivery, chat_id, content)
 
@@ -347,25 +369,35 @@ class WebhookAdapter(BasePlatformAdapter):
         try:
             row = await asyncio.to_thread(retained_session_target, self, chat_id)
         except Exception:
-            logger.warning("[webhook] delivery_target unreadable for %s; using the route deliver", chat_id,
-                           exc_info=True)
+            logger.warning("[webhook] delivery_target unreadable for %s; refusing delivery", chat_id, exc_info=True)
+            return SendResult(success=False, error="Webhook delivery target unavailable")
+        target = (row or {}).get("delivery_target")
+        if target is None:
+            if delivery.get("delivery_mode") == "internal_turn":
+                return SendResult(success=False, error="Webhook internal target unavailable")
             return None
-        target = (row or {}).get("delivery_target") or {}
+        try:
+            target = targets.route_delivery_target({"delivery_target": target})
+        except ValueError:
+            return SendResult(success=False, error="Webhook delivery target malformed")
+        if not isinstance(target, dict):
+            return SendResult(success=False, error="Webhook delivery target malformed")
         kind = target.get("kind")
         if kind == "platform":
             return await self._deliver_to(targets.platform_destination(target, delivery.get("profile")), chat_id, content)
         if kind == "session":
+            if not row:
+                return SendResult(success=False, error="Webhook session target has no admitted owner")
+            row = {**row, "delivery_target": target}
             try:
                 receipt = await asyncio.to_thread(targets.deliver_to_session_target, row, content,
                                                   route=_WebhookDeliveryIdentity.route_from_chat_id(chat_id))
-            except Exception:  # health: allow BLE001 -- the output is already in the session; never re-route it
+            except Exception:  # health: allow BLE001 -- never re-route private worker output
                 logger.warning("[webhook] delivery_target dispatch failed for %s", chat_id, exc_info=True)
                 receipt = None
-            if receipt is not None and receipt.delivered:
-                return SendResult(success=True)
-            logger.info("[webhook] Response for %s kept in its session (delivery_target session not delivered: "
-                        "%s): %s", chat_id, getattr(receipt, "reason", "error"), content[:200])
-            return SendResult(success=True)
+            return SendResult(success=bool(receipt is not None and receipt.delivered),
+                              error=None if receipt is not None and receipt.delivered else
+                              "Webhook session target not delivered")
         if kind == "none":
             logger.info("[webhook] Response for %s kept in its session (delivery_target none): %s", chat_id,
                         content[:200])
@@ -855,14 +887,27 @@ class WebhookAdapter(BasePlatformAdapter):
                            else _WebhookDeliveryIdentity.from_parts(profile, route_name, delivery_id).session_chat_id)
         # ``profile`` rides along so the reply leg (``send`` → ``_deliver_cross_platform``) egresses through
         # THIS profile's adapter, home channel and secrets — not the first profile that has the platform.
-        self._record_delivery_info(session_chat_id, delivery_id, now, {
+        from gateway.platforms.webhook_session_targets import route_delivery_target
+        from gateway.platforms.webhook_route_runtime import configured_route
+        rendered = {**configured_route(route_config, self.config.extra), "deliver_extra": self._render_delivery_extra(
+            route_config.get("deliver_extra", {}), payload)}
+        try:
+            target = route_delivery_target(rendered)
+        except ValueError:
+            logger.exception("[webhook] Invalid completion target for %s", delivery_id)
+            return None
+        info = {
             "deliver": route_config.get("deliver", "log"), "profile": profile,
-            "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload),
-            "route": route_name,
-            "mirror": route_config.get("mirror_to_session") is True})
+            "deliver_extra": rendered["deliver_extra"],
+            "route": route_name, "mirror": route_config.get("mirror_to_session") is True}
+        if route_config.get("delivery_mode") == "internal_turn":
+            info.update(delivery_mode="internal_turn", route_name=route_name, delivery_id=delivery_id)
+        if target is not None:
+            info["delivery_target"] = target
+        self._record_delivery_info(session_chat_id, delivery_id, now, info)
         source = self._admission_source(route_name, profile, delivery_id, chat_id=session_chat_id)
         event = MessageEvent(text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload,
-                             message_id=delivery_id, timestamp=datetime.fromtimestamp(0, UTC))
+                             message_id=delivery_id, timestamp=datetime.fromtimestamp(0, UTC), reply_expected=False)
         from gateway.platforms.webhook_ingress import admit_producer
         try:
             receipt = await admit_producer(self, event)
@@ -875,7 +920,7 @@ class WebhookAdapter(BasePlatformAdapter):
             # A post_gateway_admission plugin consumed the delivery: nothing was committed, so the
             # reply goes to the destination this request just validated, not a retained row.
             reply = getattr(event, '_consumer_reply', None)
-            if reply:
+            if reply and target is None:
                 from gateway.platforms.webhook_delivery import snapshot_destination
                 await self._deliver_to(snapshot_destination(self, self.delivery_info_for(session_chat_id, delivery_id)),
                                        session_chat_id, reply)
@@ -885,7 +930,7 @@ class WebhookAdapter(BasePlatformAdapter):
         authority = authority_for_profile_id(runner, receipt.ref.profile_id) or active_authority(runner)
         from gateway.platforms.webhook_session_keys import stamp_admitted_session
         await asyncio.to_thread(stamp_admitted_session, authority, receipt, route_name=route_name,
-                                route_config=route_config, key=session_key)
+                                route_config=rendered, key=session_key)
         if session_key is None:  # a keyed conversation stays open for the next delivery that resumes it
             task = asyncio.create_task(self._finalize_delivery(event, authority, receipt))
             self._background_tasks.add(task)

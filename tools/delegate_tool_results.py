@@ -17,7 +17,13 @@ logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the 
 def _child_session_metadata(child: Any) -> dict[str, Any]:
     """The retained child's stable session identity for its result entry (empty when not retained)."""
     session_id = getattr(child, "_delegate_session_id", None)
-    return {"session_id": session_id} if isinstance(session_id, str) else {}
+    result: dict[str, Any] = {"session_id": session_id} if isinstance(session_id, str) else {}
+    title = getattr(child, "_approval_title", None)
+    if isinstance(title, str) and title.strip():
+        result["title"] = title
+    if getattr(child, "_delegate_resumed", False) is True:
+        result["resumed"] = True
+    return result
 
 def _stringify_tool_content(content: Any) -> str:
     """Stable text for tool-result content. Some OpenAI-compatible paths return

@@ -1,5 +1,4 @@
-"""A producer wake enters its route as the committed human turn, whatever the route's stored origin
-says about labels and speakers, from a subagent's process, and over the relay."""
+"""A producer wake preserves its committed route. Delegate processes require explicit resume or handoff."""
 import asyncio
 
 import pytest
@@ -50,7 +49,7 @@ async def test_wake_refuses_another_user_on_a_per_user_route(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('compressed', [False, True])
-async def test_subagent_process_notice_enters_its_parent_route_but_not_after_reset(tmp_path, monkeypatch, compressed):
+async def test_subagent_process_notice_never_enters_its_parent_route(tmp_path, monkeypatch, compressed):
     runner, _, authority, source = await _discord_owner(tmp_path, monkeypatch)
     root = (await _admit_human(runner, authority, MessageEvent(text='human', source=source, message_id='human'))).ref.session_id
     key = runner.session_store._generate_session_key(source)
@@ -67,14 +66,16 @@ async def test_subagent_process_notice_enters_its_parent_route_but_not_after_res
         assert runner.session_store.advance_compression_session(key, root, root + '-tip') is not None
     event = {'type': 'completion', 'session_id': 'proc-worker', 'started_at': 1,
              'session_key': key, 'parent_session_id': nested}
-    assert await runner._inject_watch_notification('worker-finished', event) is True
+    # Dev2 parity deliberately supersedes upstream parent-wake policy: process ownership is not
+    # delegation-result ownership. Poll in the child or explicitly hand the process to the parent.
+    assert await runner._inject_watch_notification('worker-finished', event) is None
     rows = list_session_admissions(authority.db, session_id=root, pending_only=False)
-    assert len(rows) == 2 and 'worker-finished' in rows[-1]['payload']['text']
+    assert len(rows) == 1
     runner.session_store.reset_session(key)
     # A notice pinned to a session /new closed is never admitted to the fresh one: dropped, or requeued
     # while the completion pre-flight reads a reset compression tip as uncertain.
     stale = dict(event, session_id='proc-old-worker')
-    assert await runner._inject_watch_notification('old-worker', stale) is (False if compressed else None)
+    assert await runner._inject_watch_notification('old-worker', stale) is None
     await asyncio.sleep(0)
 
 
@@ -158,14 +159,16 @@ async def test_notice_pinned_before_compression_reaches_the_resumed_delegate_cha
 
 
 @pytest.mark.asyncio
-async def test_process_notice_from_a_subagent_of_a_resumed_delegate_reaches_the_chat(tmp_path, monkeypatch):
+async def test_process_notice_from_a_subagent_of_a_resumed_delegate_requires_handoff(tmp_path, monkeypatch):
     runner, authority, _, key, child = await _resumed_delegate_route(tmp_path, monkeypatch)
     nested = child + '-nested'  # delegate_task inside the resumed conversation
     authority.db.create_session(nested, source='subagent', parent_session_id=child, model_config={'_delegate_from': child})
     event = {'type': 'completion', 'session_id': 'proc-nested', 'started_at': 1, 'session_key': key,
              'parent_session_id': nested}
-    assert await runner._inject_watch_notification('nested done', event) is True
-    assert 'nested done' in list_session_admissions(authority.db, session_id=child)[-1]['payload']['text']
+    # Explicitly resuming this conversation did not resume its independently-owned nested worker.
+    before = list_session_admissions(authority.db, session_id=child)
+    assert await runner._inject_watch_notification('nested done', event) is None
+    assert list_session_admissions(authority.db, session_id=child) == before
     authority.db.close()
     await asyncio.sleep(0)
 

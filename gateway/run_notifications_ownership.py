@@ -10,6 +10,7 @@ that owner is proven.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import sqlite3
@@ -29,8 +30,111 @@ logger = logging.getLogger("gateway.run")
 _MAX_DELEGATE_PROVENANCE_HOPS = 16
 
 
+async def _notification_store_read(store, method, *args):
+    """Notification preflight also serves inline SessionDB/SessionStore callers."""
+    result = getattr(store, method)(*args)
+    return await result if inspect.isawaitable(result) else result
+
+
+def _is_delegate_notification_target(row):
+    if row.get("lineage_kind") == "delegate" or "subagent" in (row.get("source"), row.get("created_source")):
+        return True
+    config = row.get("model_config")
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except ValueError:
+            return False
+    return isinstance(config, dict) and bool(config.get("_delegate_from"))
+
+
+async def _same_notification_lineage(db, target, current):
+    if target == current:
+        return True
+    target_tip = await _notification_store_read(db, "get_compression_tip", target)
+    current_tip = await _notification_store_read(db, "get_compression_tip", current)
+    return bool(target_tip and target_tip == current_tip)
+
+
+def legacy_notification_route_mismatch(adapter, event):
+    """The adapter has already canonicalized this rejected event; an unequal key cannot heal on retry."""
+    expected = str((event.metadata or {}).get("gateway_session_key") or "").strip()
+    derive = getattr(adapter, "_event_session_key", None)
+    actual = derive(event) if expected and callable(derive) else None
+    return isinstance(actual, str) and actual != expected
+
+
 class GatewayNotificationOwnershipMixin:
     """Ownership proof and route resolution for pinned async and process completions."""
+
+    @staticmethod
+    def _build_process_completion_event(watcher: dict, session, session_id: str) -> dict:
+        """Build a redacted watcher completion, preferring its current handoff owner over stale registration."""
+        from gateway.run import _redact_gateway_user_facing_secrets
+        from gateway.run_notifications import _WATCHER_ROUTE_FIELDS
+        from agent.redact import redact_terminal_output
+        from tools.ansi_strip import strip_ansi
+        from tools.process_registry import transform_process_output
+        _command = getattr(session, "command", "") or ""
+        _raw = strip_ansi(session.output_buffer) if session.output_buffer else ""
+        _raw = transform_process_output(_raw, command=_command, returncode=session.exit_code,
+                                        task_id=getattr(session, "task_id", "") or "") if _raw else _raw
+        _raw = redact_terminal_output(_raw, _command)
+        _LIMIT = 2000
+        # Snap the bounded output tail to a line boundary (#23284).
+        if len(_raw) > _LIMIT:
+            _tail = _raw[-_LIMIT:]
+            _nl = _tail.find("\n")
+            _tail = _tail[_nl + 1:] if _nl != -1 else _tail
+            _out = f"[… output truncated — showing last {len(_tail)} chars]\n{_tail}"
+        else:
+            _out = _raw
+        return {
+            "type": "completion", "session_id": session_id,
+            **{k: watcher.get(k, "") for k in _WATCHER_ROUTE_FIELDS},
+            "owner_task_id": getattr(session, "owner_task_id", "") or "",
+            "task_id": getattr(session, "task_id", "") or "",
+            "message_id": str(watcher.get("message_id") or "").strip() or None,
+            "started_at": getattr(session, "started_at", None),
+            "command": _redact_gateway_user_facing_secrets(_command), "exit_code": session.exit_code,
+            "completion_reason": getattr(session, "completion_reason", "exited"),
+            "termination_source": getattr(session, "termination_source", ""),
+            "output": _redact_gateway_user_facing_secrets(_out),
+            "parent_session_id": getattr(session, "parent_session_id", "") or watcher.get("parent_session_id") or "",
+        }
+
+    async def _process_completion_target_verdict(self, evt: dict) -> str:
+        """Only delegate-owned processes need pre-adapter refusal; ordinary sessions keep authority admission.
+
+        A child's processes are polled or explicitly handed off, never inferred as parent work. A chat
+        explicitly resumed on that child keeps its own notices, including compression continuations.
+        """
+        from gateway.run import _USER_BOUNDARY_END_REASONS
+        db = getattr(self, "_session_db", None)
+        target = str(evt.get("parent_session_id") or "")
+        if db is None or not target:
+            return "deliver"
+        try:
+            row = await _notification_store_read(db, "get_session", target)
+            if row is None or not _is_delegate_notification_target(row):
+                return "deliver"
+            if row.get("ended_at") and row.get("end_reason") in _USER_BOUNDARY_END_REASONS:
+                return "terminal"
+            key = str(evt.get("session_key") or "")
+            store = getattr(self, "session_store", None)
+            if store is None or not key:
+                return "terminal"
+            entry = await _notification_store_read(store, "lookup_by_session_key", key)
+            if entry is None or not await _same_notification_lineage(db, target, entry.session_id):
+                return "terminal"
+            if row.get("end_reason") == "compression":
+                tip = await _notification_store_read(db, "get_compression_tip", target)
+                if not tip or tip == target:
+                    return "retry"
+            return "deliver"
+        except Exception:
+            logger.debug("Delegate process notification ownership unavailable", exc_info=True)
+            return "retry"
 
     async def _resolve_compression_lineage_target(
         self, session_db: Any, session_entry: Optional[SessionEntry], pinned_session_id: str,
@@ -119,6 +223,13 @@ class GatewayNotificationOwnershipMixin:
                 return "terminal", session_id, row
             if session_id == current_session_id:
                 return "deliver", session_id, row
+            if current_session_id and _is_delegate_notification_target(row):
+                try:
+                    if await _same_notification_lineage(session_db, session_id, current_session_id):
+                        return "deliver", session_id, row
+                except Exception:
+                    logger.debug("Resumed delegate notification lineage unavailable", exc_info=True)
+                    return "retry", session_id, None
             # A hop compressed into the current route is its conversation (a resumed delegate run), as
             # admission rules: climbing past it would reach the parent the run was spawned from.
             if current_session_id and row.get("end_reason") == "compression":

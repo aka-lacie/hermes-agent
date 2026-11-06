@@ -279,6 +279,15 @@ export const en: Translations = {
   },
 
   cron: {
+    jobTypeLabel: "Job type",
+    jobTypes: { agent: "Agent task", script: "Script only", reminder: "Reminder",
+      help: "Agent runs an isolated task; script delivers stdout; reminder emits your text without a detached LLM." },
+    reminderText: "Reminder text (literal)",
+    deliveryBehavior: { label: "Delivery behavior", direct: "Deliver directly", internalTurn: "Wake destination session",
+      help: "Internal delivery admits the result into one conversation for a contextual turn. Unresolved targets fail closed. A canonical target below takes precedence over the legacy destination.", badge: "Internal turn" },
+    canonicalTargetLabel: "Canonical delivery target (JSON, optional)",
+    canonicalTargetHelp: "For example: {\"kind\":\"session\",\"selector\":\"discord:dm:42\",\"attach\":false,\"wake_policy\":\"immediate\"}. Blank derives the target from the destination; session selectors follow conversation rollovers.",
+    attachSessionLabel: "Attach the cron run to its destination session",
     loadWhat: "cron jobs",
     // Script-only mode on, Script field empty. `no_agent` is the config key, not a term the
     // user has seen; name the field they must fill instead.
