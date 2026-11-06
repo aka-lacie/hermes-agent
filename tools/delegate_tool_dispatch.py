@@ -55,6 +55,9 @@ class _Batch:
     # Result entries of tasks their backend refused (no child): joined into a sync result, listed in a background
     # call's dispatch payload. Units carved for async dispatch never carry them.
     refused: list = field(default_factory=list)
+    # A silent peer-only turn (tools.delegate_sessions): run here, synchronously, cut from the parent's
+    # interrupts; nobody waits on it and it is never an async unit (no completion is queued for it).
+    detached: bool = False
 
     def owner_kwargs(self) -> dict[str, Any]:
         """Steer/stop authority of the originating session, passed to every child run."""
@@ -571,6 +574,10 @@ def _run_batch(batch: _Batch, background: bool) -> str:
         begin_delegation_run(
             batch.task_list, subagents=len(batch.children), depth=getattr(batch.parent_agent, "_delegate_depth", 0) + 1,
         )
+        if batch.detached:
+            for _, _, child in batch.children:
+                _detach_child(batch.parent_agent, child)
+            return json.dumps(_execute_and_aggregate(batch, honor_parent_interrupt=False), ensure_ascii=False)
         if background and not session_joins_delegation(batch.parent_agent):
             return _dispatch_background(batch)
         return json.dumps(_execute_and_aggregate(batch), ensure_ascii=False)

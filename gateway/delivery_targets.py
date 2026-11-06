@@ -195,6 +195,10 @@ class DeliveryEvent:
     source_event_id: Optional[str] = None
     fold_key: Optional[str] = None
     legacy_event: Optional[dict] = None  # the completion-queue shape, for in-process consumers
+    # A peer admission's hop in its chain (plan §4.4): stored on the admission, never rendered.
+    peer_hop: Optional[int] = None
+    # The admission intent a session FIFO records (``queue`` / ``steer``); never part of the payload.
+    intent: str = "queue"
 
     def __post_init__(self):
         if self.sender_kind not in EVENT_SENDER_KINDS:
@@ -212,7 +216,8 @@ class DeliveryEvent:
         return {"text": self.text or "", EVENT_PAYLOAD_KEY: {
             "kind": self.kind, "text": self.text or "", "meta": dict(self.meta), "sender_kind": self.sender_kind,
             "sender_id": self.sender_id, "sent_at": self.sent_at, "source_event_id": self.source_event_id,
-            **({"fold_key": self.fold_key} if self.fold_key else {})}}
+            **({"fold_key": self.fold_key} if self.fold_key else {}),
+            **({"peer_hop": int(self.peer_hop)} if self.peer_hop is not None else {})}}
 
 
 def event_from_payload(payload: Mapping[str, Any]) -> Optional[dict]:
@@ -375,15 +380,18 @@ def _fifo_accept(db, row, target) -> bool:
 
 
 def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optional[str] = None,
-                request_id: Optional[str] = None) -> DeliveryReceipt:
+                request_id: Optional[str] = None, intent: Optional[str] = None) -> DeliveryReceipt:
     """Admit *event* into *session_id*'s FIFO as one queued turn. A batch sibling (same ``fold_key`` and
     sender kind) still queued at the FIFO tail is folded: the waiting row is retired in the same
-    transaction that admits the merged one, so the parent runs ONE turn for the whole batch."""
+    transaction that admits the merged one, so the parent runs ONE turn for the whole batch. ``intent``
+    is the admission's (``queue`` / ``steer``); a steer-intent event is still a queued turn here: a typed
+    event is never handed into a running turn as steer text."""
     from hermes_state_runtime import (
         RuntimeStoreError, admit_session_input, list_session_admissions, replacement_binding, retire_replaced_input,
     )
     from tools.delegate_session_store import runtime_epoch
     epoch = runtime_epoch(db)
+    intent = intent or event.intent
     principal = f"{event.sender_kind}:{event.sender_id}"
     request = request_id or event.source_event_id or uuid.uuid4().hex
     payload = event.payload()
@@ -407,13 +415,14 @@ def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optio
         guard = lambda conn: retire_replaced_input(conn, replaced["admission_id"], binding)
     try:
         row = admit_session_input(db, epoch=epoch, principal_id=principal, session_id=session_id, request_id=request,
-                                  payload=payload, _authorize_write=guard, wake_policy=wake_policy)
+                                  payload=payload, _authorize_write=guard, wake_policy=wake_policy,
+                                  intent=intent if intent in ("queue", "steer") else "queue")
     except RuntimeStoreError as exc:
         if replaced is None or exc.reason != "admission_started":
             raise
         # The waiting sibling was claimed first: this completion queues alone.
         return admit_event(db, session_id, DeliveryEvent(**{**event.__dict__, "fold_key": None}),
-                           wake_policy=wake_policy, request_id=request_id)
+                           wake_policy=wake_policy, request_id=request_id, intent=intent)
     wake(db, session_id)
     return DeliveryReceipt(KIND_SESSION, True, "session_fifo", session_id, row["admission_id"], replaced is not None)
 

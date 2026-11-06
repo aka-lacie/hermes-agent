@@ -83,7 +83,7 @@ def test_assignments_are_admissions_on_the_child_fifo_and_release_settles_exactl
     assert closed.value.code == "closed"
     assert store.list("parent") == []
     assert store.list("parent", query="Review")[0]["status"] == "closed"
-    assert store.observe("parent", "child")["messages"][-1]["content"] == "Result one"
+    assert store.observe("parent", "child")["messages"][-1]["text"] == "Result one"
 
 
 def test_a_resume_while_running_waits_in_the_fifo_instead_of_being_refused(state):
@@ -431,7 +431,7 @@ def test_grandchildren_roll_up_and_observe_lists_sub_children(state):
     store.close("lead", "worker-2")
     listed = store.list("parent")
     assert [r["session_id"] for r in listed] == ["lead"]  # d=2 never flattens
-    assert listed[0]["children"]["active"] == 1 and listed[0]["children"]["total"] == 3
+    assert listed[0]["running_children"] == 1 and listed[0]["children_total"] == 3  # integers only
     observed = store.observe("parent", "lead")
     assert {c["session_id"]: c["status"] for c in observed["children"]} == {
         "worker-0": "running", "worker-1": "idle", "worker-2": "closed"}
@@ -527,6 +527,11 @@ def test_gateway_types_a_delivered_completion_with_the_childs_provenance():
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
+    yield from real_children(tmp_path, monkeypatch)
+
+
+def real_children(tmp_path, monkeypatch):
+    """``(make_parent, db, observed, children)``: real AIAgent parents/children, only the model call replaced."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
@@ -647,11 +652,12 @@ def test_sessions_api_admits_typed_events_within_the_acl_only(state):
     child(db, store, "b")
     api = SessionsAPI(db)
     receipt = api.admit("parent", "a", "Look at module X", sender_kind="parent", kind="parent_message")
-    assert receipt.delivered
+    assert receipt["delivered"]
     event = event_from_payload(list_session_admissions(db, session_id="a")[0]["payload"])
     assert (event["sender_kind"], event["sender_id"], event["kind"]) == ("parent", "parent", "parent_message")
-    with pytest.raises(LookupError):  # siblings are not reachable under the default ACL
-        api.admit("a", "b", "hi")
+    with pytest.raises(LookupError):  # a sibling is not reachable as anything but a peer
+        api.admit("a", "b", "hi", sender_kind="parent", kind="parent_message")
+    assert api.admit("a", "b", "hi")["peer_hop"] == 1  # peers: the sibling ACL (Phase 3C)
     assert [r["session_id"] for r in api.list("parent")] and api.observe("parent", "a")["session"]["session_id"] == "a"
 
 

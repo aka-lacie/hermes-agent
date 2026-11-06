@@ -63,11 +63,12 @@ _ROLES = frozenset({"leaf", "orchestrator"})
 _SESSION_ACTIONS = frozenset({"list", "observe", "resume", "close"})
 
 
-def _native_list(parent_agent, *, query=None, limit=20, scope=None) -> str:
+def _native_list(parent_agent, *, query=None, limit=None, scope=None) -> str:
     """``action='list'`` under Freya's rule (agent/session_directory.py), with live runs overlaid: a running
     child carries its live ``subagent_id`` for steer/stop. Without a persisted session store only the live
-    registry exists, as before."""
+    registry exists, as before. Rows are the compact ``agent.session_views.list_row`` shape (flat d=1)."""
     import json as _json
+    from agent.session_views import clip_head
     from tools.delegate_tool_registry import _list_payload
     live = _list_payload(parent_agent)
     db = getattr(parent_agent, "_session_db", None)
@@ -75,7 +76,7 @@ def _native_list(parent_agent, *, query=None, limit=20, scope=None) -> str:
     if not _real_store(getattr(db, "_db", db)) or not getattr(parent_agent, "session_id", None):
         return _json.dumps(live, ensure_ascii=False)
     from tools.delegate_sessions import control
-    listed = _json.loads(control("list", parent_agent, query=query, limit=limit, scope=scope or "children"))
+    listed = _json.loads(control("list", parent_agent, query=query, limit=limit or 20, scope=scope or "children"))
     if listed.get("error"):
         return _json.dumps(live, ensure_ascii=False)
     by_session = {row["session_id"]: row for row in listed["subagents"]}
@@ -83,10 +84,15 @@ def _native_list(parent_agent, *, query=None, limit=20, scope=None) -> str:
     for entry in live["subagents"]:
         row = by_session.get(entry.get("session_id"))
         if row is None:
-            extra.append(entry)
+            # A live run with no list row (a non-retained child): the same compact fields, never its brief.
+            extra.append({key: value for key, value in (
+                ("subagent_id", entry.get("subagent_id")), ("session_id", entry.get("session_id")),
+                ("title", clip_head(entry.get("goal"), 60)), ("status", entry.get("status")),
+                ("model", entry.get("model")), ("running_seconds", entry.get("running_seconds"))) if value is not None})
             continue
-        row.update(status="running", subagent_id=entry.get("subagent_id"), accepting_steer=entry.get("accepting_steer"),
-                   live_transcript=entry.get("live_transcript"), running_seconds=entry.get("running_seconds"))
+        row.update(status="running", subagent_id=entry.get("subagent_id"), running_seconds=entry.get("running_seconds"))
+        if entry.get("accepting_steer") is False:
+            row["accepting_steer"] = False
     listed["subagents"] = extra + listed["subagents"]
     listed["count"] = len(listed["subagents"])
     if not listed["subagents"]:
@@ -644,7 +650,7 @@ def delegate_task(
     subagent_id: Optional[str] = None, message: Optional[str] = None, parent_agent=None,
     credentials_cfg: Optional[dict[str, Any]] = None,
     session_id: Optional[str] = None, model: Optional[str] = None, query: Optional[str] = None,
-    limit: int = 20, _retain_sessions: bool = False, _extension_request: Optional[dict] = None,
+    limit: Optional[int] = None, _retain_sessions: bool = False, _extension_request: Optional[dict] = None,
     scope: Optional[str] = None,
 ) -> str:
     """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control running ones. ``action``
@@ -734,11 +740,12 @@ def delegate_task(
 def launch_children(
     task_list: list[dict[str, Any]], routes: list[Any], *, parent_agent, background: bool, context: Optional[str],
     top_role: str, task_schemas: list, task_images: Optional[list], max_iterations: int, max_children: int,
-    resume: Optional[dict] = None, retain_sessions: bool = False,
+    resume: Optional[dict] = None, retain_sessions: bool = False, detached: bool = False,
 ) -> str:
     """Build and run children on already-resolved routes (a spawn's, or a resumed session's stored route).
     ``resume`` is the reservation of a claimed child admission (``tools.delegate_sessions``), never a
-    model-facing argument."""
+    model-facing argument. ``detached`` runs synchronously on the calling thread, cut from the parent's
+    interrupts (a silent peer-only turn: nobody waits for it and no completion is emitted)."""
     # Fail closed per task: a task its backend cannot route is refused alone (its entry carries the error); the call
     # is a tool error only when no task can run.
     runnable = [r for r in routes if not r.error]
@@ -787,7 +794,7 @@ def launch_children(
     batch = _Batch(
         task_list, children, parent_agent, creds, context, top_role, max_children,
         live_deleg_id, live_writers, live_paths, *origin, overall_start,
-        live_home=_live_home, refused=refused,
+        live_home=_live_home, refused=refused, detached=detached,
     )
     return _run_batch(batch, background)
 
@@ -810,7 +817,8 @@ def resumed_route(parent_agent, record: dict, model: Optional[str] = None):
     return TaskRoute(_resolve_delegation_credentials(block, parent_agent), block, block.get("reasoning_effort"))
 
 
-def launch_resumed(parent_agent, record: dict, claim: dict, reservation: dict, *, background: bool) -> str:
+def launch_resumed(parent_agent, record: dict, claim: dict, reservation: dict, *, background: bool,
+                   detached: bool = False) -> str:
     """Run one claimed admission of a retained child (resume, queued steer, delivered sub-child result) on its
     stored route. The reservation transfers the claim to the built child, whose teardown settles it."""
     payload = claim.get("payload") or {}
@@ -821,7 +829,7 @@ def launch_resumed(parent_agent, record: dict, claim: dict, reservation: dict, *
         [task], [route], parent_agent=parent_agent, background=background, context=task["context"],
         top_role="leaf", task_schemas=[None], task_images=None,
         max_iterations=cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS), max_children=_get_max_concurrent_children(),
-        resume=reservation,
+        resume=reservation, detached=detached,
     )
 
 
@@ -1017,13 +1025,17 @@ DELEGATE_TASK_SCHEMA = {
                 "For action='steer': the course correction, appended to "
                 "the child's next tool result mid-run. Be directive and specific.",
             ),
+            "limit": _p("integer", "For action='list': maximum rows (default 20). For action='observe': the newest N "
+                        "messages (default 6, max 20).", minimum=1, maximum=100),
+            "query": _p("string", "For action='list': search titles, assignments and transcripts, closed children "
+                        "included."),
         },
         "required": [],
     },
 }
 
 
-_LIVE_CONTROL_PARAMS = frozenset({"action", "subagent_id", "message", "session_id", "scope"})
+_LIVE_CONTROL_PARAMS = frozenset({"action", "subagent_id", "message", "session_id", "scope", "limit", "query"})
 
 
 def oneshot_delegate_function(function: dict) -> dict:

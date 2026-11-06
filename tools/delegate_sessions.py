@@ -14,6 +14,14 @@
 Resume never re-enters ``delegate_task``: the run is built by ``tools.delegate_tool.launch_children`` with
 the route re-resolved from ``sessions.route`` (``agent.session_routes.resolve_route``), so the fallback
 chain and the route's reasoning level survive.
+
+**Peer-only wakes are silent** (plan §4.4). A turn whose claimed admissions are all ``sender_kind="peer"``
+events (a sibling's message through ``ctx.sessions.admit``; no parent assignment, steer or other event in
+the claim) runs detached and emits NO completion: nothing is dispatched to ``delivery_target`` and no async
+completion is queued. The child tells its parent only if it chooses to. A claim mixing peer events with a
+parent assignment (held peer notices riding a parent turn) completes to the parent as usual. A parent steer
+arriving while a silent peer turn runs is not handed into it: it runs as the child's next turn, which
+completes normally, so a turn is always either peer-only (silent) or the parent's.
 """
 
 from __future__ import annotations
@@ -38,6 +46,12 @@ logger = logging.getLogger(__name__)
 _pending_launch: dict[str, tuple[Any, contextvars.Context]] = {}
 _pending_lock = threading.Lock()
 _draining: set[tuple[str, str]] = set()
+# A wake that arrived while that session's drain was already running: the drain re-runs once it exits, so
+# an admission landing between its last head check and its exit is never stranded (a lost wakeup).
+_redrain: dict[tuple[str, str], Any] = {}
+# Live parent agents of retained children in this process, by the parent's session id: who can build and run
+# a child woken by a peer admission (the drain needs the parent's tools, identity and routing).
+_live_parents: weakref.WeakValueDictionary[str, Any] = weakref.WeakValueDictionary()
 
 
 def _real_store(db) -> bool:
@@ -74,6 +88,58 @@ def _launch_for(admission_id: str):
     return found[0](), found[1]
 
 
+def note_parent(parent) -> None:
+    """Remember *parent* as the live owner of its retained children (weakly)."""
+    sid = getattr(parent, "session_id", None)
+    if not sid:
+        return
+    try:
+        with _pending_lock:
+            _live_parents[str(sid)] = parent
+    except TypeError:  # a non-weakref-able test double
+        pass
+
+
+def wake_delegate(db, session_id: str) -> bool:
+    """Schedule the drain of retained child *session_id* (just admitted a peer message) when its parent agent
+    lives in this process. Otherwise the entry waits in the FIFO for the parent's next resume (never run
+    without the parent's tools and identity)."""
+    store_db = getattr(db, "_db", db)
+    row = store_db._read_one("SELECT parent_session_id FROM sessions WHERE id = ?", (session_id,))
+    if row is None or not row["parent_session_id"]:
+        return False
+    from agent import session_directory as directory
+    with store_db._read_ctx() as conn:
+        parents = directory.lineage(store_db, conn, row["parent_session_id"])
+    with _pending_lock:
+        parent = next((_live_parents.get(pid) for pid in reversed(parents) if _live_parents.get(pid) is not None), None)
+    if parent is None:
+        logger.info("delegate %s: peer message queued; no live parent in this process to wake it", session_id)
+        return False
+    schedule_drain(Path(store_db.db_path).resolve(), session_id, parent)
+    return True
+
+
+def claim_sender_kinds(claim: Optional[dict]) -> list[str]:
+    """The ``sender_kind`` of every input a claim carries (its head and the held notices handed to it); a
+    plain assignment (no typed event) counts as its payload's sender (``parent``)."""
+    from gateway.delivery_targets import event_events, held_events
+    if not claim:
+        return []
+    payload = claim.get("payload") or {}
+    events = event_events(payload)
+    kinds = [str(e.get("sender_kind") or "") for e in events] if events else [str(payload.get("sender_kind") or "parent")]
+    for row in claim.get("held") or []:
+        kinds.extend(str(e.get("sender_kind") or "") for e in held_events(row.get("payload") or {}))
+    return kinds
+
+
+def is_peer_only(claim: Optional[dict]) -> bool:
+    """True when everything *claim* carries is a peer message (the runner's silence rule, from structure only)."""
+    kinds = claim_sender_kinds(claim)
+    return bool(kinds) and all(kind == "peer" for kind in kinds)
+
+
 # ── spawn / teardown hooks called by tools.delegate_tool ─────────────────────
 
 def bind_child(parent, child, task, resume=None, *, extension, options, routing_cfg, retain=False, task_index=0):
@@ -87,6 +153,7 @@ def bind_child(parent, child, task, resume=None, *, extension, options, routing_
         return
     if getattr(child, "_delegate_profile_home", None) is not None:
         raise ValueError("Retained delegation cannot yet resume a profile route; choose a model/provider route.")
+    note_parent(parent)
     child._delegate_review_skills = options.get("review_skills", False)
     child._delegate_assignment_formatter = extension.format_assignment if extension is not None else None
     from tools.delegate_session_store import DelegateSessionStore
@@ -249,6 +316,7 @@ def schedule_drain(db_path, session_id: str, parent=None) -> bool:
     key = (str(db_path), session_id)
     with _pending_lock:
         if key in _draining:
+            _redrain[key] = parent if parent is not None else _redrain.get(key)
             return False
         _draining.add(key)
     from agent.memory_provider import spawn_context_thread
@@ -287,7 +355,11 @@ def _drain(db_path: str, session_id: str, fallback_parent) -> None:
     finally:
         with _pending_lock:
             _draining.discard((db_path, session_id))
+            again = (db_path, session_id) in _redrain
+            again_parent = _redrain.pop((db_path, session_id), None)
         release(db)
+    if again:
+        schedule_drain(db_path, session_id, again_parent or fallback_parent)
 
 
 def _run_claimed(parent, store, session_id: str, claim: dict) -> None:
@@ -296,6 +368,9 @@ def _run_claimed(parent, store, session_id: str, claim: dict) -> None:
     record = store.get(parent.session_id, session_id) if _reachable(store, parent, session_id) else None
     if record is None:
         store.release(session_id, claim["token"], outcome="interrupted")
+        return
+    if is_peer_only(claim):
+        _run_silent(parent, store, record, claim)
         return
     top_level = getattr(parent, "_delegate_depth", 0) == 0
     reservation = {"record": record, "token": claim["token"], "claim": claim, "transferred": False,
@@ -308,6 +383,21 @@ def _run_claimed(parent, store, session_id: str, claim: dict) -> None:
     if top_level:
         return  # a background unit: its completion travels the async pipeline, stamped with delivery_target
     _deliver_results(store.db, session_id, raw)
+
+
+def _run_silent(parent, store, record: dict, claim: dict, *, drain_owned: bool = True) -> None:
+    """Run a peer-only claim detached and synchronously, with no completion anywhere (plan §4.4)."""
+    from tools.delegate_tool import launch_resumed
+    session_id = record["session_id"]
+    reservation = {"record": record, "token": claim["token"], "claim": claim, "transferred": False,
+                   "drain_owned": drain_owned}
+    try:
+        launch_resumed(parent, record, claim, reservation, background=False, detached=True)
+    finally:
+        if not reservation["transferred"]:
+            store.release(session_id, claim["token"], outcome="failed")
+    logger.info("delegate %s: peer-only turn %s finished; no parent completion (silent wake)",
+                session_id, claim["admission_id"])
 
 
 def _reachable(store, parent, session_id: str) -> bool:
@@ -336,15 +426,17 @@ def _deliver_results(db, session_id: str, raw: str) -> None:
 
 # ── model-facing control ─────────────────────────────────────────────────────
 
-def control(action, parent, *, session_id=None, message=None, model=None, query=None, limit=20, background=False,
+def control(action, parent, *, session_id=None, message=None, model=None, query=None, limit=None, background=False,
             scope="children"):
+    from agent import session_views as views
     from tools.delegate_session_store import DelegateSessionError
     try:
         store = _store(parent)
+        note_parent(parent)
         if action == "list":
-            records = store.list(parent.session_id, query=query, limit=limit, scope=scope or "children")
+            records = store.list(parent.session_id, query=query, limit=limit or 20, scope=scope or "children")
             return json.dumps({"action": action, "scope": scope or "children", "count": len(records),
-                               "subagents": records}, ensure_ascii=False)
+                               "subagents": [views.list_row(r) for r in records]}, ensure_ascii=False)
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError(f"action='{action}' requires session_id from spawn or list.")
         record = store.get(parent.session_id, session_id.strip())
@@ -354,7 +446,7 @@ def control(action, parent, *, session_id=None, message=None, model=None, query=
         if action == "close":
             record = store.close(parent.session_id, session_id)
             _cancel_review(parent, session_id)
-            return json.dumps({"action": action, **record}, ensure_ascii=False)
+            return json.dumps({"action": action, **views.list_row(record)}, ensure_ascii=False)
         if action == "resume":
             return resume(parent, store, record, message, model, background)
         if action == "steer":
@@ -391,6 +483,11 @@ def resume(parent, store, record, message, model, background):
                            "note": "The child is running; this assignment waits in its queue and its result "
                                    "arrives as a normal completion message."}, ensure_ascii=False)
     claim = store.claim(record["session_id"])
+    for _ in range(32):  # ADMISSION_QUEUE_MAX: older peer-only turns ahead of ours run first, silently
+        if not claim or claim["admission_id"] == admission["admission_id"] or not is_peer_only(claim):
+            break
+        _run_silent(parent, store, store.get(parent.session_id, record["session_id"]), claim, drain_owned=True)
+        claim = store.claim(record["session_id"])
     if not claim:
         remember_launch(admission["admission_id"], parent)
         return json.dumps({"action": "resume", "session_id": record["session_id"], "status": "queued",
@@ -445,6 +542,13 @@ def steer(parent, store, record, message):
     sid = record["session_id"]
     admission = store.admit(parent.session_id, sid, message, intent="steer")
     running = store.running_claim(sid)
+    if running is not None and is_peer_only(running):
+        # The child is answering a sibling: a silent turn never takes a parent's input (the steer would get
+        # no completion). It runs as the next turn instead, and that one completes to the parent.
+        remember_launch(admission["admission_id"], parent)
+        return json.dumps({"action": "steer", "session_id": sid, "status": "queued_next_turn",
+                           "admission_id": admission["admission_id"],
+                           "note": "The child is answering a peer message; this steer runs as its next turn."})
     live_id, live = _live_record(parent, sid)
     if running is not None and live is not None:
         epoch = runtime_epoch(store.db)

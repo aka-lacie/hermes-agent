@@ -161,12 +161,11 @@ class DelegateSessionStore:
                 rows = directory.list_sessions(self.db, conn, caller, scope=scope, query=query, limit=limit)
         return [_public(row) for row in rows]
 
-    def observe(self, caller: str, session_id: str, *, limit=20, max_chars=12000) -> dict:
+    def observe(self, caller: str, session_id: str, *, limit=None, max_chars=None) -> dict:
+        """The compact observe view (``agent.session_views``): newest *limit* messages, children roll-up."""
         session_id = self.get(caller, session_id)["session_id"]
         with self.db._read_ctx() as conn:
-            observed = directory.observe(self.db, conn, caller, session_id, limit=limit, max_chars=max_chars)
-        observed["session"] = _public(observed["session"])
-        return observed
+            return directory.observe(self.db, conn, caller, session_id, limit=limit, max_chars=max_chars)
 
     # ── writes ───────────────────────────────────────────────────────────────
     def register(self, parent_session_id: str, session_id: str, *, model, provider, assignment, context="",

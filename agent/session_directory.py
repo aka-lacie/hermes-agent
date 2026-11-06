@@ -14,12 +14,15 @@ caller's default list (``scope="children"``) shows only
 
 Compression continuations (the same conversation), memory/background forks, branches/resets, standalone
 cron/webhook sessions and the caller's own lineage never appear. Grandchildren (d=2) never flatten into the
-top-level list: each row carries a ``children`` rollup (active/total, newest activity), ``observe`` on a
-child lists its sub-children, and ``scope="tree"`` expands the caller's whole subtree.
+top-level list: each row carries only the integers ``running_children`` / ``children_total``, ``observe`` on
+a child carries a compact roll-up of its sub-children (``agent.session_views``), and ``scope="tree"``
+expands the caller's whole subtree.
 
 Policy is pluggable: :func:`set_session_acl` replaces the default ACL (the caller may reach its descendants
-and sessions whose ``delivery_target`` names it). The primitives here take ``caller_session_id`` and apply
-only that ACL plus the store's own safety rules.
+and sessions whose ``delivery_target`` names it); ``set_session_acl(policy, action="peer")`` replaces the
+peer-admission ACL (default: siblings only: same parent conversation, both delegate sessions). The
+primitives here take ``caller_session_id`` and apply only those ACLs plus the store's own safety rules;
+nothing hardcodes ``caller == parent``.
 """
 
 from __future__ import annotations
@@ -300,23 +303,61 @@ def default_session_acl(db, conn, caller_session_id: str, target_row) -> bool:
 _acl: Callable[..., bool] = default_session_acl
 
 
-def set_session_acl(policy: Optional[Callable[..., bool]]) -> Callable[..., bool]:
-    """Install ``policy(db, conn, caller_session_id, target_row) -> bool`` (None restores the default).
-    Returns the previous policy. Worker C's ``ctx.sessions`` widens it (e.g. to siblings) from a plugin."""
-    global _acl
+def _delegate_root(db, conn, session_id: str):
+    """The first segment row of *session_id*'s conversation (a delegate child's own row), or None."""
+    if not session_id:
+        return None
+    return conn.execute("SELECT * FROM sessions WHERE id = ?", (logical_root(db, conn, session_id),)).fetchone()
+
+
+def are_siblings(db, conn, caller_session_id: str, target_row) -> bool:
+    """Both sessions are delegate children of one parent conversation (and not the same conversation)."""
+    if target_row is None or not caller_session_id:
+        return False
+    own = _delegate_root(db, conn, caller_session_id)
+    other = _delegate_root(db, conn, target_row["id"])
+    if own is None or other is None or own["id"] == other["id"]:
+        return False
+    if _effective_kind(own) != "delegate" or _effective_kind(other) != "delegate":
+        return False
+    if not own["parent_session_id"] or not other["parent_session_id"]:
+        return False
+    return other["parent_session_id"] in set(lineage(db, conn, own["parent_session_id"]))
+
+
+def default_peer_acl(db, conn, caller_session_id: str, target_row) -> bool:
+    """Who a ``sender_kind="peer"`` admission may reach by default (plan §4.4): siblings only."""
+    return are_siblings(db, conn, caller_session_id, target_row)
+
+
+_peer_acl: Callable[..., bool] = default_peer_acl
+ACL_ACTIONS = ("observe", "peer")
+
+
+def set_session_acl(policy: Optional[Callable[..., bool]], *, action: str = "observe") -> Callable[..., bool]:
+    """Install ``policy(db, conn, caller_session_id, target_row) -> bool`` (None restores the default) for
+    *action*: ``"observe"`` (observe / list / resume / steer / close reach) or ``"peer"`` (peer admissions).
+    Returns the previous policy. A plugin can widen either (e.g. peers beyond siblings) through it."""
+    global _acl, _peer_acl
+    if action == "peer":
+        previous, _peer_acl = _peer_acl, (policy or default_peer_acl)
+        return previous
+    if action != "observe":
+        raise ValueError(f"action must be one of {', '.join(ACL_ACTIONS)}")
     previous, _acl = _acl, (policy or default_session_acl)
     return previous
 
 
-def get_session_acl() -> Callable[..., bool]:
-    return _acl
+def get_session_acl(action: str = "observe") -> Callable[..., bool]:
+    return _peer_acl if action == "peer" else _acl
 
 
-def allowed(db, conn, caller_session_id: str, target_row) -> bool:
+def allowed(db, conn, caller_session_id: str, target_row, *, action: str = "observe") -> bool:
+    policy = _peer_acl if action == "peer" else _acl
     try:
-        return bool(_acl(db, conn, caller_session_id, target_row))
+        return bool(policy(db, conn, caller_session_id, target_row))
     except Exception:  # health: allow BLE001 -- plugin policy boundary: a broken ACL fails closed, logged
-        logger.warning("session ACL policy %r failed; access denied", _acl, exc_info=True)
+        logger.warning("session ACL policy %r failed; access denied", policy, exc_info=True)
         return False
 
 
@@ -345,21 +386,20 @@ def _is_default_child(row, caller_lineage: set, conn=None, selectors: Optional[_
     return None
 
 
-def _rollup(conn, session_id: str) -> dict:
-    """Grandchild counts of one d=1 row: delegate children of its conversation, active = running/queued."""
+def _rollup(conn, session_id: str) -> tuple[int, int]:
+    """``(running_children, children_total)`` of one d=1 row: delegate children of its conversation
+    (running = a run holds its FIFO or a turn is queued)."""
     ids = chain(conn, session_id)
     rows = conn.execute(f"SELECT * FROM sessions WHERE parent_session_id IN ({_placeholders(ids)})", ids).fetchall()
     active = total = 0
-    newest = None
     for row in rows:
         if _listed_kind(conn, row) != "delegate":
             continue
         total += 1
-        info = record(conn, row)
-        if info["status"] == "running" or info["queued"]:
+        running, queued, _ = _admission_state(conn, row["id"])
+        if (running or queued) and row["status"] != "closed":
             active += 1
-        newest = max(newest or 0.0, info["last_activity_at"])
-    return {"active": active, "total": total, "last_activity_at": newest}
+    return active, total
 
 
 def _matches(conn, info: dict, needle: str) -> bool:
@@ -376,7 +416,7 @@ def _entry(conn, row, how: Optional[str]) -> dict:
     info = record(conn, row)
     if how == "attached" or info["lineage_kind"] not in ("delegate", None):
         info["badge"] = info["lineage_kind"]
-    info["children"] = _rollup(conn, info["session_id"])
+    info["running_children"], info["children_total"] = _rollup(conn, info["session_id"])
     return info
 
 
@@ -468,40 +508,33 @@ def get_record(db, conn, caller_session_id: str, session_id: str) -> dict:
     return record(conn, row)
 
 
-def observe(db, conn, caller_session_id: str, session_id: str, *, limit: int = 20, max_chars: int = 12000) -> dict:
-    """A bounded read of one reachable session: its record, its transcript tail (never reasoning or full tool
-    arguments) and its sub-children (d+1) with status. Observation never counts as activity."""
-    from tools.delegate_observation import message_metadata, preview_text
+def _latest_message(db, conn, session_id: str) -> Optional[dict]:
+    tip = chain(conn, session_id)[-1]
+    rows = db.get_messages(tip, limit=1, latest=True)
+    return rows[-1] if rows else None
+
+
+def observe(db, conn, caller_session_id: str, session_id: str, *, limit: Optional[int] = None,
+            max_chars: Optional[int] = None) -> dict:
+    """A bounded, low-noise read of one reachable session (any descendant of the caller, read-only): its
+    header, the NEWEST *limit* transcript messages in chronological order (each capped, never reasoning,
+    whole tool arguments or raw parts) and a compact roll-up of its own children (d+1). Observation never
+    counts as activity. ``max_chars`` is accepted for compatibility; the per-field caps bound the size."""
+    from agent import session_views as views
     info = get_record(db, conn, caller_session_id, session_id)
-    limit = max(1, min(int(limit or 20), 100))
-    budget = max(1, min(int(max_chars or 12000), 50000))
+    limit = views.observe_limit(limit)
     messages = db.get_messages(info["current_session_id"], include_ancestors=True, limit=limit + 1, latest=True)
-    selected, truncated = [], len(messages) > limit
-    for message in reversed(messages[-limit:]):
-        content = _text_content(message.get("content"))
-        metadata, metadata_truncated = message_metadata(message)
-        metadata_size = len(json.dumps(metadata, ensure_ascii=False)) if metadata else 0
-        if metadata_size > budget:
-            metadata, metadata_size, metadata_truncated = {}, 0, True
-        budget -= metadata_size
-        cap = min(budget, 1500) if message["role"] == "tool" else budget
-        truncated = truncated or metadata_truncated or len(content) > cap
-        content = preview_text(content, cap)
-        selected.append({"role": message["role"], "content": content, "timestamp": message.get("timestamp"), **metadata})
-        budget -= len(content)
-        if budget <= 0:
-            truncated = truncated or len(selected) < len(messages)
-            break
+    truncated = len(messages) > limit
+    tail = [views.message_view(m) for m in messages[-limit:]]
     ids = chain(conn, session_id)
     subs = []
     for row in conn.execute(f"SELECT * FROM sessions WHERE parent_session_id IN ({_placeholders(ids)})", ids).fetchall():
         if _is_default_child(row, set(ids), conn) is None:
             continue
-        sub = record(conn, row)
-        subs.append({key: sub[key] for key in ("session_id", "title", "status", "lineage_kind", "queued",
-                                               "last_activity_at", "model", "depth")})
-    subs.sort(key=lambda r: (r["last_activity_at"], r["session_id"]), reverse=True)
-    return {"session": info, "messages": list(reversed(selected)), "truncated": truncated, "children": subs}
+        subs.append(record(conn, row))
+    rollup = views.children_rollup(subs, lambda sub: views.latest_step(_latest_message(db, conn, sub["session_id"])),
+                                   inherit_model=info.get("model"))
+    return {"session": views.session_brief(info), "messages": tail, "truncated": truncated, **rollup}
 
 
 def _text_content(content: Any) -> str:

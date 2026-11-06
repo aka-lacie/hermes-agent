@@ -16,8 +16,18 @@
         ],
         "type": "string"
       },
+      "limit": {
+        "description": "For action='list': maximum rows (default 20). For action='observe': the newest N messages (default 6, max 20).",
+        "maximum": 100,
+        "minimum": 1,
+        "type": "integer"
+      },
       "message": {
         "description": "For action='steer': the course correction, appended to the child's next tool result mid-run. Be directive and specific.",
+        "type": "string"
+      },
+      "query": {
+        "description": "For action='list': search titles, assignments and transcripts, closed children included.",
         "type": "string"
       },
       "scope": {
