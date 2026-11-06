@@ -143,7 +143,8 @@ any other conversation. Keyed sessions are not closed per delivery (or by startu
 survive a gateway restart. The key is resolved, first answer wins, from the route `script`'s
 `__hermes_session_key__` output (stripped from inbound payloads, so only the gate can set it), the
 route's `session_key` template(s), then the `resolve_session_key` plugin hook; no answer means a
-per-delivery session. The session row records `conversation_key = "webhook:<route>:<key>"`.
+per-delivery session. The keyed session is addressable by the selector `webhook:<route>:<key>`
+(for example in another session's `delivery_target` or `delegate_task(action="observe")`).
 
 ### Payload Filters
 

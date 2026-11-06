@@ -115,8 +115,9 @@ def retained_destination(adapter, chat_id):
 
 
 def retained_session_target(adapter, chat_id):
-    """``sessions.delivery_target`` (plus the row id) of the session *chat_id*'s reply leg runs in,
-    or None (no ledger, no admission, or no target declared)."""
+    """``{id, delivery_target, db, admission_seq}`` of the session *chat_id*'s reply leg runs in (its
+    store and the reply leg's admission, for the dispatcher), or None (no ledger, no admission, or no
+    target declared)."""
     _runner, rows = _signed_rows(adapter, chat_id)
     if not rows or len(rows) != 1:
         return None
@@ -124,4 +125,6 @@ def retained_session_target(adapter, chat_id):
     from hermes_state_session_meta import session_meta
     sid = authority.logical_owner(row['target_session_id'])
     target = session_meta(authority.db, sid).get('delivery_target')
-    return {'id': sid, 'delivery_target': target} if isinstance(target, dict) else None
+    if not isinstance(target, dict):
+        return None
+    return {'id': sid, 'delivery_target': target, 'db': authority.db, 'admission_seq': row['seq']}

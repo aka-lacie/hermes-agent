@@ -339,8 +339,9 @@ class WebhookAdapter(BasePlatformAdapter):
 
     async def _deliver_to_declared_target(self, chat_id: str, content: str, delivery: dict) -> Optional[SendResult]:
         """The session's route-declared ``delivery_target`` (webhook_session_targets), else None: the
-        route's ``deliver`` applies. ``platform`` egresses here; ``session`` goes to the shared
-        dispatcher; ``none`` delivers nothing beyond the session itself."""
+        route's ``deliver`` applies. ``platform`` egresses here; ``session`` goes through the one shared
+        dispatcher (``gateway.delivery_targets.dispatch``, off the loop: its owner sink blocks on it), once;
+        ``none`` delivers nothing beyond the session itself."""
         from gateway.platforms import webhook_session_targets as targets
         from gateway.platforms.webhook_delivery import retained_session_target
         try:
@@ -353,10 +354,20 @@ class WebhookAdapter(BasePlatformAdapter):
         kind = target.get("kind")
         if kind == "platform":
             return await self._deliver_to(targets.platform_destination(target, delivery.get("profile")), chat_id, content)
-        if kind == "session" and await targets.dispatch_session_target(row, content):
+        if kind == "session":
+            try:
+                receipt = await asyncio.to_thread(targets.deliver_to_session_target, row, content,
+                                                  route=_WebhookDeliveryIdentity.route_from_chat_id(chat_id))
+            except Exception:  # health: allow BLE001 -- the output is already in the session; never re-route it
+                logger.warning("[webhook] delivery_target dispatch failed for %s", chat_id, exc_info=True)
+                receipt = None
+            if receipt is not None and receipt.delivered:
+                return SendResult(success=True)
+            logger.info("[webhook] Response for %s kept in its session (delivery_target session not delivered: "
+                        "%s): %s", chat_id, getattr(receipt, "reason", "error"), content[:200])
             return SendResult(success=True)
-        if kind in {"session", "none"}:
-            logger.info("[webhook] Response for %s kept in its session (delivery_target %s): %s", chat_id, kind,
+        if kind == "none":
+            logger.info("[webhook] Response for %s kept in its session (delivery_target none): %s", chat_id,
                         content[:200])
             return SendResult(success=True)
         return None

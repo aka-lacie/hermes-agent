@@ -31,9 +31,10 @@ Every delivery sharing ``(profile, route, key)`` shares one chat id (:func:`keye
 SessionStore routing entry, one ``sessions`` row and one admission FIFO: concurrent deliveries for one
 key serialize on that session's runner, and the conversation compacts like any other. The chat id
 spelling is dev2's (``feat/webhook-session-keys``), so a migrated keyed routing entry keeps resolving.
-The session row records ``conversation_key = "webhook:<route>:<key>"`` (unique per source) and
-``lineage_kind = "webhook"``; keyed sessions are never closed by the one-shot finalizer, the retry
-finalizer or startup recovery.
+The session row records ``lineage_kind = "webhook"``; the keyed conversation is addressable by the logical
+selector ``webhook:<route>:<key>`` (:func:`session_selector`, resolved through the keyed chat id by
+``gateway.session_selectors``: no parallel key column). Keyed sessions are never closed by the one-shot
+finalizer, the retry finalizer or startup recovery.
 """
 from __future__ import annotations
 
@@ -80,8 +81,8 @@ def is_keyed_chat_id(chat_id: Any) -> bool:
     return isinstance(parts, list) and len(parts) == 4 and parts[3] == _KEYED_TAG
 
 
-def conversation_key(route: str, key: str) -> str:
-    """The canonical key stored in ``sessions.conversation_key``: ``webhook:<route>:<key>``."""
+def session_selector(route: str, key: str) -> str:
+    """The logical selector of a keyed conversation: ``webhook:<route>:<key>`` (gateway.session_selectors)."""
     return f"webhook:{route}:{key}"
 
 
@@ -116,7 +117,7 @@ def _templates(route: dict) -> list:
 def validate_route_session_options(name: str, route: dict) -> None:
     """Startup / dynamic-route validation of ``session_key``, ``model`` / ``provider``,
     ``fallback_providers`` and ``delivery_target``. Raises ValueError."""
-    from hermes_cli.session_route import validate_declared_chain
+    from agent.session_routes import validate_declared_chain
     value = route.get("session_key")
     if value is not None and (not _templates(route) or any(
             not isinstance(t, str) or not _PLACEHOLDER.search(t) for t in _templates(route))):
@@ -202,17 +203,19 @@ async def resolve_delivery_key(*, route_name: str, route_config: dict, payload: 
 def stamp_admitted_session(authority: Any, receipt: Any, *, route_name: str, route_config: dict,
                            key: Optional[str]) -> None:
     """Set-once unified-session metadata of the session a delivery was admitted into (the receipt's
-    logical session): lineage, the route's credential-free declared route, its delivery_target and
-    (keyed) the conversation key. Best-effort: a failed stamp is logged, never fails the delivery."""
+    logical session): lineage, the route's credential-free declared route and its delivery_target; an
+    opted-in target (``attach: true``) is bound to the session it holds now (``delivery_targets.bind_target``).
+    Best-effort: a failed stamp is logged, never fails the delivery."""
     from gateway.platforms.webhook_route_runtime import declared_route_for
     from gateway.platforms.webhook_session_targets import route_delivery_target
+    from gateway.delivery_targets import bind_target
     from hermes_state_session_meta import stamp_session_meta
     db, session_id = getattr(authority, "db", None), getattr(getattr(receipt, "ref", None), "session_id", None)
     if db is None or not isinstance(session_id, str):
         return
     try:
         stamp_session_meta(db, session_id, lineage_kind="webhook", route=declared_route_for(route_config),
-                           delivery_target=route_delivery_target(route_config),
-                           conversation_key=conversation_key(route_name, key) if key else None)
+                           delivery_target=route_delivery_target(route_config))
+        bind_target(db, session_id)
     except Exception:
         logger.warning("[webhook] Could not stamp session %s for route %s", session_id, route_name, exc_info=True)

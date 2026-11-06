@@ -16,8 +16,9 @@ from aiohttp.test_utils import TestClient, TestServer
 from gateway.config import PlatformConfig
 from gateway.platforms.webhook import WebhookAdapter, _WebhookDeliveryIdentity
 from gateway.platforms.webhook_session_keys import (
-    NO_KEY, SCRIPT_FIELD, conversation_key, is_keyed_chat_id, keyed_chat_id, resolve_delivery_key,
+    NO_KEY, SCRIPT_FIELD, is_keyed_chat_id, session_selector, keyed_chat_id, resolve_delivery_key,
     route_template_key, split_script_key, strip_reserved, validate_route_session_options)
+from gateway.session_selectors import resolve_session_selector
 from tests.gateway.fixtures.webhook_route_authority import mount_authority
 
 SECRET = "owned-key-secret"
@@ -56,8 +57,13 @@ def _targets(adapter):
 
 def _session(adapter, sid):
     db = adapter._message_handler.__self__.session_authority.db
-    return dict(db._read_one("SELECT lineage_kind, conversation_key, route, delivery_target, ended_at "
+    return dict(db._read_one("SELECT lineage_kind, route, delivery_target, ended_at "
                              "FROM sessions WHERE id=?", (sid,)))
+
+
+def _selected(adapter, selector):
+    """The session a logical ``webhook:<route>:<key>`` selector names (the one stable key: session_key)."""
+    return resolve_session_selector(adapter._message_handler.__self__.session_authority.db, selector)
 
 
 # ── keys ─────────────────────────────────────────────────────────────────────
@@ -184,11 +190,13 @@ async def test_same_key_resumes_one_session_other_keys_and_unkeyed_do_not():
         assert targets["d1"] == targets["d2"]
         assert len({targets["d1"], targets["d3"], targets["d4"], targets["d5"]}) == 4
         keyed = _session(adapter, targets["d1"])
-        assert keyed["conversation_key"] == conversation_key("pr", "owned/repo#1") == "webhook:pr:owned/repo#1"
+        assert session_selector("pr", "owned/repo#1") == "webhook:pr:owned/repo#1"
+        assert _selected(adapter, "webhook:pr:owned/repo#1") == targets["d1"]
         assert keyed["lineage_kind"] == "webhook" and keyed["ended_at"] is None
-        assert _session(adapter, targets["d3"])["conversation_key"] == "webhook:pr:owned/repo#2"
+        assert _selected(adapter, "webhook:pr:owned/repo#2") == targets["d3"]
+        assert _selected(adapter, "webhook:pr:owned/repo#404") is None
         unkeyed = _session(adapter, targets["d4"])
-        assert unkeyed["conversation_key"] is None and unkeyed["lineage_kind"] == "webhook"
+        assert unkeyed["lineage_kind"] == "webhook"
         # Only per-delivery sessions are handed to the one-shot finalizer.
         assert not any(is_keyed_chat_id(chat) for chat in finalized) and len(finalized) == 2
 
@@ -224,7 +232,7 @@ async def test_gate_script_names_the_key_and_a_forged_inbound_field_is_ignored(m
         targets = _targets(adapter)
     assert SCRIPT_FIELD not in seen[0]  # the gate never sees a caller-supplied key
     assert targets["g1"] == targets["g2"] != targets["g3"]
-    assert _session(adapter, targets["g1"])["conversation_key"] == "webhook:gate:thread-t1"
+    assert _selected(adapter, "webhook:gate:thread-t1") == targets["g1"]
     db = adapter._message_handler.__self__.session_authority.db
     payloads = [json.loads(r["payload_json"]) for r in db._read_all("SELECT payload_json FROM session_admissions")]
     assert all(SCRIPT_FIELD not in json.dumps(p) for p in payloads)
