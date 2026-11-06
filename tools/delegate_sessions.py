@@ -312,21 +312,66 @@ def assignment_message(child, message):
 # ── the drain ────────────────────────────────────────────────────────────────
 
 def schedule_drain(db_path, session_id: str, parent=None) -> bool:
-    """Run the child's next queued turn(s) on a daemon thread, once per session at a time."""
+    """Run the child's next queued turn(s) on a daemon thread, once per session at a time.
+
+    Ownership protocol (lost-wakeup free): ``_draining`` marks the one live drain of a session and
+    ``_redrain`` a wake that arrived while it ran; both change only under ``_pending_lock``. A producer
+    either starts the drain or records the wake for the owner; the owner gives ownership up only in
+    :func:`_finish_pass`, under the same lock, and only when no wake is recorded. So a wake recorded
+    after the owner's last head check is always seen by that decision, and the owner runs another pass."""
     key = (str(db_path), session_id)
     with _pending_lock:
         if key in _draining:
             _redrain[key] = parent if parent is not None else _redrain.get(key)
             return False
         _draining.add(key)
-    from agent.memory_provider import spawn_context_thread
-    thread = spawn_context_thread(_drain, args=(str(db_path), session_id, parent),
-                                  name=f"delegate-drain-{session_id[:12]}")
-    thread.start()
+    try:
+        from agent.memory_provider import spawn_context_thread
+        thread = spawn_context_thread(_drain, args=(str(db_path), session_id, parent),
+                                      name=f"delegate-drain-{session_id[:12]}")
+        thread.start()
+    except BaseException:
+        with _pending_lock:
+            _draining.discard(key)
+        raise
     return True
 
 
+def _finish_pass(key: tuple[str, str]) -> tuple[bool, Any]:
+    """The single exit decision of a drain pass, atomic with every producer's ``key in _draining``
+    check: ``(True, parent)`` keeps ownership for another pass (a wake arrived since the pass began),
+    ``(False, None)`` releases it."""
+    with _pending_lock:
+        if key in _redrain:
+            return True, _redrain.pop(key)
+        _draining.discard(key)
+        return False, None
+
+
 def _drain(db_path: str, session_id: str, fallback_parent) -> None:
+    key = (db_path, session_id)
+    parent = fallback_parent
+    try:
+        while True:
+            try:
+                _drain_pass(db_path, session_id, parent)
+            except Exception:
+                logger.exception("delegate drain for %s failed", session_id)
+            # Every exit of a pass (empty head, busy FIFO, no parent, lost claim race, error) reaches this
+            # one decision; a wake recorded while the pass ran is honoured here, in this same thread.
+            again, again_parent = _finish_pass(key)
+            if not again:
+                return
+            parent = again_parent or parent or fallback_parent
+    except BaseException:
+        with _pending_lock:
+            _draining.discard(key)
+            _redrain.pop(key, None)
+        raise
+
+
+def _drain_pass(db_path: str, session_id: str, parent_hint) -> None:
+    """One pass over the child's FIFO: run claimable heads until it is empty, busy, or unrunnable here."""
     from hermes_state_registry import acquire, release
     from tools.delegate_session_store import DelegateSessionStore
     db = acquire(Path(db_path))
@@ -334,12 +379,13 @@ def _drain(db_path: str, session_id: str, fallback_parent) -> None:
         store = DelegateSessionStore(db)
         from hermes_state_runtime import list_session_admissions
         from hermes_state_wake import claimable
+        missed = False
         for _ in range(64):  # bounded: ADMISSION_QUEUE_MAX plus margin
             head = next((r for r in list_session_admissions(db, session_id=session_id) if claimable(r)), None)
             if head is None or store.running_claim(session_id) is not None:
                 return
             parent, ctx = _launch_for(head["admission_id"])
-            parent = parent or fallback_parent
+            parent = parent or parent_hint
             if parent is None:
                 # Nobody here can build the child (its parent is gone): the entry stays queued for the next
                 # explicit resume, never run without its parent's tools and identity.
@@ -348,18 +394,16 @@ def _drain(db_path: str, session_id: str, fallback_parent) -> None:
             claim = store.claim(session_id, head=head["admission_id"])
             if not claim:
                 remember_launch(head["admission_id"], parent)
-                return
+                if missed:
+                    return  # still unclaimable (an unknown turn pauses the FIFO): its resolution wakes it
+                # Busy (another claimer won) or the head moved: re-read once; the next check decides.
+                missed = True
+                continue
+            missed = False
             (ctx or contextvars.copy_context()).run(_run_claimed, parent, store, session_id, claim)
-    except Exception:
-        logger.exception("delegate drain for %s failed", session_id)
+        logger.warning("delegate %s: drain pass bound reached with work possibly left queued", session_id)
     finally:
-        with _pending_lock:
-            _draining.discard((db_path, session_id))
-            again = (db_path, session_id) in _redrain
-            again_parent = _redrain.pop((db_path, session_id), None)
         release(db)
-    if again:
-        schedule_drain(db_path, session_id, again_parent or fallback_parent)
 
 
 def _run_claimed(parent, store, session_id: str, claim: dict) -> None:
