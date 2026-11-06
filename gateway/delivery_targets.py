@@ -278,7 +278,8 @@ def write_held_events(db, session_id: str, claim: Mapping[str, Any]) -> list[str
                               sent_at=message.get("sent_at"), source_event_id=message.get("source_event_id"),
                               part_kind=message.get("part_kind"))
         written.append(row["admission_id"])
-    ack_held_inputs(db, epoch=claim["owner_epoch"], generation=claim["generation"], admission_ids=written)
+    ack_held_inputs(db, epoch=claim["owner_epoch"], generation=claim["generation"], admission_ids=written,
+                    session_id=claim.get("target_session_id"))
     return written
 
 
@@ -379,13 +380,44 @@ def _fifo_accept(db, row, target) -> bool:
     return _is_delegate_row(row)
 
 
+# Event fields the producer generates (not the caller's request): an exact retry keeps the original's.
+_GENERATED_EVENT_FIELDS = ("sent_at",)
+
+
+def _same_request(stored: Mapping[str, Any], fresh: Mapping[str, Any]) -> bool:
+    """*stored* and *fresh* are the same event request apart from producer-generated fields."""
+    def strip(event):
+        return {k: v for k, v in dict(event).items() if k not in _GENERATED_EVENT_FIELDS}
+    return strip(stored) == strip(fresh)
+
+
+def _exact_retry(db, principal: str, session_id: str, request: str, payload: dict, intent: str) -> Optional[dict]:
+    """The payload of an exact semantic retry of an already-admitted *request*: the stored one (its
+    original ``sent_at``), so the admission digest matches and the original receipt is returned. None
+    when the request is new, or differs in substance (that conflict is the store's to refuse)."""
+    from hermes_state_runtime import find_session_admission
+    existing = find_session_admission(db, principal_id=principal, session_id=session_id, request_id=request)
+    if existing is None or existing.get("intent") != intent:
+        return None
+    stored, fresh = event_from_payload(existing["payload"]), payload.get(EVENT_PAYLOAD_KEY)
+    if stored is None or not isinstance(fresh, Mapping) or not _same_request(stored, fresh):
+        return None
+    if {k: v for k, v in existing["payload"].items() if k != EVENT_PAYLOAD_KEY} != \
+            {k: v for k, v in payload.items() if k != EVENT_PAYLOAD_KEY}:
+        return None
+    return existing["payload"]
+
+
 def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optional[str] = None,
                 request_id: Optional[str] = None, intent: Optional[str] = None) -> DeliveryReceipt:
     """Admit *event* into *session_id*'s FIFO as one queued turn. A batch sibling (same ``fold_key`` and
     sender kind) still queued at the FIFO tail is folded: the waiting row is retired in the same
     transaction that admits the merged one, so the parent runs ONE turn for the whole batch. ``intent``
     is the admission's (``queue`` / ``steer``); a steer-intent event is still a queued turn here: a typed
-    event is never handed into a running turn as steer text."""
+    event is never handed into a running turn as steer text.
+
+    An exact retry (same principal, target and ``request_id``, same event apart from its generated
+    ``sent_at``) returns the original admission instead of conflicting with its own timestamp."""
     from hermes_state_runtime import (
         RuntimeStoreError, admit_session_input, list_session_admissions, replacement_binding, retire_replaced_input,
     )
@@ -395,8 +427,12 @@ def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optio
     principal = f"{event.sender_kind}:{event.sender_id}"
     request = request_id or event.source_event_id or uuid.uuid4().hex
     payload = event.payload()
+    intent = intent if intent in ("queue", "steer") else "queue"
     replaced = None
-    if event.fold_key:
+    retry = _exact_retry(db, principal, session_id, request, payload, intent) if (request_id or event.source_event_id) else None
+    if retry is not None:
+        payload = retry  # the original bytes: the store replays the existing admission
+    elif event.fold_key:
         queued = [r for r in list_session_admissions(db, session_id=session_id) if r["status"] == "queued"]
         tail = queued[-1] if queued else None
         prior = event_from_payload(tail["payload"]) if tail is not None else None
@@ -416,7 +452,7 @@ def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optio
     try:
         row = admit_session_input(db, epoch=epoch, principal_id=principal, session_id=session_id, request_id=request,
                                   payload=payload, _authorize_write=guard, wake_policy=wake_policy,
-                                  intent=intent if intent in ("queue", "steer") else "queue")
+                                  intent=intent)
     except RuntimeStoreError as exc:
         if replaced is None or exc.reason != "admission_started":
             raise

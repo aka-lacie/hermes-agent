@@ -16,6 +16,9 @@ compact by construction (``agent.session_views``); policy beyond that belongs to
   ``{sender_id, sender_title, relation}``, the sibling ACL, and ``peer_hop`` = the caller's triggering hop
   + 1 (1 when the caller's current turn was not peer-triggered); above :data:`PEER_HOP_MAX` it is refused
   with :class:`SessionAdmissionError` ``peer_hop_limit``. Returns a small receipt dict.
+  ``request_id`` makes the call idempotent: an exact retry (same caller, target, text, kind, meta,
+  intent) returns the original admission's receipt; the same ``request_id`` with a different request is
+  refused ``request_conflict``. Store refusals surface as :class:`SessionAdmissionError` too, never raw.
 - ``resolve(selector, profile=None)``: the session a logical selector names right now, or None.
 
 ``observe`` and ``admit`` also take a selector wherever they take a session id (resolved first; the ACL
@@ -36,7 +39,8 @@ _INTENTS = ("queue", "steer")
 
 class SessionAdmissionError(LookupError):
     """A refused admission, with a stable machine-readable ``code`` (``unavailable``, ``closed``,
-    ``not_resumable``, ``invalid_message``, ``invalid_intent``, ``peer_hop_limit``)."""
+    ``not_resumable``, ``invalid_message``, ``invalid_intent``, ``peer_hop_limit``, ``request_conflict``,
+    ``queue_full``, ``invalid_request``, ``refused``)."""
 
     def __init__(self, code: str, message: str, **details: Any):
         self.code, self.details = code, details
@@ -48,6 +52,24 @@ class SessionAdmissionError(LookupError):
 
 def _store_db(db):
     return getattr(db, "_db", db)
+
+
+# The state authority's refusal reasons, as the facade's codes (anything else: ``refused``).
+_STORE_REFUSALS = {
+    "admission_conflict": ("request_conflict", "This request_id was already used for a different message."),
+    "queue_full": ("queue_full", "That session already has the maximum queued inputs."),
+    "not_found": ("unavailable", "No session with that session_id is reachable from this conversation."),
+    "invalid_params": ("invalid_request", "The admission request is malformed."),
+}
+
+
+def _store_refusal(exc) -> SessionAdmissionError:
+    reason = str(getattr(exc, "reason", "") or "")
+    code, message = _STORE_REFUSALS.get(reason, ("refused", "The session store refused this admission."))
+    details = {"reason": reason}
+    if getattr(exc, "field", None):
+        details["field"] = exc.field
+    return SessionAdmissionError(code, message, **details)
 
 
 def triggering_peer_hop(db, conn, session_id: str) -> int:
@@ -114,6 +136,7 @@ class SessionsAPI:
         admission_id, status, sink[, peer_hop][, reason]}``."""
         from agent import session_directory as directory
         from gateway.delivery_targets import DeliveryEvent, dispatch, session_target
+        from hermes_state_runtime import RuntimeStoreError
         from tools.delegate_session_store import DelegateSessionStore
         if intent not in _INTENTS:
             raise SessionAdmissionError("invalid_intent", "intent must be 'queue' or 'steer'.")
@@ -153,8 +176,11 @@ class SessionsAPI:
                 "your parent instead.", peer_hop=hop, max=PEER_HOP_MAX)
         event = DeliveryEvent(kind or (PEER_KIND if peer else "session_message"), text, sender_kind, caller_session_id,
                               meta=event_meta, peer_hop=hop, intent=intent)
-        receipt = dispatch(self.db, None, event, request_id=request_id,
-                           target=session_target(target_session_id, attach=False, wake_policy=wake_policy))
+        target = session_target(target_session_id, attach=False, wake_policy=wake_policy)
+        try:
+            receipt = dispatch(self.db, None, event, request_id=request_id, target=target)
+        except RuntimeStoreError as exc:
+            raise _store_refusal(exc) from exc
         out = {"delivered": receipt.delivered, "session_id": target_session_id, "admission_id": receipt.admission_id,
                "sink": receipt.sink, "status": "queued" if receipt.delivered else "not_delivered"}
         if hop is not None:
