@@ -13,8 +13,10 @@ trusted from this side: the owner's preclaim (``check_automation_route``) and st
 Then the owner is told: :func:`signal` drops one marker per conversation under ``<home>/cron/
 session_handoff/``, which the consumer the owner binds (:func:`start_consumer`) collects about once a
 second, mounting the conversation if no inbound has since the restart and scheduling its drain. With no
-gateway running the row stays queued; startup recovery binds and drains it. A lost marker is only a
-lost wake: the row runs with the conversation's next drain.
+gateway running the row stays queued; startup recovery binds and drains it. Cancellation joins an
+in-flight collection and restores its unscheduled markers before the pickup task ends; profile
+retirement joins that task before releasing ownership. If marker storage fails, the error is logged
+and the durable row remains available to startup recovery or the conversation's next drain.
 
 Out of scope here, refused so the caller reports it (never a guessed row): a relay-fronted route (its
 seal must be re-sealed with the adapter's transport secret), webhook routes (their reply leg binds to a
@@ -29,6 +31,7 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,9 +56,13 @@ def signal(home, session_id: str) -> None:
     root = signal_dir(home)
     root.mkdir(parents=True, exist_ok=True)
     name = hashlib.sha256(session_id.encode()).hexdigest()[:32]
-    tmp = root / f".{name}.{os.getpid()}"
-    tmp.write_text(session_id, encoding="utf-8")
-    os.replace(tmp, root / name)
+    # Reconciliation and an ordinary producer may signal this chat concurrently in one process.
+    tmp = root / f".{name}.{uuid.uuid4().hex}"
+    try:
+        tmp.write_text(session_id, encoding="utf-8")
+        os.replace(tmp, root / name)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _committed_envelope(db, owner: str):
@@ -164,10 +171,42 @@ def pick_up(authority, session_ids) -> list[str]:
     return scheduled
 
 
+async def _rearm_collected(home, collector):
+    """Finish the destructive read, then restore every marker its cancelled owner cannot schedule."""
+    session_ids = await collector
+    await asyncio.to_thread(_rearm, home, session_ids)
+
+
+def _rearm(home, session_ids):
+    for session_id in session_ids:
+        signal(home, session_id)
+
+
+async def _collect_cancel_safe(home):
+    # Cancelling to_thread's waiter does not stop its thread. Keep the result reachable until
+    # its removed markers have either reached pick_up or been restored for the next owner.
+    collector = asyncio.create_task(asyncio.to_thread(_collect, home))
+    try:
+        return await asyncio.shield(collector)
+    except asyncio.CancelledError:
+        recovery = asyncio.create_task(_rearm_collected(home, collector))
+        try:
+            while not recovery.done():
+                try:
+                    await asyncio.shield(recovery)
+                except asyncio.CancelledError:
+                    continue  # repeated Stop must not abandon reconciliation either
+            recovery.result()
+        except Exception:  # health: allow BLE001 -- preserve Stop even if marker storage is unavailable
+            logger.error("cancelled pickup could not restore wake markers for %s; "
+                         "durable admissions require recovery", home, exc_info=True)
+        raise
+
+
 async def _consume(authority, home):
     while True:
         try:
-            session_ids = await asyncio.to_thread(_collect, home)
+            session_ids = await _collect_cancel_safe(home)
             if session_ids:
                 pick_up(authority, session_ids)
         except asyncio.CancelledError:
@@ -178,5 +217,5 @@ async def _consume(authority, home):
 
 
 def start_consumer(authority, home):
-    """The owner's pickup task (``gateway.session_cron.bind_owner``); cancel it to stop."""
+    """The owner's pickup task (``gateway.session_cron.bind_owner``); cancel and join it to stop."""
     return asyncio.get_running_loop().create_task(_consume(authority, Path(home)))

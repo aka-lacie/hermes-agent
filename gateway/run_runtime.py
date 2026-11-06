@@ -428,7 +428,13 @@ async def _retire_profile_authority(authority, timeout=None):
         task.cancel()
     if rest:
         await asyncio.gather(*rest, return_exceptions=True)
-    unbind_owner(authority)
+    pickup = unbind_owner(authority)
+    if pickup is not None:
+        # Cancelling a pickup cannot stop its destructive filesystem thread. Its task finishes
+        # only after those markers are rearmed; keep the profile reserved until that join.
+        await asyncio.wait({pickup})
+        if not pickup.cancelled():
+            pickup.result()
     # Ownership is released next; until a successor bumps the epoch, A's epoch still fences its
     # writes as current, so a stale connection to A must find it retired instead.
     authority.retired = True

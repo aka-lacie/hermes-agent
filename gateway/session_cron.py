@@ -31,25 +31,36 @@ def bind_owner(authority):
     # (gateway/session_automation_handoff.py); its pickup schedules their drain.
     from gateway.session_automation_handoff import start_consumer
     _stop_consumer(_handoff_consumers.pop(home, None))
-    _handoff_consumers[home] = (authority, start_consumer(authority, home))
+    consumer = (authority, start_consumer(authority, home))
+    _handoff_consumers[home] = consumer
+    consumer[1].add_done_callback(lambda _task: _forget_consumer(home, consumer))
+
+
+def _forget_consumer(home, consumer):
+    if _handoff_consumers.get(home) is consumer:
+        del _handoff_consumers[home]
 
 
 def _stop_consumer(consumer):
     if consumer is None:
-        return
+        return None
     task = consumer[1]
-    if not task.get_loop().is_closed():
+    if not task.done() and not task.get_loop().is_closed():
         task.get_loop().call_soon_threadsafe(task.cancel)
+    return task  # cancellation completes only after its collector's markers are reconciled
 
 
 def unbind_owner(authority):
+    """Stop this owner's pickup; retirement joins the returned task before releasing ownership."""
     home = Path(authority.db.db_path).resolve().parent
     bound = _owners.get(home)
     if bound is not None and bound[1] is authority:
         del _owners[home]
     consumer = _handoff_consumers.get(home)
     if consumer is not None and consumer[0] is authority:
-        _stop_consumer(_handoff_consumers.pop(home))
+        # Keep it reachable until done, so an interrupted retirement can join it on retry.
+        return _stop_consumer(consumer)
+    return None
 
 
 def owner_for_home(home):
