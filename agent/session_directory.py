@@ -353,7 +353,10 @@ def _build_record(row, legacy: Optional[dict]) -> dict:
         "root_session_id": row.get("root_session_id"), "depth": row.get("depth"), "lineage_kind": kind,
         "title": str(brief.get("title") or (legacy or {}).get("title") or " ".join(initial.split())[:80]
                      or row.get("title") or "Session"),
-        "initial_goal": initial, "assignment": latest or (legacy or {}).get("assignment") or initial,
+        "initial_goal": initial,
+        # A migrated retained child's brief carries its last legacy assignment (review R1) until a new
+        # parent admission supersedes it.
+        "assignment": latest or brief.get("assignment") or (legacy or {}).get("assignment") or initial,
         "context": brief.get("context") or (legacy or {}).get("context") or "",
         "workspace": row.get("workspace") or (legacy or {}).get("workspace"),
         "forked_context": bool(fork) or bool((legacy or {}).get("forked_context")), "fork_origin": fork,
@@ -367,10 +370,15 @@ def _build_record(row, legacy: Optional[dict]) -> dict:
     }
 
 
-def _hydrate_rows(conn, rows: Iterable[Any], *, rollup: bool = False, legacy: Optional[bool] = None
-                  ) -> list[tuple[dict, list[str]]]:
-    """``(record, compression segments)`` of many rows from ONE statement (plus one legacy read only for
-    legacy rows), in input order. *legacy*: whether ``delegate_sessions`` exists (None: probe when needed)."""
+_SEG_ENDS_SQL = ("(SELECT json_group_object(x.id, x.end_reason) FROM sessions x WHERE x.id IN (SELECT seg.id FROM seg "
+                 "WHERE seg.start = {o}.id AND seg.id IS NOT NULL)) AS _seg_ends")
+
+
+def _hydrate_rows(conn, rows: Iterable[Any], *, rollup: bool = False, legacy: Optional[bool] = None,
+                  ends: bool = False) -> list[tuple[dict, list[str], dict]]:
+    """``(record, compression segments, {segment: end_reason})`` of many rows from ONE statement (plus one
+    legacy read only for legacy rows), in input order. *legacy*: whether ``delegate_sessions`` exists (None:
+    probe when needed); *ends*: also read each segment's ``end_reason`` (else the mapping is empty)."""
     rows = list(rows)
     if not rows:
         return []
@@ -379,9 +387,11 @@ def _hydrate_rows(conn, rows: Iterable[Any], *, rollup: bool = False, legacy: Op
         legacy = False
     elif legacy is None:
         legacy = _legacy_table(conn)
+    extra = (", " + _SEG_ENDS_SQL.format(o="s")) if ends else ""
     got = {r["id"]: r for r in conn.execute(
         f"WITH RECURSIVE base(id) AS (SELECT value FROM json_each(:ids)), {_seg_cte('base')} "
-        f"SELECT {_row_cols(False)}, {_activity_sql('s')} AS _act, {_hydration_sql('s', rollup=rollup, legacy=legacy)} "
+        f"SELECT {_row_cols(False)}, {_activity_sql('s')} AS _act, {_hydration_sql('s', rollup=rollup, legacy=legacy)}"
+        f"{extra} "
         f"FROM base JOIN sessions s ON s.id = base.id{_legacy_join(legacy)}",
         _params([], ids=json.dumps(ids))).fetchall()}
     shims = _legacy_rows(conn, got.values(), legacy) if legacy else {}
@@ -392,13 +402,22 @@ def _hydrate_rows(conn, rows: Iterable[Any], *, rollup: bool = False, legacy: Op
             if rollup:
                 info["running_children"] = int(got[sid]["_running_children"] or 0)
                 info["children_total"] = int(got[sid]["_children_total"] or 0)
-            out.append((info, _segments_from(got[sid]["_segs"], sid)))
+            seg_ends = (json_field(got[sid]["_seg_ends"]) or {}) if ends else {}
+            out.append((info, _segments_from(got[sid]["_segs"], sid), seg_ends))
     return out
 
 
 def hydrate(conn, rows: Iterable[Any], *, rollup: bool = False) -> list[dict]:
     """:func:`record` of many rows in ONE statement (plus one legacy read only for legacy rows), input order."""
-    return [info for info, _ in _hydrate_rows(conn, rows, rollup=rollup)]
+    return [info for info, _, _ in _hydrate_rows(conn, rows, rollup=rollup)]
+
+
+def _legacy_hint(row) -> Optional[bool]:
+    """A row read with ``_legacy_present`` (observe's / the store's reach read) already knows."""
+    try:
+        return bool(row["_legacy_present"])
+    except (KeyError, IndexError):
+        return None
 
 
 def record(conn, row) -> dict:
@@ -407,6 +426,16 @@ def record(conn, row) -> dict:
     if not found:
         raise LookupError("No session with that session_id.")
     return found[0]
+
+
+def record_and_tip(conn, row) -> tuple[dict, Optional[str]]:
+    """:func:`record` plus the ``end_reason`` of its execution tip (``current_session_id``), in the same ONE
+    statement: ``'compression'`` there means the continuation is gone."""
+    found = _hydrate_rows(conn, [row], legacy=_legacy_hint(row), ends=True)
+    if not found:
+        raise LookupError("No session with that session_id.")
+    info, _, seg_ends = found[0]
+    return info, seg_ends.get(info["current_session_id"])
 
 
 class _RowView(dict):
@@ -813,13 +842,17 @@ def _list_tree(db, conn, caller_session_id: str, mine: list[str], *, needle: str
     kept = [(row, level) for row, level in picked if allowed(db, conn, caller_session_id, row)] \
         if policy is not default_session_acl else _default_tree_reach(db, conn, mine, picked)
     levels = {row["id"]: level for row, level in kept}
-    infos = [_entry(info, None) for info in hydrate(conn, [row for row, _ in kept], rollup=True)]
+    hydrated = _hydrate_rows(conn, [row for row, _ in kept], rollup=True)
+    segments = {info["session_id"]: segs for info, segs, _ in hydrated}
+    infos = [_entry(info, None) for info, _, _ in hydrated]
+    hits: set[str] = set()
+    if needle:  # one transcript statement for every row its fields do not already match
+        hits = _transcript_hits(conn, [info for info in infos if not _matches_fields(info, needle)], segments, needle)
     out = []
     for info in infos:
         info["depth_below_caller"] = levels[info["session_id"]]
         if needle:
-            if not _matches_fields(info, needle) and not _transcript_hits(
-                    conn, [info], {info["session_id"]: chain(conn, info["session_id"])}, needle):
+            if not _matches_fields(info, needle) and info["session_id"] not in hits:
                 continue
         elif info["status"] == "closed" and not include_closed:
             continue
@@ -828,38 +861,98 @@ def _list_tree(db, conn, caller_session_id: str, mine: list[str], *, needle: str
     return out[:limit]
 
 
+_ROOT_WALK_COLS = "id, parent_session_id, source, model_config, end_reason"  # the lease-key walk's columns
+
+
+def _logical_roots(db, conn, ids: Iterable[str]) -> dict[str, str]:
+    """:func:`logical_root` of many ids at once: the same walk as ``SessionDB._session_turn_lease_key_on_conn``
+    (compression parents, stopping at a fork child, a repeat or a non-compression parent), advanced for every
+    id together: one statement per walk step, not per id."""
+    rows: dict[str, Optional[dict]] = {}
+
+    def fetch(need: Iterable[str]) -> None:
+        need = [sid for sid in dict.fromkeys(need) if sid not in rows]
+        if need:
+            got = {r["id"]: dict(r) for r in conn.execute(
+                f"SELECT {_ROOT_WALK_COLS} FROM sessions WHERE id IN (SELECT value FROM json_each(?))",
+                (json.dumps(need),))}
+            rows.update((sid, got.get(sid)) for sid in need)
+
+    ids = [sid for sid in dict.fromkeys(ids) if sid]
+    out: dict[str, str] = {}
+    fetch(ids)
+    walks: dict[str, tuple[dict, set]] = {}
+    for sid in ids:
+        if rows[sid] is None:
+            out[sid] = sid
+        else:
+            walks[sid] = (rows[sid], {sid})
+    while walks:
+        step: dict[str, str] = {}
+        for sid, (current, seen) in list(walks.items()):
+            parent_id = current.get("parent_session_id")
+            if not parent_id or parent_id in seen or db._is_explicit_fork_child_row(current, include_reset=True):
+                out[sid] = str(current.get("id") or sid)
+                del walks[sid]
+            else:
+                step[sid] = parent_id
+        fetch(step.values())
+        for sid, parent_id in step.items():
+            current, seen = walks[sid]
+            parent = rows[parent_id]
+            if not parent or parent.get("end_reason") != "compression":
+                out[sid] = str(current.get("id") or sid)
+                del walks[sid]
+            else:
+                seen.add(parent_id)
+                walks[sid] = (parent, seen)
+    return out
+
+
 def _default_tree_reach(db, conn, mine: list[str], picked: list[tuple]) -> list[tuple]:
-    """:func:`default_session_acl` over a whole subtree with the caller's lineage resolved once (the per-row
-    walk stays exact; its lookups are memoized per conversation)."""
+    """:func:`default_session_acl` over a whole subtree with the caller's lineage resolved once: every row's
+    ancestor walk advances together, one batched conversation lookup per step (statements grow with the
+    tree's depth, never with its row count); each row's verdict is exactly the per-row walk's."""
     mine_set, selectors = set(mine), _Selectors(db)
-    roots: dict[str, Any] = {}
+    conversations: dict[str, Any] = {}  # parent id -> the sessions row of its conversation root (None: gone)
 
-    def conversation(parent: str):
-        if parent not in roots:
-            roots[parent] = conn.execute("SELECT * FROM sessions WHERE id = ?",
-                                         (logical_root(db, conn, parent),)).fetchone()
-        return roots[parent]
+    def resolve(parents: Iterable[str]) -> None:
+        need = [p for p in dict.fromkeys(parents) if p not in conversations]
+        if not need:
+            return
+        roots = _logical_roots(db, conn, need)
+        got = {r["id"]: r for r in conn.execute("SELECT * FROM sessions WHERE id IN (SELECT value FROM json_each(?))",
+                                                (json.dumps(sorted(set(roots.values()))),))}
+        conversations.update((p, got.get(roots.get(p, p))) for p in need)
 
-    out = []
-    for row, level in picked:
+    verdict: dict[int, bool] = {}
+    walks: dict[int, Any] = {}
+    for index, (row, _) in enumerate(picked):
         if row["id"] in mine_set:
             continue
         if _targets(row, mine_set, selectors):
-            out.append((row, level))
-            continue
-        current = row
-        for _ in range(_MAX_TREE_DEPTH):
+            verdict[index] = True
+        else:
+            walks[index] = row
+    for _ in range(_MAX_TREE_DEPTH):
+        if not walks:
+            break
+        step: dict[int, str] = {}
+        for index, current in list(walks.items()):
             parent = current["parent_session_id"]
-            if not parent:
-                break
-            if parent in mine_set:
-                if _effective_kind(current) not in (None, "continuation", "branch", "reset", "switch"):
-                    out.append((row, level))
-                break
-            current = conversation(parent)
-            if current is None:
-                break
-    return out
+            if parent and parent in mine_set:
+                verdict[index] = _effective_kind(current) not in (None, "continuation", "branch", "reset", "switch")
+            if not parent or parent in mine_set:
+                del walks[index]
+            else:
+                step[index] = parent
+        resolve(step.values())
+        for index, parent in step.items():
+            if conversations[parent] is None:
+                del walks[index]
+            else:
+                walks[index] = conversations[parent]
+    return [item for index, item in enumerate(picked) if verdict.get(index)]
 
 
 def _subtree(db, conn, mine: list[str]) -> list[tuple]:
@@ -965,14 +1058,24 @@ def observe(db, conn, caller_session_id: str, session_id: str, *, limit: Optiona
     (``SessionDB.get_lineage_tail_preview``: deduplicated exactly like the full read, body previews read
     head/tail-bounded); the roll-up selects its at most ``CHILDREN_MAX`` children in SQL before hydrating
     them, each latest step one ``DESC LIMIT 1`` lookup in the same statement."""
-    from agent import session_views as views
     row = conn.execute(
         "SELECT s.*, EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'delegate_sessions') "
         "AS _legacy_present FROM sessions s WHERE s.id = ?", (session_id,)).fetchone()
     if row is None or not allowed(db, conn, caller_session_id, row):
         raise LookupError("No session with that session_id is reachable from this conversation.")
-    legacy = bool(row["_legacy_present"])
-    info, ids = _hydrate_rows(conn, [row], legacy=legacy)[0]
+    return observe_row(db, conn, row, limit=limit, max_chars=max_chars)
+
+
+def observe_row(db, conn, row, *, limit: Optional[int] = None, max_chars: Optional[int] = None,
+                tip_check: Optional[Callable[[dict, Optional[str]], None]] = None) -> dict:
+    """:func:`observe` of a *row* the caller's ACL already reached (:func:`allowed` on this *db*; the
+    delegate store's reach read). ``tip_check(record, tip end_reason)`` may refuse before any transcript
+    is read. Same bounded statements as :func:`observe` minus its row read and ACL."""
+    from agent import session_views as views
+    info, ids, seg_ends = _hydrate_rows(conn, [row], legacy=_legacy_hint(row), ends=tip_check is not None)[0]
+    if tip_check is not None:
+        tip_check(info, seg_ends.get(info["current_session_id"]))
+    legacy = bool(_legacy_hint(row)) if _legacy_hint(row) is not None else _legacy_table(conn)
     limit = views.observe_limit(limit)
     messages = db.get_lineage_tail_preview(info["current_session_id"], limit + 1)
     truncated = len(messages) > limit

@@ -46,6 +46,7 @@ def test_migrated_retained_child_keeps_its_unified_record(migrated):
     record = DelegateSessionStore(db).get("dm2", "child")
     assert record["current_session_id"] == ("child2" if shape == "compressed" else "child")
     assert (record["title"], record["initial_goal"], record["context"]) == ("t", "g", "c")
+    assert record["assignment"] == "a"  # the migrated brief's last legacy assignment, not the initial goal
     assert record["retained"] is True and record["lineage_kind"] == "delegate"
     assert record["status"] == "idle"  # the canonical id of a compressed child is not closed
     assert record["delivery_target"] == {"kind": "session", "session_id": "dm2", "attach": True}
@@ -58,6 +59,7 @@ def test_migrated_retained_child_keeps_its_unified_record(migrated):
     assert row["status"] == "idle"
     listed = DelegateSessionStore(db).list("dm2")
     assert [(r["session_id"], r["status"], r["retained"]) for r in listed] == [("child", "idle", True)]
+    assert listed[0]["assignment"] == "a"
 
 
 def test_migrated_retained_child_resumes_settles_and_completes_to_its_parent(migrated, monkeypatch):
@@ -70,6 +72,7 @@ def test_migrated_retained_child_resumes_settles_and_completes_to_its_parent(mig
     assert claim["admission_id"] == admission["admission_id"]
     record = store.get("dm2", "child")
     assert record["status"] == "running"
+    assert record["assignment"] == "continue the review"  # a new parent admission supersedes the migrated one
 
     monkeypatch.setattr("tools.delegate_tool_config._load_config", dict)
     resolved = {}

@@ -129,13 +129,29 @@ class DelegateSessionStore:
         turn of a ``parent_message``) and is never touched; on a delegate child it is a legacy pre-fix
         claim, recovered only after it stayed stampless for :data:`LEGACY_UNSTAMPED_GRACE_S`. Every
         recovery revalidates the verdict inside its settlement transaction."""
-        from hermes_state_runtime import RuntimeStoreError, list_session_admissions
-        delegate = None
-        for row in list_session_admissions(self.db, session_id=session_id):
-            if row["status"] not in ("started", "unknown"):
-                continue
-            with self.db._read_ctx() as conn:
-                stamp = _stamp_on(conn, row["admission_id"])
+        return self._reconcile_many([session_id]) > 0
+
+    def _reconcile_many(self, session_ids) -> int:
+        """:meth:`_reconcile` of several sessions; how many claims it recovered. Every started/unknown
+        admission of *session_ids*, its runner stamp and its session's kind come from ONE statement (the
+        ``session_admissions_pending`` index range, one snapshot): with nothing to recover that is the
+        whole cost, however long any admission history is."""
+        from hermes_state_runtime import RuntimeStoreError
+        ids = [sid for sid in dict.fromkeys(session_ids) if sid]
+        if not ids:
+            return 0
+        with self.db._read_ctx() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT a.admission_id, a.target_session_id, a.principal_id, a.status, a.owner_epoch, a.generation, "
+                "a.seq, m.value AS _stamp, s.lineage_kind AS _lineage_kind FROM json_each(?) t "
+                "JOIN session_admissions a ON a.target_session_id = t.value AND a.status IN ('started', 'unknown') "
+                "LEFT JOIN state_meta m ON m.key = ? || a.admission_id "
+                "LEFT JOIN sessions s ON s.id = a.target_session_id ORDER BY t.key, a.seq",
+                (json.dumps(ids), _RUNNER_PREFIX))]
+        recovered = 0
+        for row in rows:
+            session_id, stamp = row["target_session_id"], row.pop("_stamp")
+            delegate = row.pop("_lineage_kind") == "delegate"
             if row["status"] == "unknown":
                 # A restarted gateway's verdict on a parent's input (unchanged rule): resolved, never replayed.
                 if not str(row["principal_id"]).startswith(PARENT_PRINCIPAL_PREFIX):
@@ -144,9 +160,6 @@ class DelegateSessionStore:
                 if not _stamp_dead(stamp):
                     continue  # a live run (this process or another) still holds the FIFO
             else:
-                if delegate is None:
-                    found = self.db._read_one("SELECT lineage_kind FROM sessions WHERE id = ?", (session_id,))
-                    delegate = found is not None and found["lineage_kind"] == "delegate"
                 if not delegate or not str(row["principal_id"]).startswith(PARENT_PRINCIPAL_PREFIX):
                     continue  # not a claim this runner made: its owner (or an operator) resolves it
                 if row["status"] == "started" and not self._legacy_unstamped_expired(row["admission_id"]):
@@ -155,6 +168,8 @@ class DelegateSessionStore:
                 self._recover(session_id, row, stamp)
             except RuntimeStoreError:
                 continue
+            recovered += 1
+        return recovered
 
     def _legacy_unstamped_expired(self, admission_id: str) -> bool:
         """Record the first sighting of a stampless started claim; True once it outlived the grace."""
@@ -212,37 +227,60 @@ class DelegateSessionStore:
         return resolve_session_selector(self.db, ref) or ref
 
     def get(self, caller: str, session_id: str) -> dict:
+        """The record of one reachable child, reconciled first. Bounded: caller check, row + ACL, ONE
+        reconcile statement, ONE hydration statement (its compression segments and their end reasons
+        included), whatever the child's admission history or transcript size."""
         self._caller(caller)
-        session_id = self.resolve_ref(session_id)
         with self.db._read_ctx() as conn:
-            self._owned_row(conn, caller, session_id)
-        self._reconcile(session_id)
+            row = self._reached_row(conn, caller, session_id)
+        self._reconcile(row["id"])  # only status/admission state can change; the ACL inputs cannot
         with self.db._read_ctx() as conn:
-            row = self._owned_row(conn, caller, session_id)
-            tip = conn.execute("SELECT end_reason FROM sessions WHERE id = ?",
-                               (directory.chain(conn, session_id)[-1],)).fetchone()
-            if tip is None or tip[0] == "compression":
-                # The compression tip is gone: never fall back to a stale segment's history.
-                raise DelegateSessionError("unavailable", "The child transcript is unavailable.")
-            return _public(directory.record(conn, row))
+            info, tip_end = directory.record_and_tip(conn, row)
+        self._live_tip(info, tip_end)
+        return _public(info)
+
+    @staticmethod
+    def _live_tip(info: dict, tip_end: Optional[str]) -> None:
+        if tip_end == "compression":
+            # The compression tip is gone: never fall back to a stale segment's history.
+            raise DelegateSessionError("unavailable", "The child transcript is unavailable.")
+
+    def _reached_row(self, conn, caller: str, ref: str):
+        """The sessions row *ref* names (a literal id, else a selector the conversation holds now; see
+        :meth:`resolve_ref`) once the caller's ACL reaches it, with ``_legacy_present`` for observe."""
+        sql = ("SELECT s.*, EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'delegate_sessions') "
+               "AS _legacy_present FROM sessions s WHERE s.id = ?")
+        row = conn.execute(sql, (ref,)).fetchone() if isinstance(ref, str) else None
+        if row is None and isinstance(ref, str):
+            resolved = self.resolve_ref(ref)
+            if resolved != ref:
+                row = conn.execute(sql, (resolved,)).fetchone()
+        if row is None or not directory.allowed(self.db, conn, caller, row):
+            # Do not disclose whether this ID belongs to a different parent.
+            raise DelegateSessionError("unavailable", "No retained child with that session_id belongs to this conversation.")
+        return row
 
     def list(self, caller: str, *, query=None, limit=20, scope="children") -> list[dict]:
         self._caller(caller)
         with self.db._read_ctx() as conn:
             rows = directory.list_sessions(self.db, conn, caller, scope=scope, query=query, limit=limit)
-        for row in rows:
-            if row["status"] == "running":
-                self._reconcile(row["session_id"])
-        if any(row["status"] == "running" for row in rows):
+        running = [row["session_id"] for row in rows if row["status"] == "running"]
+        # One reconcile statement for the whole page; the page is re-read only when a claim was recovered.
+        if running and self._reconcile_many(running):
             with self.db._read_ctx() as conn:
                 rows = directory.list_sessions(self.db, conn, caller, scope=scope, query=query, limit=limit)
         return [_public(row) for row in rows]
 
     def observe(self, caller: str, session_id: str, *, limit=None, max_chars=None) -> dict:
-        """The compact observe view (``agent.session_views``): newest *limit* messages, children roll-up."""
-        session_id = self.get(caller, session_id)["session_id"]
+        """The compact observe view (``agent.session_views``): newest *limit* messages, children roll-up.
+        Same reach, reconcile and tip rule as :meth:`get`, with the ACL evaluated once."""
+        self._caller(caller)
         with self.db._read_ctx() as conn:
-            return directory.observe(self.db, conn, caller, session_id, limit=limit, max_chars=max_chars)
+            row = self._reached_row(conn, caller, session_id)
+        self._reconcile(row["id"])
+        with self.db._read_ctx() as conn:
+            return directory.observe_row(self.db, conn, row, limit=limit, max_chars=max_chars,
+                                         tip_check=self._live_tip)
 
     # ── writes ───────────────────────────────────────────────────────────────
     def register(self, parent_session_id: str, session_id: str, *, model, provider, assignment, context="",

@@ -483,10 +483,11 @@ def control(action, parent, *, session_id=None, message=None, model=None, query=
                                "subagents": [views.list_row(r) for r in records]}, ensure_ascii=False)
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError(f"action='{action}' requires session_id from spawn or list.")
+        if action == "observe":
+            # The store's observe resolves the selector, reaches, reconciles and checks the tip itself.
+            return json.dumps(store.observe(parent.session_id, session_id.strip(), limit=limit), ensure_ascii=False)
         record = store.get(parent.session_id, session_id.strip())
         session_id = record["session_id"]  # a selector names the session its conversation holds now
-        if action == "observe":
-            return json.dumps(store.observe(parent.session_id, session_id, limit=limit), ensure_ascii=False)
         if action == "close":
             record = store.close(parent.session_id, session_id)
             _cancel_review(parent, session_id)

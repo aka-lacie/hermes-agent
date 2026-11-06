@@ -200,8 +200,13 @@ def list_session_admissions(db, *, session_id: str, pending_only: bool = True) -
     with db._read_ctx() as conn:
         # Pending is an explicit index-range IN, not ``!='terminal'``: a negated status cannot
         # bound the (target, status, seq) index, so every probe scanned the session's history.
-        sql = ("SELECT * FROM session_admissions WHERE target_session_id=? "
-               + ("AND status IN ('queued','started','unknown') " if pending_only else "") + "ORDER BY seq")
+        # INDEXED BY: with ``idx_session_admissions_target_seq`` present the planner prefers walking the
+        # target's WHOLE history in seq order (no sort) over the pending range; the pending set is at most
+        # the queue cap, the history is unbounded (the drain reads this on every pass).
+        sql = ("SELECT * FROM session_admissions "
+               + ("INDEXED BY session_admissions_pending WHERE target_session_id=? "
+                  "AND status IN ('queued','started','unknown') " if pending_only else "WHERE target_session_id=? ")
+               + "ORDER BY seq")
         return [_row(row) for row in conn.execute(sql, (session_id,))]
 
 
