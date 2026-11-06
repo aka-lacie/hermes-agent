@@ -6,6 +6,12 @@ The column holds one of
   results/completions are admitted into the target session as ``role="user"`` system-event rows
   (``sender_kind`` child / cron / webhook, ``sender_id`` this session). ``attach: true`` also lists this
   session in the target's default delegate list. Delegate children: ``session_id=parent, attach=true``.
+- ``{"kind": "session", "selector": "<selector>", "attach": true|false}``: the same, but the target is a
+  conversation, not one session id: ``discord:dm:<chat_id>``, ``discord`` (the profile's Discord home
+  channel), ``bot-chat`` (the Bot Mode canonical chat), ``webhook:<route>:<key>``, ... (grammar:
+  ``gateway.session_selectors``). It is resolved to the session currently holding it at every delivery, so
+  ``/new``, a rollover or a compression of the target never strands the opt-in. Exactly one of
+  ``session_id`` / ``selector``.
 - ``{"kind": "platform", "platform": "...", "chat_id": "...", "thread_id": "..."}``: final output goes to a
   platform channel only; nothing is written into any other session's transcript.
 - ``{"kind": "none"}`` or NULL: nothing is delivered beyond the session itself.
@@ -20,6 +26,12 @@ admits into a messaging/local chat it owns; core ships
   for a child's completion to a session this process does not drain directly.
 
 A ``platform`` target goes to the registered platform sender only (cron's scheduler delivery registers one).
+
+The attach primitive: an opted-in (``attach: true``) non-delegate session is bound to its target's current
+session through ``sessions.attached_session_id`` (:func:`bind_target`), on creation and again on every
+delivery, never through ``parent_session_id`` (so no continuation walk can absorb it into its target). A
+selector that resolves to nothing delivers nothing (``reason="selector_unresolved"``): the producing session
+keeps its output, and the target's list finds the session again once the conversation exists.
 """
 
 from __future__ import annotations
@@ -35,7 +47,7 @@ from typing import Any, Callable, Mapping, Optional
 logger = logging.getLogger(__name__)
 
 KIND_SESSION, KIND_PLATFORM, KIND_NONE = "session", "platform", "none"
-_SESSION_KEYS = frozenset({"kind", "session_id", "attach", "wake_policy"})
+_SESSION_KEYS = frozenset({"kind", "session_id", "selector", "attach", "wake_policy"})
 _PLATFORM_KEYS = frozenset({"kind", "platform", "chat_id", "thread_id"})
 EVENT_SENDER_KINDS = frozenset({"child", "cron", "webhook", "peer", "parent", "system", "automation"})
 # The admission payload key a delivered event rides in a session FIFO (never a person's input).
@@ -62,13 +74,21 @@ def parse_delivery_target(value: Any) -> dict:
     if kind == KIND_NONE and set(value) == {"kind"}:
         return dict(NONE_TARGET)
     if kind == KIND_SESSION:
-        sid = value.get("session_id")
-        if set(value) - _SESSION_KEYS or not isinstance(sid, str) or not sid:
-            raise DeliveryTargetError("a session target is {kind, session_id, attach[, wake_policy]}")
+        sid, selector = value.get("session_id"), value.get("selector")
+        if set(value) - _SESSION_KEYS or (sid is None) == (selector is None) or (
+                sid is not None and (not isinstance(sid, str) or not sid)):
+            raise DeliveryTargetError("a session target is {kind, session_id | selector, attach[, wake_policy]}")
         attach = value.get("attach", False)
         if type(attach) is not bool:
             raise DeliveryTargetError("attach must be a boolean")
-        target = {"kind": KIND_SESSION, "session_id": sid, "attach": attach}
+        if selector is not None:
+            from gateway.session_selectors import SelectorError, validate_selector
+            try:
+                target = {"kind": KIND_SESSION, "selector": validate_selector(selector), "attach": attach}
+            except SelectorError as exc:
+                raise DeliveryTargetError(str(exc)) from exc
+        else:
+            target = {"kind": KIND_SESSION, "session_id": sid, "attach": attach}
         if value.get("wake_policy") is not None:
             from hermes_state_wake import WAKE_POLICIES
             if value["wake_policy"] not in WAKE_POLICIES:
@@ -88,11 +108,48 @@ def encode_delivery_target(target: Mapping[str, Any]) -> str:
     return json.dumps(parse_delivery_target(dict(target)), sort_keys=True, separators=(",", ":"))
 
 
-def session_target(session_id: str, *, attach: bool, wake_policy: Optional[str] = None) -> dict:
-    target = {"kind": KIND_SESSION, "session_id": session_id, "attach": bool(attach)}
+def session_target(session_id: Optional[str] = None, *, attach: bool, wake_policy: Optional[str] = None,
+                   selector: Optional[str] = None) -> dict:
+    """A ``kind=session`` target naming one session id, or (``selector=``) a conversation."""
+    target = {"kind": KIND_SESSION, "attach": bool(attach)}
+    target.update({"selector": selector} if selector is not None else {"session_id": session_id})
     if wake_policy is not None:
         target["wake_policy"] = wake_policy
     return parse_delivery_target(target)
+
+
+def target_session_id(db, target: Mapping[str, Any], *, profile: Optional[str] = None) -> Optional[str]:
+    """The session a ``kind=session`` target names right now: its literal id, or what its selector resolves
+    to at this moment (``gateway.session_selectors.resolve_session_selector``); None when nothing holds it."""
+    if target.get("kind") != KIND_SESSION:
+        return None
+    if target.get("session_id"):
+        return str(target["session_id"])
+    from gateway.session_selectors import resolve_session_selector
+    return resolve_session_selector(db, str(target.get("selector") or ""), profile=profile)
+
+
+def bind_target(db, session_id: str, target: Any = None, *, profile: Optional[str] = None,
+                resolved: Optional[str] = None) -> Optional[str]:
+    """The attach primitive: bind opted-in *session_id* (``attach: true``, not a delegate child, whose link is
+    its parent) to the session its target holds now. Returns the bound session id (None: nothing to bind)."""
+    if target is None:
+        row = db._read_one("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        if row is None or _is_delegate_row(row):
+            return None
+        target = resolve_delivery_target(row)
+    elif not isinstance(target, Mapping) or "kind" not in target:
+        return None
+    else:
+        target = parse_delivery_target(dict(target))
+    if target["kind"] != KIND_SESSION or not target.get("attach"):
+        return None
+    current = resolved or target_session_id(db, target, profile=profile)
+    if current is None or current == session_id:
+        return None
+    from hermes_state_session_meta import bind_attached_session
+    bind_attached_session(db, session_id, current)
+    return current
 
 
 def delegate_target(parent_session_id: str) -> dict:
@@ -307,7 +364,10 @@ def wake(db, session_id: str) -> bool:
 
 def _is_delegate_row(row) -> bool:
     from agent.session_directory import _effective_kind
-    return row is not None and _effective_kind(row) == "delegate"
+    try:
+        return row is not None and _effective_kind(row) == "delegate"
+    except (KeyError, IndexError, TypeError):  # a partial row (a producer's projection) names no lineage
+        return False
 
 
 def _fifo_accept(db, row, target) -> bool:
@@ -412,9 +472,14 @@ def dispatch(db, source_row: Any, event: DeliveryEvent, *, request_id: Optional[
                 logger.warning("platform sender %s failed", name, exc_info=True)
         return DeliveryReceipt(KIND_PLATFORM, False, reason="no_platform_sender")
     wake_policy = target.get("wake_policy")
-    target_row = db._read_one("SELECT * FROM sessions WHERE id = ?", (target["session_id"],))
+    resolved = target_session_id(db, target)
+    if resolved is None:
+        logger.info("delivery_target selector %r holds no session now; nothing delivered", target.get("selector"))
+        return DeliveryReceipt(KIND_SESSION, False, None, None, reason="selector_unresolved")
+    declared, target = target, {**target, "session_id": resolved}  # sinks address the session held now
+    target_row = db._read_one("SELECT * FROM sessions WHERE id = ?", (resolved,))
     if target_row is None:
-        return DeliveryReceipt(KIND_SESSION, False, None, target["session_id"], reason="target_missing")
+        return DeliveryReceipt(KIND_SESSION, False, None, resolved, reason="target_missing")
     with _lock:
         sinks = list(_sinks)
     for name, accept, deliver in (*sinks, *_CORE_SINKS):
@@ -428,6 +493,11 @@ def dispatch(db, source_row: Any, event: DeliveryEvent, *, request_id: Optional[
         receipt = deliver(db, target_row, target, event, wake_policy=wake_policy, request_id=request_id)
         if receipt.delivered or receipt.reason != "no_owner":
             receipt.sink = receipt.sink or name
+            if receipt.delivered and _get(source_row, "id") and not _is_delegate_row(source_row):
+                try:
+                    bind_target(db, str(_get(source_row, "id")), declared, resolved=resolved)
+                except Exception:  # health: allow BLE001 -- the delivery stands; the binding is bookkeeping
+                    logger.warning("could not rebind %s to %s", _get(source_row, "id"), resolved, exc_info=True)
             return receipt
     return DeliveryReceipt(KIND_SESSION, False, None, target["session_id"], reason="no_owner")
 
