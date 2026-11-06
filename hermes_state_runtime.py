@@ -208,12 +208,16 @@ def list_session_admissions(db, *, session_id: str, pending_only: bool = True) -
 _ANY_HEAD = object()
 
 
-def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_ANY_HEAD) -> dict | bool | None:
+def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_ANY_HEAD,
+                        _claimed_write=None) -> dict | bool | None:
     """Claim the FIFO head. ``_guard(conn)`` (owner admission gate) raises to refuse inside the
     write transaction, so a drain that began while this waited on the writer still wins.
     ``head`` is the admission id the caller's preclaim checks validated (None: it saw nothing
     queued); if the head is another row by the time this write runs, nothing is claimed and False
-    tells the caller to re-read and validate the row that is now first."""
+    tells the caller to re-read and validate the row that is now first.
+    ``_claimed_write(conn, claimed)`` is the claimer's same-transaction publication (its runner
+    identity): it commits with the queued->started transition or not at all, so no reader can ever
+    see the started claim without it. It must not commit and may run again on SQLite retry."""
     def write(conn):
         _epoch(conn, epoch)
         if _guard is not None:
@@ -250,6 +254,8 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
         # session): a row above it on this conversation was written by this turn, so settlement can
         # tell this turn's own failed-turn boundary from an earlier turn's (#134889 GW-21).
         claimed['transcript_mark'] = conn.execute('SELECT COALESCE(MAX(id), 0) FROM messages').fetchone()[0]
+        if _claimed_write is not None:
+            _claimed_write(conn, claimed)
         return claimed
     return db._execute_write(write)
 
@@ -280,9 +286,11 @@ def settle_session_input(db, *, epoch: int, admission_id: str, generation: int, 
                          'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                          (RESULT_PREFIX + admission_id, encoded))
         conn.execute("UPDATE session_admissions SET status='terminal',outcome=? WHERE admission_id=?", (outcome, admission_id))
-        settle_steer_transfers(conn, epoch=epoch, generation=generation, transfers=_transfers, outcome=outcome)
+        settle_steer_transfers(conn, epoch=epoch, generation=generation, transfers=_transfers, outcome=outcome,
+                               session_id=row['target_session_id'])
         from hermes_state_wake import requeue_unacked_held
-        requeue_unacked_held(conn, epoch=epoch, generation=generation)
+        # Bound to THIS claim: its target session plus (epoch, generation); generations are per session.
+        requeue_unacked_held(conn, session_id=row['target_session_id'], epoch=epoch, generation=generation)
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
         return _row(_admission(conn, admission_id))
     return db._execute_write(write)
@@ -319,11 +327,12 @@ def steer_replayed(row) -> bool:
     return row['status'] == 'terminal' and row['outcome'] in (STEERING, 'steered')
 
 
-def _requeue_transfer(conn, *, admission_id: str, epoch: int, generation: int) -> bool:
+def _requeue_transfer(conn, *, admission_id: str, epoch: int, generation: int, session_id=None) -> bool:
     """A transfer still bound to the claim ``(epoch, generation)`` goes back to its FIFO place (``seq``)."""
+    scope, extra = ("", ()) if session_id is None else (" AND target_session_id=?", (session_id,))
     return conn.execute("UPDATE session_admissions SET status='queued',outcome=NULL,generation=NULL "
                         "WHERE admission_id=? AND status='terminal' AND outcome=? AND owner_epoch=? "
-                        "AND generation=?", (admission_id, STEERING, epoch, generation)).rowcount == 1
+                        "AND generation=?" + scope, (admission_id, STEERING, epoch, generation, *extra)).rowcount == 1
 
 
 def steer_session_input(db, *, epoch: int, admission_id: str, generation: int) -> tuple[dict, bool]:
@@ -348,17 +357,21 @@ def steer_session_input(db, *, epoch: int, admission_id: str, generation: int) -
     return db._execute_write(write)
 
 
-def settle_steer_transfers(conn, *, epoch: int, generation: int, transfers, outcome: str) -> None:
+def settle_steer_transfers(conn, *, epoch: int, generation: int, transfers, outcome: str, session_id=None) -> None:
     """In the receiving claim's terminal write: each admission bound to it settles ``steered`` only if
     its text reached the claim's agent (``transfers[id]``) and the claim completed; a delivered text
-    under any other ending is ``interrupted`` (never replayed); an undelivered one is queued again."""
+    under any other ending is ``interrupted`` (never replayed); an undelivered one is queued again.
+    ``session_id`` (the claim's target) keeps a foreign session's transfer at the same generation out."""
+    scope, extra = ("", ()) if session_id is None else (" AND target_session_id=?", (session_id,))
     for admission_id, delivered in (transfers or {}).items():
         if not delivered:
-            _requeue_transfer(conn, admission_id=admission_id, epoch=epoch, generation=generation)
+            _requeue_transfer(conn, admission_id=admission_id, epoch=epoch, generation=generation,
+                              session_id=session_id)
             continue
         conn.execute("UPDATE session_admissions SET outcome=? WHERE admission_id=? AND status='terminal' "
-                     "AND outcome=? AND owner_epoch=? AND generation=?",
-                     ('steered' if outcome == 'completed' else 'interrupted', admission_id, STEERING, epoch, generation))
+                     "AND outcome=? AND owner_epoch=? AND generation=?" + scope,
+                     ('steered' if outcome == 'completed' else 'interrupted', admission_id, STEERING, epoch,
+                      generation, *extra))
 
 
 def revert_steer_input(db, *, epoch: int, admission_id: str, generation: int) -> bool:

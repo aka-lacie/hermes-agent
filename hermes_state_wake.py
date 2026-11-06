@@ -66,7 +66,11 @@ def is_user_turn(principal_id, payload) -> bool:
 
 def hand_held_to_claim(conn, *, session_id, epoch, generation):
     """Inside the claim's write: every queued held notice of *session_id* becomes a transfer bound to
-    the claim ``(epoch, generation)``, in arrival order. Returns them as admission dicts."""
+    the claim ``(session_id, epoch, generation)``, in arrival order. Returns them as admission dicts.
+
+    Generations are per session, so unrelated sessions routinely share ``(epoch, generation)``: the
+    claim a transfer belongs to is identified by its target session AND that pair, and every later
+    ack/requeue of the transfer filters on all three."""
     rows = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' "
                         "AND wake_policy=? ORDER BY seq", (session_id, WAKE_WITH_NEXT_USER_TURN)).fetchall()
     held = []
@@ -82,11 +86,13 @@ def hand_held_to_claim(conn, *, session_id, epoch, generation):
     return held
 
 
-def ack_held_inputs(db, *, epoch, generation, admission_ids) -> int:
-    """The claim's consumer wrote these held notices into the transcript: they are delivered."""
+def ack_held_inputs(db, *, epoch, generation, admission_ids, session_id=None) -> int:
+    """The claim's consumer wrote these held notices into the transcript: they are delivered. With
+    ``session_id`` (the claim's target) an id that belongs to another session's claim never matches."""
     ids = [str(value) for value in admission_ids or ()]
     if not ids:
         return 0
+    scope, extra = ("", ()) if session_id is None else (" AND target_session_id=?", (str(session_id),))
 
     def write(conn):
         from hermes_state_runtime import _epoch
@@ -95,16 +101,27 @@ def ack_held_inputs(db, *, epoch, generation, admission_ids) -> int:
         for admission_id in ids:
             changed += conn.execute(
                 "UPDATE session_admissions SET outcome=? WHERE admission_id=? AND status='terminal' AND outcome=? "
-                "AND owner_epoch=? AND generation=? AND wake_policy=?",
-                (HELD_DELIVERED, admission_id, _TRANSFER, epoch, generation, WAKE_WITH_NEXT_USER_TURN)).rowcount
+                "AND owner_epoch=? AND generation=? AND wake_policy=?" + scope,
+                (HELD_DELIVERED, admission_id, _TRANSFER, epoch, generation, WAKE_WITH_NEXT_USER_TURN,
+                 *extra)).rowcount
         return changed
     return db._execute_write(write)
 
 
-def requeue_unacked_held(conn, *, epoch, generation) -> int:
+# The settlement's requeue: the target/status equality prefix of ``session_admissions_pending
+# (target_session_id, status, seq)`` bounds it to this session's terminal rows (no table scan).
+_REQUEUE_UNACKED_SQL = (
+    "UPDATE session_admissions SET status='queued',outcome=NULL,generation=NULL WHERE target_session_id=? "
+    "AND status='terminal' AND outcome=? AND owner_epoch=? AND generation=? AND wake_policy=?")
+
+
+def requeue_unacked_held(conn, *, session_id, epoch, generation) -> int:
     """In the claim's settlement: a held notice its consumer never acknowledged goes back to its
-    queued place (its ``seq``) for the next user turn."""
-    return conn.execute(
-        "UPDATE session_admissions SET status='queued',outcome=NULL,generation=NULL WHERE status='terminal' "
-        "AND outcome=? AND owner_epoch=? AND generation=? AND wake_policy=?",
-        (_TRANSFER, epoch, generation, WAKE_WITH_NEXT_USER_TURN)).rowcount
+    queued place (its ``seq``) for the next user turn. Only the settling claim's own transfers: the
+    claim's target *session_id* plus its ``(epoch, generation)`` (another session at the same generation
+    keeps its in-flight notices)."""
+    if not isinstance(session_id, str) or not session_id:
+        from hermes_state_runtime import RuntimeStoreError
+        raise RuntimeStoreError('invalid_params', field='session_id', detail='held requeue needs the claim target')
+    return conn.execute(_REQUEUE_UNACKED_SQL,
+                        (session_id, _TRANSFER, epoch, generation, WAKE_WITH_NEXT_USER_TURN)).rowcount
