@@ -208,7 +208,8 @@ def _chain_runner_and_ctx(followup_return):
     runner._refresh_agent_cache_message_count = AsyncMock()
     topic = _source(chat_id="-1001", thread_id="7", chat_type="supergroup")
     turn_ctx = SimpleNamespace(
-        source=topic, session_id="sid", session_key=TOPIC_SESSION_KEY, run_generation=1,
+        source=topic, session_id="sid", session_key=TOPIC_SESSION_KEY,
+        run_generation=runner._begin_session_run_generation(TOPIC_SESSION_KEY),
         _interrupt_depth=0, history=[], _status_thread_metadata={"thread_id": "7"},
         context_prompt=None, result_holder=[None])
     pending_event = SimpleNamespace(
@@ -236,7 +237,8 @@ async def test_a_chained_queued_turn_carries_its_own_inbound_id():
     runner._refresh_agent_cache_message_count = AsyncMock()
     topic = _source(chat_id="-1001", thread_id="7", chat_type="supergroup")
     turn_ctx = SimpleNamespace(
-        source=topic, session_id="sid", session_key=TOPIC_SESSION_KEY, run_generation=1,
+        source=topic, session_id="sid", session_key=TOPIC_SESSION_KEY,
+        run_generation=runner._begin_session_run_generation(TOPIC_SESSION_KEY),
         _interrupt_depth=0, history=[], _status_thread_metadata={"thread_id": "7"},
         context_prompt=None, result_holder=[None])
     pending_event = SimpleNamespace(

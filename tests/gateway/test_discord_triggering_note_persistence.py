@@ -70,7 +70,8 @@ async def test_queued_followup_persists_authored_text():
     runner._refresh_agent_cache_message_count = AsyncMock()
     source = _discord_source()
     turn_ctx = SimpleNamespace(
-        source=source, session_id="sid", session_key="agent:main:discord:dm:dm1", run_generation=1,
+        source=source, session_id="sid", session_key="agent:main:discord:dm:dm1",
+        run_generation=runner._begin_session_run_generation("agent:main:discord:dm:dm1"),
         _interrupt_depth=0, history=[], _status_thread_metadata=None, context_prompt=None,
         result_holder=[None],
     )

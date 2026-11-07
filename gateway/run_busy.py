@@ -143,6 +143,23 @@ class GatewayBusySessionMixin:
         # else: no adapter — leave the head in place so we don't silently drop it.
         return pending_event
 
+    def _reject_stale_followup(
+        self, session_key: Optional[str], run_generation: Optional[int], adapter: Any, pending_event: Any,
+    ) -> bool:
+        """Stop a displaced turn before it can run tools or persist a follow-up.
+
+        Receipted wakes must return to the FIFO for fresh admission; ticketless human
+        steers belong to the invalidated turn and follow /stop's discard semantics.
+        """
+        if not session_key or run_generation is None or self._is_session_run_current(session_key, run_generation):
+            return False
+        if pending_event is not None and (
+            pending_event.internal or getattr(pending_event, "_admitted_before_drain", False) is True
+        ):
+            self._requeue_event_at_front(session_key, pending_event, adapter)
+        logger.info("Rejecting stale queued follow-up for session %s (generation %s)", session_key, run_generation)
+        return True
+
     def _requeue_at_depth_cap(
         self, session_key: Optional[str], source: SessionSource, pending_event: Optional[MessageEvent],
         pending: Optional[str],
