@@ -42,6 +42,37 @@ def _names(definitions):
     return {td["function"]["name"] for td in definitions}
 
 
+def test_main_resume_does_not_inherit_workers_eager_tool_pin(tmp_path, monkeypatch):
+    from run_agent import AIAgent
+    from tools.mcp_tool_agent import restore_agent_tool_prefix, tool_pin_version
+    from tools.tool_search import BRIDGE_TOOL_NAMES
+
+    home = tmp_path / "profile"
+    work = {"terminal", "process_manage", "read_file", "write_file", "patch", "search_files"}
+    _config(home, False, sorted(work))
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    agents = []
+    kwargs = dict(model="test/model", provider="custom", api_key="test", base_url="http://127.0.0.1:1/v1",
+                  enabled_toolsets=["terminal", "file"], quiet_mode=True, skip_context_files=True, skip_memory=True)
+    with _profile(home), patch("agent.process_bootstrap.OpenAI"):
+        try:
+            worker = AIAgent(platform="cron", **kwargs)
+            agents.append(worker)
+            assert work <= worker.valid_tool_names
+            pin = {"version": tool_pin_version(), "tools": list(worker.tools)}
+            parent = AIAgent(platform="discord", instruction_role="main", **kwargs)
+            agents.append(parent)
+            assert work.isdisjoint(parent.valid_tool_names)
+            restore_agent_tool_prefix(parent, pin)
+            assert work.isdisjoint(parent.valid_tool_names)
+            assert BRIDGE_TOOL_NAMES <= parent.valid_tool_names
+            restore_agent_tool_prefix(worker, pin)
+            assert work <= worker.valid_tool_names
+        finally:
+            for agent in reversed(agents):
+                agent.close()
+
+
 @pytest.mark.parametrize("eager_all", [True, False], ids=["all", "selected"])
 def test_profile_role_and_concurrent_cache_isolation(tmp_path, eager_all):
     import model_tools

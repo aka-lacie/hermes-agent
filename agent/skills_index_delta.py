@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 from agent.message_content import flatten_message_text
+from agent.message_parts import INJECTION, MESSAGE_PARTS, has_parts
 
 logger = logging.getLogger("run_agent")
 
@@ -92,8 +93,12 @@ def _announced(conversation_history: Any) -> _Delta:
     for msg in reversed(conversation_history or []):
         if not isinstance(msg, dict) or msg.get("role") != "user":
             continue
-        sidecar = msg.get("api_content")
-        text = (sidecar if isinstance(sidecar, str) else "") + "\n" + flatten_message_text(msg.get("content"))
+        if has_parts(msg):
+            text = "\n".join(p.get("text", "") for p in msg[MESSAGE_PARTS]
+                             if p.get("type") == INJECTION and p.get("kind") == "turn_note")
+        else:
+            sidecar = msg.get("api_content")
+            text = (sidecar if isinstance(sidecar, str) else "") + "\n" + flatten_message_text(msg.get("content"))
         if _NOTE_PREFIX in text:
             return _parse(text.rsplit(_NOTE_PREFIX, 1)[1])
     return frozenset(), frozenset()

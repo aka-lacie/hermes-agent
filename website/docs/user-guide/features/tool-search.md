@@ -166,6 +166,12 @@ list is unchanged. Names are exact (no toolset names or wildcards); permitted
 MCP/plugin tools can also be selected by name. Remote managed connector tools
 still require discovery through the bridge.
 
+When a session restores its saved tool list onto an active Tool Search surface,
+named deferral still applies for the receiving agent's role. A saved eager worker
+schema does not make that tool eager in the main conversation; worker exceptions
+remain effective for workers. This can remove an old eager schema from the saved
+prefix once, while keeping the tool available through the bridge.
+
 For fully eager workers, set `eager_subagents: true` and include work tools such as `terminal`, `read_file`,
 `write_file`, `patch`, `search_files`, and `web_search` in the parent's `defer`
 list. Keep conversational and orchestration tools out of that list. Delegated

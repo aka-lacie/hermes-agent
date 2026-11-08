@@ -83,3 +83,27 @@ def test_long_lived_agent_is_told_each_skill_change_once(tmp_path, monkeypatch):
     assert "terraform-ops" in _turn(agent, prompt, history)
     rebuilt = "Identity.\n\n" + pb.build_skills_system_prompt()
     assert _turn(agent, rebuilt, history) == "" and _turn(_agent(tmp_path), rebuilt, history) == ""
+
+
+def test_fresh_agent_recognizes_typed_skill_notes_and_later_changes(tmp_path, monkeypatch):
+    from agent import message_parts as mp
+
+    skills = _home(tmp_path, monkeypatch)
+    _write_skill(skills, "docker-ops", "Run containers.")
+    prompt = pb.build_skills_system_prompt()
+    _write_skill(skills, "terraform-ops", "Plan infra.")
+    first = _agent(tmp_path)
+    assert stage_skills_index_note(first, prompt, [])
+    note = consume_skills_index_note(first)
+    row = {"role": "user"}
+    mp.set_parts(row, [mp.human_message("hi"), mp.turn_injection("turn_note", note)])
+    history = [row, {"role": "assistant", "content": "ok"}]
+    assert not stage_skills_index_note(_agent(tmp_path), prompt, history)
+    (skills / "devops" / "terraform-ops" / "SKILL.md").unlink()
+    fresh = _agent(tmp_path)
+    assert stage_skills_index_note(fresh, prompt, history)
+    reset = consume_skills_index_note(fresh)
+    mp.set_parts(row := {"role": "user"}, [mp.human_message("next"), mp.turn_injection("turn_note", reset)])
+    row["api_content"] = note  # retained legacy log must not override the typed reset
+    history.append(row)
+    assert not stage_skills_index_note(_agent(tmp_path), prompt, history)

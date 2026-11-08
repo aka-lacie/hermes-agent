@@ -295,6 +295,25 @@ def _drop_gated_carried_tools(merged: list, carried: set) -> list:
             or _DYNAMIC_SCHEMA_REWRITERS[_def_name(t)](t, available) is not None]
 
 
+def _deferral_permitted_carried_names(agent, names: set) -> set:
+    """A saved direct schema cannot override named deferral for this agent's role.
+
+    Availability flaps still preserve a pin, but the main agent must not inherit a worker's
+    eager exceptions. Fresh definitions already went through this policy at assembly.
+    """
+    from agent.tool_surface_context import agent_tool_context, is_non_main_agent_context
+    from tools.tool_search import BRIDGE_TOOL_NAMES, load_config_readonly
+    if not BRIDGE_TOOL_NAMES <= {_def_name(t) for t in _agent_tool_defs(agent)}:
+        return names  # no deferred invocation surface: preserve an availability-only carry
+    config = load_config_readonly()
+    with agent_tool_context(agent):
+        worker = is_non_main_agent_context()
+    if config.enabled == "off" or (worker and config.eager_subagents):
+        return names
+    eager = config.eager_subagent_tools if worker else frozenset()
+    return names - (config.effective_defer_tools - eager)
+
+
 def _pinned_tool_defs(saved, fresh, keep_bytes=False) -> tuple:
     """(pinned, same_code, definitions) for a tools[] pin, either shape: a pin from the SAME code keeps
     its bytes; otherwise (``hermes update``, a legacy name list) each tool takes this process's
@@ -347,6 +366,7 @@ def restore_agent_tool_prefix(agent, saved) -> bool:
     registered_names = {entry.name for entry in registry.get_all_entries()}
     carried = {_def_name(d) for d in pinned_defs if _def_name(d) not in fresh and _def_name(d) in registered_names}
     carried &= _config_permitted_names(agent) if carried else set()
+    carried = _deferral_permitted_carried_names(agent, carried) if carried else set()
     pinned_here, held = _pin_restore_held(agent, registered_names)
     if pinned_here:  # same conversation: the synthesized bridge keeps its slot, as in _merge_preserving_prefix
         from tools.tool_search_catalog import BRIDGE_TOOL_NAMES
