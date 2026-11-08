@@ -158,8 +158,10 @@ def refresh_agent_mcp_tools(
     snapshot_generation = registry._generation
     from agent.delegation_backends import adopt_built_backend, saved_backend
     built_backend = saved_backend()
-    new_defs = agent_tool_surface(agent, list(
-        get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or []))
+    from agent.tool_surface_context import agent_tool_context
+    with agent_tool_context(agent):
+        new_defs = agent_tool_surface(agent, list(
+            get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or []))
     new_names = {_def_name(t) for t in new_defs}
     # Post-build families re-appended on LOCALS only; live attributes untouched until publish.
     staged_engine_names = _reinject_post_build_tools(agent, new_defs, new_names)

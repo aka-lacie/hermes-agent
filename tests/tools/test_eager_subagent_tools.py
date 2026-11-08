@@ -1,9 +1,10 @@
 """Eager children preserve tool permissions and never change a parent's cached surface."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import copy_context
 from unittest.mock import patch
+from typing import Any
 
 import json
 import hermes_yaml as yaml
@@ -166,6 +167,94 @@ def test_real_delegation_constructs_eager_children_at_both_depths(tmp_path, monk
                         assert called == {"ok": True}
                 assert parent.tools == parent_tools
                 current = child
+        finally:
+            for agent in reversed(agents):
+                agent.close()
+
+
+@pytest.mark.parametrize("eager_all", [True, False], ids=["all", "selected"])
+@pytest.mark.parametrize("worker", ["cron", "webhook", "non_dispatcher", "oneshot", "kanban"])
+def test_worker_markers_and_shared_cache_do_not_leak_into_main(tmp_path, monkeypatch, eager_all, worker):
+    import model_tools
+    from agent.delegation_context import non_dispatcher_owned_context
+    from gateway.session_context import set_session_vars
+    from tools.tool_search import BRIDGE_TOOL_NAMES
+
+    home = tmp_path / "profile"
+    _config(home, eager_all, ["read_file", "kanban_list", "missing_tool"])
+    def definitions():
+        return model_tools.get_tool_definitions(enabled_toolsets=["file", "kanban"],
+                                               disabled_toolsets=["kanban"], quiet_mode=True)
+
+    with _profile(home):
+        parent = definitions()
+        assert "read_file" not in _names(parent)
+        def worker_definitions():
+            set_session_vars(platform=worker if worker in ("cron", "webhook", "kanban") else "cli",
+                             cron_session="1" if worker == "cron" else "")
+            if worker == "oneshot":
+                # Standalone -q marker, deliberately not a delegation context.
+                with monkeypatch.context() as env:
+                    env.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
+                    return definitions()
+            with non_dispatcher_owned_context() if worker == "non_dispatcher" else nullcontext():
+                return definitions()
+
+        # The same profile + toolset + registry generation is shared by both
+        # threads. Only worker/session identity may split the memo entries.
+        if worker == "oneshot":
+            result = copy_context().run(worker_definitions)
+        else:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(copy_context().run, worker_definitions)
+                assert definitions() == parent
+                result = future.result()
+        names = _names(result)
+        assert "read_file" in names
+        assert ("write_file" in names) is eager_all
+        assert "missing_tool" not in names
+        assert not any(name.startswith("kanban_") for name in names)
+        assert (BRIDGE_TOOL_NAMES <= names) is not eager_all
+        assert definitions() == parent
+
+
+@pytest.mark.parametrize("eager_all", [True, False], ids=["all", "selected"])
+def test_real_worker_agents_and_out_of_turn_refresh_keep_their_own_surface(tmp_path, monkeypatch, eager_all):
+    from run_agent import AIAgent
+    from tools.mcp_tool_agent import refresh_agent_mcp_tools
+
+    home = tmp_path / "profile"
+    _config(home, eager_all, ["read_file"])
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    agents = []
+    kwargs: dict[str, Any] = dict(model="test/model", provider="custom", api_key="test",
+                  base_url="http://127.0.0.1:1/v1", quiet_mode=True,
+                  enabled_toolsets=["file"], skip_context_files=True, skip_memory=True)
+    with _profile(home), patch("agent.process_bootstrap.OpenAI"):
+        try:
+            parent = AIAgent(platform="discord", instruction_role="main", **kwargs)
+            agents.append(parent)
+            frozen_parent = list(parent.tools)
+            for platform, role in (("cron", None), ("webhook", "subagent"),
+                                   ("kanban", None), ("cli", "subagent"), ("oneshot", None)):
+                worker = AIAgent(platform=platform, instruction_role=role, **kwargs)
+                agents.append(worker)
+                assert "read_file" in worker.valid_tool_names
+                assert ("write_file" in worker.valid_tool_names) is eager_all
+                # A refresh outside the worker's launch scope must not silently
+                # turn it back into a main agent or poison the parent's memo.
+                refresh_agent_mcp_tools(worker)
+                assert "read_file" in worker.valid_tool_names
+                assert ("write_file" in worker.valid_tool_names) is eager_all
+                refresh_agent_mcp_tools(parent)
+                assert parent.tools == frozen_parent
+            with monkeypatch.context() as env:
+                env.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
+                oneshot = AIAgent(platform="cli", **kwargs)
+                agents.append(oneshot)
+            refresh_agent_mcp_tools(oneshot)
+            assert "read_file" in oneshot.valid_tool_names
+            assert "read_file" not in parent.valid_tool_names
         finally:
             for agent in reversed(agents):
                 agent.close()

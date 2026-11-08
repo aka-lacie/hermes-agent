@@ -52,9 +52,9 @@ class ToolSearchConfig:
     listing_max_tokens: int = 4000  # budget = min(this, threshold_pct% of context)
     # None = curated default; an explicit list replaces it wholesale ([] = defer no core tools).
     defer_tools: Optional[frozenset] = None
-    # Inline the child's permitted local tools; remote connectors still use the bridge.
+    # Inline non-main workers' permitted local tools; remote connectors still use the bridge.
     eager_subagents: bool = False
-    # Per-child exceptions to normal deferral, without making every MCP/plugin tool eager.
+    # Worker exceptions to normal deferral, without making every MCP/plugin tool eager.
     eager_subagent_tools: frozenset[str] = frozenset()
 
     @property
@@ -362,14 +362,14 @@ def assemble_tool_defs(tool_defs: list[dict[str, Any]], *, context_length: Optio
     config = config or load_config()
     incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
                 if name not in BRIDGE_TOOL_NAMES]
-    from agent.delegation_context import is_delegated_child_context
-    is_child = is_delegated_child_context()
-    if config.eager_subagents and is_child:
+    from agent.tool_surface_context import is_non_main_agent_context
+    is_worker = is_non_main_agent_context()
+    if config.eager_subagents and is_worker:
         visible, deferrable = incoming, []
     else:
         visible, deferrable = classify_tools(
             incoming, config.effective_defer_tools,
-            eager_tools=config.eager_subagent_tools if is_child else frozenset())
+            eager_tools=config.eager_subagent_tools if is_worker else frozenset())
     connections_granted = connections_in_scope(incoming)
     if not deferrable:
         if should_activate(config, 0, context_length, connections_granted=connections_granted):

@@ -105,8 +105,8 @@ tiers on the next assembly.
 tools:
   tool_search:
     enabled: auto       # auto (default), on, or off
-    eager_subagents: false  # true: delegated children get permitted local tools eagerly
-    eager_subagent_tools: []  # exact names to keep eager only for delegated children
+    eager_subagents: false  # true: non-main workers get permitted local tools eagerly
+    eager_subagent_tools: []  # exact names to keep eager only for non-main workers
     threshold_pct: 5    # listing budget as a percentage of context
     search_default_limit: 5
     max_search_limit: 25
@@ -130,8 +130,8 @@ shipped curated set; the runtime fallback uses the same value.
 | --- | --- | --- |
 | `enabled` | `auto` | `auto`/`on` activate whenever at least one deferred tool exists; `off` disables entirely (everything stays eager). `auto` is currently an alias of `on` — it is reserved for a future mode that inlines schemas when they fit the context and defers only when they don't. Pin `on` or `off` if you want today's behavior guaranteed across upgrades. |
 | `threshold_pct` | `5` | Listing budget as a percentage of the active model's context length. Range 0–100. |
-| `eager_subagents` | `false` | Give delegated children all their permitted local tool schemas immediately, including MCP and plugin tools. The parent's deferral policy is unchanged. Remote managed connectors still use the bridge because their schemas are discovered remotely. |
-| `eager_subagent_tools` | `[]` | Exact tool names to keep eager for delegated children, overriding normal deferral for those names only. Other tools follow the ordinary policy. Has no additional effect when `eager_subagents: true`; never grants access to unavailable or disabled tools. |
+| `eager_subagents` | `false` | Give non-main workers (delegated children, cron, webhook, Kanban and finite one-shot runs) all their permitted local tool schemas immediately, including MCP and plugin tools. Interactive main-agent deferral is unchanged. Remote managed connectors still use the bridge because their schemas are discovered remotely. |
+| `eager_subagent_tools` | `[]` | Exact tool names to keep eager for non-main workers, overriding normal deferral for those names only. Other tools follow the ordinary policy. Has no additional effect when `eager_subagents: true`; never grants access to unavailable or disabled tools. |
 | `search_default_limit` | `5` | Hits returned per query when the model calls `tool_search` without a `limit`. |
 | `max_search_limit` | `25` | Hard upper bound the model can request via `limit` (per query). Range 1–50. |
 | `listing` | `auto` | Embed a skills-style manifest of every deferred tool (name + first sentence of its description, ≤60 chars, grouped by MCP server) in the `tool_search` bridge description. `auto` includes it when it fits the budget (falling back to names-only, then to the tier-2 server summary); `on`/`off` force either way. |
@@ -160,7 +160,7 @@ tools:
       - search_files
 ```
 
-These are exceptions to the child's normal deferral policy, not a tool allowlist:
+These are exceptions to each non-main worker's normal deferral policy, not a tool allowlist:
 unselected tools keep their usual eager/deferred status. The parent's `defer`
 list is unchanged. Names are exact (no toolset names or wildcards); permitted
 MCP/plugin tools can also be selected by name. Remote managed connector tools
