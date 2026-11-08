@@ -124,6 +124,34 @@ def drained_steer_inputs(agent, steer_text: str) -> list:
         return [(text, origins.pop(text, None)) for text in texts]
 
 
+def drained_steer_messages(agent, steer_text: str) -> list:
+    """Materialize buffered inputs without turning a typed event into human speech.
+
+    Tickets, not text, identify event rows: identical messages from different peers
+    retain their provenance. Adjacent human steers retain the existing grouped shape.
+    """
+    from agent.prompt_builder import steer_user_row
+    with _ic_lock(agent, "_pending_steer_lock"):
+        drained, buffered = vars(agent).get("_steer_last_drain", (None, None))
+        parts = buffered if drained == steer_text and buffered else [(None, steer_text)]
+        events = vars(agent).setdefault("_pending_steer_messages", {})
+        origins = _steer_origins(agent)
+        rows, humans = [], []
+        def flush():
+            if humans:
+                rows.append(steer_user_row("\n".join(text for text, _ in humans), steers=list(humans)))
+                humans.clear()
+        for ticket, text in parts:
+            row = events.pop(ticket, None) if ticket is not None else None
+            if row is not None:
+                flush()
+                rows.append(row)
+            else:
+                humans.append((text, origins.pop(text, None)))
+        flush()
+        return rows
+
+
 def requeue_drained_steer(agent, steer_text: str) -> None:
     """Put drained steer text back (nothing took it). When it is the last drain's text, its parts go back
     with their tickets, so a transfer in it reads unconsumed again."""
@@ -341,6 +369,30 @@ class InterruptControlMixin:
         self._turn_user_intervened = True
         return True
 
+    def steer_message(self, message: dict, *, ticket) -> bool:
+        """Buffer a canonical non-human row at the ordinary, non-interrupting steer boundary.
+
+        The durable admission owns the ticket and must settle/withdraw it when the
+        turn closes. Never let an unread peer row become a ticketless user follow-up.
+        """
+        import copy
+        from agent.message_parts import has_parts
+        if ticket is None or not has_parts(message) or message.get("sender_kind") == "human":
+            raise ValueError("typed steering requires a ticket and a non-human typed message")
+        text = message.get("content")
+        if not isinstance(text, str) or not text.strip():
+            return False
+        # Native app-server turns do not use Hermes' tool-boundary drain.
+        if getattr(self, "api_mode", None) == "codex_app_server":
+            return False
+        with _ic_lock(self, "_pending_steer_lock"):
+            events = vars(self).setdefault("_pending_steer_messages", {})
+            if ticket in events:
+                return True
+            events[ticket] = copy.deepcopy(message)
+            _set_steer_parts(self, _steer_parts(self) + [(ticket, text)])
+        return True
+
     def redirect(self, text: str) -> bool:
         """Redirect the active turn without converting it into a new task: during a model request only that
         request is cancelled (completed messages kept, partial reasoning becomes assistant context, the
@@ -447,6 +499,7 @@ class InterruptControlMixin:
             parts = _steer_parts(self)
             kept = [part for part in parts if part[0] != ticket]
             consumed = _steer_fates(self).pop(ticket, True)
+            vars(self).get("_pending_steer_messages", {}).pop(ticket, None)
             if len(kept) == len(parts):
                 return consumed is False
             _set_steer_parts(self, kept)

@@ -75,23 +75,27 @@ def _store_refusal(exc) -> SessionAdmissionError:
 
 
 def triggering_peer_hop(db, conn, session_id: str) -> int:
-    """The peer hop of the turn *session_id* is running now: the highest ``peer_hop`` of its started claim's
-    events when every input of that claim is a peer message, else 0 (a human, parent or system input resets
-    the chain)."""
+    """The maximum peer hop carried by the running claim or its live transfers.
+
+    An ordinary parent turn starts at zero, but a peer steer must carry its chain
+    forward even inside that turn; otherwise two busy peers evade the hop cap.
+    """
     import json
     from agent import session_directory as directory
     from gateway.delivery_targets import event_events
     hop = 0
     for sid in directory.lineage(db, conn, session_id) or [session_id]:
         for (raw,) in conn.execute("SELECT payload_json FROM session_admissions WHERE target_session_id = ? "
-                                   "AND status = 'started'", (sid,)).fetchall():
+                                   "AND (status = 'started' OR (outcome = 'steering' AND generation IN "
+                                   "(SELECT generation FROM session_admissions WHERE target_session_id = ? "
+                                   "AND status = 'started')))", (sid, sid)).fetchall():
             try:
                 payload = json.loads(raw) if raw else {}
             except (TypeError, ValueError):
                 payload = {}
             events = event_events(payload if isinstance(payload, dict) else {})
             if not events or any(e.get("sender_kind") != "peer" for e in events):
-                return 0
+                continue
             hop = max(hop, *(int(e.get("peer_hop") or 1) for e in events))
     return hop
 
@@ -170,6 +174,17 @@ class SessionsAPI:
                 relation = "sibling" if directory.are_siblings(self.db, conn, caller_session_id, row) else "peer"
                 event_meta.update(sender_id=caller_session_id, sender_title=title, relation=relation)
                 hop = triggering_peer_hop(self.db, conn, caller_session_id) + 1
+        # Hop and sender title describe the first admission, not the caller's later
+        # turn. Durable outbox retries must retain them even after more peer input.
+        if peer and request_id:
+            from hermes_state_runtime import find_session_admission
+            from gateway.delivery_targets import event_from_payload
+            previous = find_session_admission(self.db, principal_id=f"peer:{caller_session_id}",
+                                              session_id=target_session_id, request_id=request_id)
+            prior_event = event_from_payload(previous["payload"]) if previous else None
+            if prior_event:
+                hop = prior_event.get("peer_hop")
+                event_meta["sender_title"] = (prior_event.get("meta") or {}).get("sender_title")
         if hop is not None and hop > PEER_HOP_MAX:
             logger.warning("peer admission %s -> %s refused: peer_hop %d exceeds PEER_HOP_MAX %d",
                            caller_session_id, target_session_id, hop, PEER_HOP_MAX)
@@ -184,7 +199,8 @@ class SessionsAPI:
         except RuntimeStoreError as exc:
             raise _store_refusal(exc) from exc
         out = {"delivered": receipt.delivered, "session_id": target_session_id, "admission_id": receipt.admission_id,
-               "sink": receipt.sink, "status": "queued" if receipt.delivered else "not_delivered"}
+               "sink": receipt.sink, "status": ("steering" if receipt.sink == "session_live_steer" else
+                                                 "queued" if receipt.delivered else "not_delivered")}
         if hop is not None:
             out["peer_hop"] = hop
         if receipt.reason:

@@ -250,6 +250,8 @@ def _turn_outcome(child) -> tuple[str, dict]:
     missed = bool(entry.get("missed_steer"))
     resolved = {key: (False if missed and value is None else True) if value is None else value
                 for key, value in transfers.items()}
+    for ticket in vars(child).pop("_delegate_typed_steer_tickets", set()):
+        resolved[ticket] = not child.withdraw_steer(ticket)
     return outcome, resolved
 
 
@@ -573,6 +575,52 @@ def _live_record(parent, session_id):
         return next(((sid, live) for sid, live in _active_subagents.items()
                      if getattr(live.get("agent"), "_delegate_session_id", None) == session_id
                      and getattr(live.get("agent"), "_delegate_store_path", None) == profile_db), (None, None))
+
+
+def steer_peer_event(db, session_id: str, admission: dict) -> bool:
+    """Transfer an admitted peer event to the exact live claim, never as prompt text.
+
+    Admission/generation fencing prevents duplicate retries. The same registry lock
+    as child completion fences enqueue versus turn teardown; unread tickets requeue
+    on settlement in their original FIFO position.
+    """
+    from gateway.delivery_targets import event_from_payload, event_message
+    from hermes_state_runtime import RuntimeStoreError, revert_steer_input, steer_session_input
+    from tools.delegate_session_store import DelegateSessionStore, runtime_epoch
+    from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
+    event = event_from_payload(admission["payload"])
+    if not event or event["sender_kind"] != "peer" or admission["intent"] != "steer":
+        return False
+    profile_db = str(Path(db.db_path).resolve())
+    with _active_subagents_lock:
+        live = next((r for r in _active_subagents.values()
+                     if r.get("accepting_steer")
+                     and getattr(r.get("agent"), "_delegate_session_id", None) == session_id
+                     and getattr(r.get("agent"), "_delegate_store_path", None) == profile_db), None)
+        if live is None:
+            return False
+        agent = live["agent"]
+        running = DelegateSessionStore(db).running_claim(session_id)
+        if running is None or not callable(getattr(agent, "steer_message", None)):
+            return False
+        epoch = runtime_epoch(db)
+        aid = admission["admission_id"]
+        try:
+            _, fresh = steer_session_input(db, epoch=epoch, admission_id=aid, generation=running["generation"])
+        except RuntimeStoreError:
+            return False
+        if not fresh:
+            return True
+        try:
+            accepted = agent.steer_message(event_message(event), ticket=aid)
+        except Exception:
+            logger.warning("typed peer steer enqueue failed for %s", session_id, exc_info=True)
+            accepted = False
+        if accepted:
+            vars(agent).setdefault("_delegate_typed_steer_tickets", set()).add(aid)
+            return True
+        revert_steer_input(db, epoch=epoch, admission_id=aid, generation=running["generation"])
+        return False
 
 
 def steer(parent, store, record, message):

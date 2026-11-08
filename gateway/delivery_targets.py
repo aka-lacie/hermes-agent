@@ -424,9 +424,9 @@ def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optio
                 request_id: Optional[str] = None, intent: Optional[str] = None) -> DeliveryReceipt:
     """Admit *event* into *session_id*'s FIFO as one queued turn. A batch sibling (same ``fold_key`` and
     sender kind) still queued at the FIFO tail is folded: the waiting row is retired in the same
-    transaction that admits the merged one, so the parent runs ONE turn for the whole batch. ``intent``
-    is the admission's (``queue`` / ``steer``); a steer-intent event is still a queued turn here: a typed
-    event is never handed into a running turn as steer text.
+    transaction that admits the merged one, so the parent runs ONE turn for the whole batch.
+    Peer ``steer`` events transfer to the live claim through canonical typed rows;
+    idle/closing/unsupported runners retain the queued input losslessly.
 
     An exact retry (same principal, target and ``request_id``, same event apart from its generated
     ``sent_at``) returns the original admission instead of conflicting with its own timestamp."""
@@ -475,6 +475,10 @@ def admit_event(db, session_id: str, event: DeliveryEvent, *, wake_policy: Optio
         # The waiting sibling was claimed first: this completion queues alone.
         return admit_event(db, session_id, DeliveryEvent(**{**event.__dict__, "fold_key": None}),
                            wake_policy=wake_policy, request_id=request_id, intent=intent)
+    if intent == "steer" and event.sender_kind == "peer" and wake_policy_value(wake_policy) is None:
+        from tools.delegate_sessions import steer_peer_event
+        if steer_peer_event(db, session_id, row):
+            return DeliveryReceipt(KIND_SESSION, True, "session_live_steer", session_id, row["admission_id"])
     wake(db, session_id)
     return DeliveryReceipt(KIND_SESSION, True, "session_fifo", session_id, row["admission_id"], replaced is not None)
 

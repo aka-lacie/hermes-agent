@@ -372,3 +372,151 @@ def test_a_parent_steer_during_a_silent_turn_runs_as_the_next_turn(state):
     queued = [r for r in list_session_admissions(db, session_id="b") if r["status"] == "queued"]
     assert [r["payload"]["sender_kind"] for r in queued] == ["parent"]  # never handed into the silent turn
     store.release("b", claim["token"])
+
+
+@pytest.fixture
+def live_peers(state, monkeypatch):
+    from agent.interrupt_control import InterruptControlMixin
+    from tools import delegate_tool_registry as registry
+    db, store = state
+    agents, claims = {}, {}
+    for sid in ("a", "b"):
+        child(db, store, sid, title=sid.upper())
+        store.admit("parent", sid, "parent assignment")
+        claims[sid] = store.claim(sid)
+        agent = InterruptControlMixin()
+        vars(agent).update(_pending_steer=None, _delegate_session_id=sid,
+                           _delegate_store_path=str(Path(db.db_path).resolve()),
+                           _delegate_turn_entry={"status": "completed"})
+        agents[sid] = agent
+    monkeypatch.setattr(registry, "_active_subagents", {
+        sid: {"agent": agent, "accepting_steer": True} for sid, agent in agents.items()})
+    yield db, store, agents, claims
+    from tools.delegate_sessions import _turn_outcome
+    for sid, agent in agents.items():
+        outcome, transfers = _turn_outcome(agent)
+        store.release(sid, claims[sid]["token"], outcome=outcome, transfers=transfers)
+
+
+@pytest.mark.parametrize("boundary", ["post_tool", "pre_api"])
+def test_live_peer_steer_is_typed_persistable_and_retry_safe(live_peers, boundary):
+    from agent.sessions_api import SessionsAPI
+    from agent.wire_render import DEFAULT_RENDERER
+    db, store, agents, claims = live_peers
+    api, agent = SessionsAPI(db), agents["b"]
+    receipt = api.admit("a", "b", "same words", intent="steer", request_id="peer-one")
+    assert receipt["status"] == "steering"
+    assert api.admit("a", "b", "same words", intent="steer", request_id="peer-one") == receipt
+    agent.steer("same words", origin={"message_id": "human-1"})
+    api.admit("a", "b", "same words", intent="steer", request_id="peer-two")
+    messages = [{"role": "tool", "content": "unchanged result", "tool_call_id": "t"}]
+    if boundary == "post_tool":
+        from agent.agent_runtime_helpers import apply_pending_steer_to_tool_results
+        apply_pending_steer_to_tool_results(agent, messages, 1)
+    else:
+        from agent.turn_iteration_prep import _inject_steer_after_newest_tool_result
+        _inject_steer_after_newest_tool_result(agent, messages, agent._drain_pending_steer())
+    assert messages[0]["content"] == "unchanged result"
+    assert [m["sender_kind"] for m in messages[1:]] == ["peer", "human", "peer"]
+    assert [m["content"] for m in messages[1:]] == ["same words"] * 3
+    assert messages[2]["_parts"][0]["origin"]["message_id"] == "human-1"
+    peer = messages[1]
+    db.append_message("b", "user", peer["content"], parts=peer["_parts"],
+                      sender_id=peer["sender_id"], sender_kind=peer["sender_kind"], part_kind=peer["part_kind"])
+    replay = db.get_messages_as_conversation("b")[-1]
+    assert replay["content"] == "same words" and replay["_parts"] == peer["_parts"]
+    rendered = DEFAULT_RENDERER.render([replay])[0]["content"]
+    assert rendered.startswith('<peer_message from="a" title="A" relation="sibling">')
+    assert "<steer" not in rendered
+    from tools.delegate_sessions import _turn_outcome
+    _, transfers = _turn_outcome(agent)
+    assert len(transfers) == 2 and all(transfers.values())
+    store.release("b", claims["b"]["token"], transfers=transfers)
+    assert not list_session_admissions(db, session_id="b")
+
+
+@pytest.mark.parametrize("mode", ["closing", "queue", "held", "native"])
+def test_peer_steer_fallback_stays_a_typed_fifo_event(live_peers, mode):
+    from agent.sessions_api import SessionsAPI
+    from gateway.delivery_targets import event_from_payload
+    from tools import delegate_tool_registry as registry
+    db, _store, agents, _ = live_peers
+    if mode == "closing":
+        registry._active_subagents["b"]["accepting_steer"] = False
+    if mode == "native":
+        agents["b"].api_mode = "codex_app_server"
+    receipt = SessionsAPI(db).admit("a", "b", "later", intent="queue" if mode == "queue" else "steer",
+                                  wake_policy="batch_with_next_user_turn" if mode == "held" else None)
+    assert receipt["status"] == "queued_next_turn"
+    queued = [r for r in list_session_admissions(db, session_id="b") if r["status"] == "queued"]
+    assert len(queued) == 1 and event_from_payload(queued[0]["payload"])["sender_kind"] == "peer"
+    assert agents["b"]._drain_pending_steer() is None
+
+
+def test_unread_typed_steer_returns_to_fifo_without_human_followup(live_peers):
+    from agent.sessions_api import SessionsAPI
+    from tools.delegate_sessions import _turn_outcome
+    db, store, agents, claims = live_peers
+    receipt = SessionsAPI(db).admit("a", "b", "do not lose", intent="steer")
+    agent = agents["b"]
+    assert agent._drain_leftover_steer() is None
+    outcome, transfers = _turn_outcome(agent)
+    assert transfers == {receipt["admission_id"]: False}
+    store.release("b", claims["b"]["token"], outcome=outcome, transfers=transfers)
+    pending = list_session_admissions(db, session_id="b")
+    assert len(pending) == 1 and pending[0]["status"] == "queued"
+    assert agent._drain_pending_steer() is None
+
+
+def test_busy_peer_ping_pong_cannot_bypass_hop_cap(live_peers):
+    from agent.sessions_api import SessionsAPI, SessionAdmissionError, PEER_HOP_MAX
+    db, _, _agents, _ = live_peers
+    api = SessionsAPI(db)
+    for hop in range(1, PEER_HOP_MAX + 1):
+        sender, target = ("a", "b") if hop % 2 else ("b", "a")
+        receipt = api.admit(sender, target, f"hop {hop}", intent="steer", request_id=f"retry-hop-{hop}")
+        assert receipt["status"] == "steering" and receipt["peer_hop"] == hop
+    with pytest.raises(SessionAdmissionError) as refused:
+        api.admit("a", "b", "ninth", intent="steer")
+    assert refused.value.code == "peer_hop_limit"
+    # A durable outbox retry after later peer input retains its first hop.
+    replay = api.admit("a", "b", "hop 1", intent="steer", request_id="retry-hop-1")
+    assert replay["peer_hop"] == 1 and replay["status"] == "steering"
+
+
+def test_live_steer_with_real_retained_child_keeps_parent_completion(harness, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from agent.agent_runtime_helpers import apply_pending_steer_to_tool_results
+    from agent.sessions_api import SessionsAPI
+    from run_agent import AIAgent
+    make_parent, db, _, _ = harness
+    parent = make_parent()
+    a, b = _spawn(parent, "Astra"), _spawn(parent, "Sol")
+    entered, finish_tool = threading.Event(), threading.Event()
+    original = AIAgent.run_conversation
+    delivered = []
+    def run(agent, *args, **kwargs):
+        result = original(agent, *args, **kwargs)
+        if agent.session_id == b:
+            entered.set()
+            assert finish_tool.wait(10)
+            messages = [{"role": "tool", "content": "completed normally", "tool_call_id": "t"}]
+            apply_pending_steer_to_tool_results(agent, messages, 1)
+            delivered.extend(messages[1:])
+        return result
+    monkeypatch.setattr(AIAgent, "run_conversation", run)
+    from tools.delegate_sessions import control
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(control, "resume", parent, session_id=b, message="Continue parent's assignment")
+        try:
+            assert entered.wait(10)
+            receipt = SessionsAPI(db).admit(a, b, "peer input", intent="steer")
+            assert receipt["status"] == "steering" and not future.done()
+        finally:
+            finish_tool.set()
+        result = json.loads(future.result(timeout=20))
+    assert result["results"][0]["status"] == "completed"
+    assert len(delivered) == 1 and delivered[0]["sender_kind"] == "peer"
+    assert not list_session_admissions(db, session_id=b)
+    parent.close()

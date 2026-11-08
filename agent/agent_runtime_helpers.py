@@ -21,12 +21,11 @@ from agent.message_sanitization import (
 )
 from agent.message_metadata import (
     TOOL_CALL_UIDS, merge_tool_call_uids, per_occurrence_tool_call_uids, record_absorbed_message)
-from agent.interrupt_control import drained_steer_inputs
 from agent.message_parts import (
     MESSAGE_PARTS, RENDERED, has_parts, join_user_content, merge as merge_parts, parts_mergeable, stands_alone,
     untyped_content)
 from agent.cache_bounds import publish_lru
-from agent.prompt_builder import STEER_DISPLAY_KIND, steer_user_row
+from agent.prompt_builder import STEER_DISPLAY_KIND
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
 from agent.think_scrubber import THINK_TAG_NAMES
 from agent.trajectory import convert_scratchpad_to_think
@@ -3704,24 +3703,10 @@ def _requeue_pending_steer(agent, steer_text: str) -> None:
 
 
 def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
-    """Persist any pending /steer text as a standalone user message.
+    """Append buffered human/typed steering rows after a completed tool batch.
 
-    Called at the end of a tool-call batch, before the next API call.
-
-    The steer is emitted as a NEW ``role:"user"`` message appended after the
-    last tool result (marker text included), so:
-
-    - the model still sees the self-describing out-of-band marker (same text,
-      same provenance semantics);
-    - message-role alternation stays legal — ``assistant(tool_calls) → tool →
-      user`` is the documented "user jumped in mid-run" pattern that
-      ``repair_message_sequence`` deliberately keeps;
-    - the appended dict carries no ``_DB_PERSISTED_MARKER`` yet, so the next
-      ``_flush_messages_to_session_db`` writes it to the session store — the
-      steer text finally becomes part of the durable transcript instead of
-      being smeared onto an already-persisted tool row that append-only
-      persistence never rewrites (replayed histories then diverge from the
-      live request bytes and break the provider prompt cache).
+    Canonical parts retain provenance, persistence sees fresh rows, and only the
+    wire renderer adds framing. Never modify an already-persisted tool result.
     """
     if num_tool_msgs <= 0 or not messages:
         return
@@ -3736,7 +3721,8 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
         # delivers it as a normal next-turn user message (which persists like any other user turn).
         _requeue_pending_steer(agent, steer_text)
         return
-    messages.append(steer_user_row(steer_text, steers=drained_steer_inputs(agent, steer_text)))
+    from agent.interrupt_control import drained_steer_messages
+    messages.extend(drained_steer_messages(agent, steer_text))
     _ra().logger.info(
         "Delivered /steer to agent after tool batch (%d chars) as new user message: %s", len(steer_text),
         steer_text[:120] + ("..." if len(steer_text) > 120 else ""),

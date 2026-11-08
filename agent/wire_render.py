@@ -258,7 +258,8 @@ class WireRenderer:
         kind, text, meta = part.get("kind") or "event", part.get("text") or "", part.get("meta") or {}
         if kind == PEER_MESSAGE_KIND:
             attrs = _attrs((("from", meta.get("sender_id")), ("title", meta.get("sender_title")),
-                            ("relation", meta.get("relation"))))
+                            ("relation", meta.get("relation")), ("summary", meta.get("summary")),
+                            ("room", meta.get("room_id")), ("round", meta.get("round"))))
             return f"<peer_message{attrs}>\n{text}\n</peer_message>"
         attrs = _attrs([("kind", kind), *sorted((k, v) for k, v in meta.items() if k != "kind")])
         return f"<system-reminder{attrs}>\n{text}\n</system-reminder>"
