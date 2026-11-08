@@ -322,6 +322,18 @@ def has_parts(msg: Any) -> bool:
     return isinstance(msg, Mapping) and isinstance(msg.get(MESSAGE_PARTS), list)
 
 
+def legacy_api_content(msg: Mapping[str, Any]) -> Optional[str]:
+    """Replay sidecar for legacy rows only; a typed user's parts own its request content.
+
+    Migrated rows can retain an API log beside their parts. Substituting that log would erase
+    event identity at the render point. Keep it stored, but never use it to render or price a typed row.
+    """
+    if msg.get("role") not in ("user", "assistant") or (msg.get("role") == "user" and has_parts(msg)):
+        return None
+    sidecar = msg.get("api_content")
+    return sidecar if isinstance(sidecar, str) and sidecar else None
+
+
 def is_plain_view(content: Any, parts: Iterable[Mapping[str, Any]]) -> bool:
     """*content* (a string) is the parts' plain view, as written or as ``SessionDB`` loads it: a loaded
     user row's string loses its outer whitespace while its parts keep theirs, so a typed row reloaded

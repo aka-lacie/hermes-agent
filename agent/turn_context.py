@@ -29,7 +29,7 @@ from agent.prompt_refresh import refresh_warm_prompt
 from agent.message_metadata import (
     PERSISTENCE_ONLY_MESSAGE_FIELDS, PRE_LLM_BLOCK_WITHHELD_PROMPT, append_message, stamp_message_timestamp,
 )
-from agent.message_parts import MESSAGE_PARTS, current_turn_inputs, has_parts
+from agent.message_parts import MESSAGE_PARTS, current_turn_inputs, has_parts, legacy_api_content
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_native_anthropic_request_tokens_rough,
@@ -137,11 +137,12 @@ def compose_user_api_content(
 
 
 def substitute_api_content(api_msg: dict[str, Any]) -> Optional[str]:
-    """Pop the ``api_content`` sidecar and substitute it into ``content`` (keeps the
-    prompt-cache prefix byte-stable). Returns the popped sidecar, or ``None``."""
+    """Strip the API log from the request copy; substitute it only for legacy rows.
+    Typed users render from parts. Returns the popped sidecar, or ``None``."""
+    replay = legacy_api_content(api_msg)
     sidecar = api_msg.pop("api_content", None)
-    if isinstance(sidecar, str) and sidecar and api_msg.get("role") in ("user", "assistant"):
-        api_msg["content"] = sidecar
+    if replay is not None:
+        api_msg["content"] = replay
     return sidecar
 
 
@@ -1420,8 +1421,8 @@ def build_api_messages(
     """Build the wire copy of ``messages`` for one API call plus the effective system
     message. Returns ``(api_messages, effective_system)``.
 
-    Prompt-cache invariant: historical user/assistant rows replay their ``api_content``
-    sidecar (the exact bytes sent live) so the prefix stays byte-stable; the current
+    Prompt-cache invariant: typed user rows render from their parts; legacy user/assistant
+    rows replay their ``api_content`` sidecar so the prefix stays byte-stable. The current
     user turn reuses the prologue's stamp (or composes live when a caller bypassed the
     prologue). Ephemeral context (prefetch, ``pre_llm_call`` hooks,
     ``ephemeral_system_prompt``) is added at API time only — ``messages`` stays untouched
@@ -1457,7 +1458,8 @@ def build_api_messages(
         # timestamp) are local bookkeeping: strict OpenAI backends reject unknown keys
         # and only chat-completions strips underscore keys. The token estimator drops
         # the same set, so it never prices bytes the provider never receives.
-        _api_content = api_msg.pop("api_content", None)
+        _api_content = legacy_api_content(api_msg)
+        api_msg.pop("api_content", None)
         for key in PERSISTENCE_ONLY_MESSAGE_FIELDS:
             # ``_parts`` survives to the render point (agent.wire_render, in assemble_api_request),
             # which consumes it; the estimator never prices it.

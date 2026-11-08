@@ -53,7 +53,7 @@ from agent.context_default_record import last_defaulted_context_length
 from agent.redact import redact_sensitive_text
 from agent.turn_context import drop_stale_api_content
 from agent.message_parts import (
-    COMPACTION_EVENT_KIND, HUMAN, MESSAGE_PARTS, PLAIN_TEXT_SEPARATOR, has_parts, is_compaction_event,
+    COMPACTION_EVENT_KIND, HUMAN, MESSAGE_PARTS, PLAIN_TEXT_SEPARATOR, has_parts, is_compaction_event, legacy_api_content,
     system_event_message)
 from tools.todo_tool import TODO_INJECTION_HEADER
 
@@ -1331,8 +1331,7 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
     the full shape; a mismatched size class protects blob-heavy rows as "small" and compaction re-fires.
     ``charge_stale_thinking=False`` skips newest-turn-only thinking keys. Accounting only; never mutates."""
     # Charge the wire substitute, not both it and the clean display content.
-    sidecar = msg.get("api_content")
-    content = sidecar if isinstance(sidecar, str) and sidecar and msg.get("role") in ("user", "assistant") else msg.get("content") or ""
+    content = legacy_api_content(msg) or msg.get("content") or ""
     text_tokens = estimate_tokens_rough(content) if isinstance(content, str) else _content_length_for_budget(content) // _CHARS_PER_TOKEN
     tokens = text_tokens + 10  # +10 for role/key overhead
     tokens += sum(estimate_tokens_rough(str(tc)) for tc in msg.get("tool_calls") or [] if isinstance(tc, dict))

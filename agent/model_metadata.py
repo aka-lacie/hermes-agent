@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import hermes_yaml as yaml
 
 from agent import model_metadata_http
+from agent.message_parts import legacy_api_content
 from agent.model_metadata_cache import _write_context_cache, locked_context_cache
 from agent.context_default_record import mark_context_defaulted, records_context_defaults
 from agent.model_metadata_llamacpp import llamacpp_context
@@ -2513,9 +2514,8 @@ def strip_opaque_replay_items(items: Any) -> Any:
 
 def _wire_message_shadow(msg: dict[str, Any]) -> dict[str, Any]:
     """Shadow of a message holding only what the provider actually receives.
-    * ``api_content`` SUBSTITUTES ``content`` (mirrors ``turn_context.substitute_api_content`` exactly):
-      only a non-empty STRING sidecar on a user/assistant row displaces content; substituting any
-      other shape would UNDERcount — the dangerous direction.
+    * Legacy rows substitute ``api_content`` just as the request builder does; typed users ignore
+      their retained API logs. Other sidecar shapes must not displace content (an UNDERcount).
     * Base64 images become a placeholder; ``_count_image_tokens`` charges them flat.
     * ``reasoning`` never ships as-is (request builds pop it after optionally promoting it into
       ``reasoning_content``); counting both inflated estimates up to +53%.
@@ -2523,8 +2523,7 @@ def _wire_message_shadow(msg: dict[str, Any]) -> dict[str, Any]:
       ciphertext the provider prices by its OWN token count, never by bytes; a native compaction
       checkpoint alone can be 5M chars (#100611). They contribute 0 here: only real usage ever
       prices them, and the usage anchor carries that price forward."""
-    sidecar = msg.get("api_content")
-    sidecar_wins = isinstance(sidecar, str) and bool(sidecar) and msg.get("role") in ("user", "assistant")
+    sidecar_wins = legacy_api_content(msg) is not None
     drop_reasoning_dup = isinstance(_rc := msg.get("reasoning_content"), str) and bool(_rc.strip())
     unpriced = unpriced_replay_fields()
     shadow: dict[str, Any] = {}

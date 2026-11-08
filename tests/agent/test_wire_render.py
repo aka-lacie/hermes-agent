@@ -194,6 +194,46 @@ def test_the_max_iterations_summary_renders_typed_rows(chat_agent):
     assert out[-1]["content"] == '<origin message_id="3"/>\nq' and "_parts" not in out[-1]
 
 
+@pytest.mark.parametrize("summary", [False, True])
+def test_typed_replay_ignores_legacy_sidecar_without_losing_event_identity(chat_agent, summary, caplog):
+    """Migrated rows retain API logs; those logs must not override their typed inputs."""
+    import copy
+    from agent.chat_completion_helpers import _iteration_summary_api_messages
+
+    event = mp.system_event_message("process_complete", "job finished", sender_id="system:process_complete")
+    event["api_content"] = "old flattened event"
+    human = _human("next task", message_id="9")
+    mp.append_parts(human, [mp.turn_injection("memory_context", "retained context")])
+    human["api_content"] = "old flattened human"
+    messages = [event, {"role": "assistant", "content": "seen"}, human,
+                {"role": "assistant", "content": "ready"},
+                {"role": "user", "content": "legacy", "api_content": "legacy compatibility"},
+                {"role": "assistant", "content": "ok"}, _human("continue")]
+    original = copy.deepcopy(messages)
+    out = (_iteration_summary_api_messages(chat_agent, messages) if summary
+           else _wire(chat_agent, messages, len(messages) - 1)["messages"])
+    text = "\n".join(m.get("content", "") for m in out)
+    assert '<system-reminder kind="process_complete">\njob finished\n</system-reminder>' in text
+    assert '<origin message_id="9"/>\nnext task' in text
+    assert '<system-reminder kind="memory_context">\nretained context\n</system-reminder>' in text
+    assert "old flattened" not in text
+    assert "legacy compatibility" in text
+    assert messages == original
+    assert "typed row content diverged" not in caplog.text
+
+
+def test_token_estimate_ignores_typed_rows_legacy_api_log():
+    from agent.context_compressor import _estimate_msg_budget_tokens
+    from agent.model_metadata import estimate_messages_tokens_rough
+
+    message = _human("current text")
+    baseline = estimate_messages_tokens_rough([message])
+    budget = _estimate_msg_budget_tokens(message)
+    message["api_content"] = "historical rendered log " * 1000
+    assert estimate_messages_tokens_rough([message]) == baseline
+    assert _estimate_msg_budget_tokens(message) == budget
+
+
 def test_moa_advisors_read_the_rendered_conversation_and_their_context_is_an_injection():
     from agent.turn_request_assembly import _append_moa_context
 

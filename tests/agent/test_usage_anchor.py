@@ -36,6 +36,20 @@ def _msg(role, content):
     return {"role": role, "content": content}
 
 
+def test_typed_anchor_tracks_parts_instead_of_retained_api_log():
+    from agent import message_parts as mp
+
+    message = mp.system_event_message("process_complete", "finished", sender_id="system:process_complete")
+    message["api_content"] = "old rendered log"
+    messages = [message]
+    anchor = capture_usage_anchor(1000, 0, messages)
+    message["api_content"] = "different log, same request"
+    assert anchored_context_tokens(messages, anchor) == 1000
+    # An injection changes the request without changing the plain content view.
+    mp.append_parts(message, [mp.turn_injection("memory_context", "new context")])
+    assert anchored_context_tokens(messages, anchor) is None
+
+
 def _image_msg():
     # ~40KB of fake base64 — the rough estimator charges a flat 1500
     # tokens per image part regardless of true provider accounting.

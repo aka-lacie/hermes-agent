@@ -21,6 +21,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from agent.message_parts import MESSAGE_PARTS, has_parts
+
 logger = logging.getLogger(__name__)
 
 USAGE_ANCHOR_MODEL_CONFIG_KEY = "_usage_anchor"
@@ -36,6 +38,9 @@ def message_fingerprint(msg: Any) -> Optional[str]:
     if not isinstance(msg, dict):
         return None
     payload = {k: msg.get(k) for k in _FINGERPRINT_KEYS if msg.get(k) is not None}
+    if msg.get("role") == "user" and has_parts(msg):
+        payload.pop("api_content", None)
+        payload[MESSAGE_PARTS] = msg[MESSAGE_PARTS]
     try:
         raw = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):
